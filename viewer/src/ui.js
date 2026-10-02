@@ -23,6 +23,8 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+const DEBUG = new URLSearchParams(location.search).get('debug') === 'true';
+
 const prettySlot = (slot) => slot.replace(/^(boundary|track|special|obstacle|train|prop)_/, '').replaceAll('_', ' ');
 const prettyTheme = (t) => t.replace(/([a-z])([A-Z0-9])/g, '$1 $2');
 
@@ -178,7 +180,7 @@ export function createUI(manifest, actions) {
           ['M', 'Settings menu'],
           ['Tab', 'Hide / show the interface'],
           ['P', 'Screenshot'],
-          ['B', 'Piece browser'],
+          ...(DEBUG ? [['B', 'Piece browser']] : []),
           ['G', 'Screenshot gallery'],
           ['H', 'This help'],
         ].map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]),
@@ -200,8 +202,11 @@ export function createUI(manifest, actions) {
     'div',
     { class: 'toolbar' },
     el('button', { title: 'Settings (M)', onclick: () => actions.openSettings() }, '⚙️ Menu'),
+    el('button', { title: 'Seed, length, map sections and building pieces', onclick: () => actions.openGeneration() }, '🗺 Generation'),
+    el('button', { title: 'Fog, skyline, materials and bend', onclick: () => actions.openRendering() }, '🎨 Rendering'),
     el('button', { title: 'Place trains and obstacles yourself', onclick: () => actions.openStudio() }, '✏️ Studio'),
-    el('button', { title: 'Piece browser (B)', onclick: () => toggleBrowser() }, '🧱 Pieces'),
+    // Piece browser: a debug tool, only with ?debug=true
+    DEBUG ? el('button', { title: 'Piece browser (B)', onclick: () => toggleBrowser() }, '🧱 Pieces') : null,
     el('button', { title: 'Screenshot (P)', onclick: takeShot }, '📷 Shot'),
     el(
       'button',
@@ -221,7 +226,7 @@ export function createUI(manifest, actions) {
   addEventListener('keydown', (e) => {
     if (e.target instanceof HTMLInputElement || e.metaKey || e.ctrlKey) return;
     if (e.code === 'KeyP') takeShot();
-    if (e.code === 'KeyB') toggleBrowser();
+    if (e.code === 'KeyB' && DEBUG) toggleBrowser();
     if (e.code === 'KeyG') {
       gallery.classList.toggle('hidden');
       renderGallery();

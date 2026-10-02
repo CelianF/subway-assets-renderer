@@ -5,7 +5,7 @@ import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts } from './materials.js';
 import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces } from './layout.js';
-import { createSettings } from './settings.js';
+import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
 
@@ -535,6 +535,7 @@ function applyBend() {
 }
 
 function updateVisibility() {
+  // Everything placed is shown; what is placed is decided in the studio
   layers.train.visible = state.trains;
   layers.obstacle.visible = state.obstacles;
   layers.signal.visible = state.signals;
@@ -637,7 +638,7 @@ const trainOptions = () => {
 const shuffle = () => {
   state.seed = Math.floor(Math.random() * 9999) + 1;
   rebuild();
-  settings.refresh();
+  generation.refresh();
 };
 const regen = () => rebuild();
 const catalog = () => studioCatalog(manifest, state.theme, trainTheme());
@@ -648,7 +649,8 @@ const toggles = (obj, entries, onChange = regen) => entries.filter(([, , show = 
 const hasSlot = (slot) => Object.values(manifest.themes[state.theme]).some((c) => c[slot]?.length);
 const isAuto = () => state.obstacleMode !== 'studio';
 
-const settings = createSettings(
+// Generation: its own panel (toolbar button), what the run is made of
+const generation = createSettings(
   document.getElementById('ui'),
   [
     {
@@ -657,19 +659,6 @@ const settings = createSettings(
         {
           title: 'Run',
           controls: [
-            {
-              type: 'select',
-              label: 'Obstacles',
-              obj: state,
-              key: 'obstacleMode',
-              options: () => ({
-                'Auto (random)': 'random',
-                ...(Object.keys(manifest.chunks ?? {}).length ? { "Game's chase chunks": 'chunks' } : {}),
-                'Studio (hand-placed)': 'studio',
-              }),
-              onChange: () => (regen(), settings.refresh()),
-            },
-            { type: 'button', label: '✏️ Open studio', primary: true, action: () => enterStudio() },
             { type: 'slider', label: 'Seed', obj: state, key: 'seed', min: 1, max: 9999, step: 1, lazy: true, onChange: regen },
             { type: 'button', label: '🎲 Shuffle', action: shuffle },
             { type: 'slider', label: 'Sections', obj: state, key: 'sections', min: 1, max: 40, step: 1, lazy: true, onChange: regen },
@@ -697,56 +686,78 @@ const settings = createSettings(
               obj: state.gen.pieces,
               key: piece.key,
               onChange: regen,
-              extra: { label: '👁', title: 'Preview this piece', action: () => (settings.close(), inspectPieces(piece.prefabs, { together: true })) },
+              extra: { label: '👁', title: 'Preview this piece', action: () => (generation.close(), inspectPieces(piece.prefabs, { together: true })) },
             })),
-            { type: 'button', label: 'All pieces', action: () => (Object.keys(state.gen.pieces).forEach((k) => (state.gen.pieces[k] = true)), regen(), settings.refresh()) },
+            { type: 'button', label: 'All pieces', action: () => (Object.keys(state.gen.pieces).forEach((k) => (state.gen.pieces[k] = true)), regen(), generation.refresh()) },
+          ],
+        },
+      ],
+    },
+  ],
+  { title: 'Generation' },
+);
+
+// Rendering: studio-like bar at the bottom, so the scene stays visible while tuning
+const rendering = createWorkbar(
+  document.getElementById('ui'),
+  [
+    {
+      title: 'Atmosphere',
+      columns: [
+        {
+          title: 'Fog',
+          controls: [
+            { type: 'toggle', label: 'Enabled', obj: state, key: 'fog', onChange: applyThemeLook },
+            { type: 'slider', label: 'Distance ×', obj: state, key: 'fogScale', min: 0.25, max: 6, step: 0.05, onChange: applyThemeLook },
+          ],
+        },
+        {
+          title: 'Skyline',
+          controls: [
+            { type: 'toggle', label: 'Enabled', obj: state, key: 'skyline', onChange: applyThemeLook },
+            { type: 'slider', label: 'Opacity', obj: state, key: 'skylineOpacity', min: 0, max: 1, step: 0.01, onChange: applyThemeLook },
+            { type: 'slider', label: 'Distance ×', obj: state, key: 'skylineDistance', min: 0.3, max: 3, step: 0.05, onChange: applyThemeLook },
           ],
         },
       ],
     },
     {
-      tab: 'Layers',
-      groups: [
+      title: 'Bend',
+      columns: [
         {
-          title: 'Show',
-          controls: toggles(state, [
-            ['trains', 'Trains'],
-            ['obstacles', 'Barriers & props'],
-            ['signals', 'Signal lights'],
-          ], updateVisibility),
+          title: 'Horizontal (− left / + right)',
+          controls: [{ type: 'slider', label: 'Degrees', obj: state, key: 'bend', min: -45, max: 45, step: 0.5, onChange: applyBend }],
+        },
+        {
+          title: 'Vertical (+ down)',
+          controls: [{ type: 'slider', label: 'Degrees', obj: state, key: 'bendVertical', min: -30, max: 30, step: 0.5, onChange: applyBend }],
+        },
+        {
+          title: 'Reset',
+          controls: [{ type: 'button', label: 'Straight', action: () => ((state.bend = state.bendVertical = 0), applyBend(), rendering.refresh()) }],
         },
       ],
     },
     {
-      tab: 'Rendering',
-      groups: [
+      title: 'Materials',
+      columns: [
         {
-          title: 'Atmosphere',
-          controls: [
-            { type: 'toggle', label: 'Fog', obj: state, key: 'fog', onChange: applyThemeLook },
-            { type: 'slider', label: 'Fog distance ×', obj: state, key: 'fogScale', min: 0.25, max: 6, step: 0.05, onChange: applyThemeLook },
-            { type: 'toggle', label: 'Skyline', obj: state, key: 'skyline', onChange: applyThemeLook },
-            { type: 'slider', label: 'Skyline opacity', obj: state, key: 'skylineOpacity', min: 0, max: 1, step: 0.01, onChange: applyThemeLook },
-            { type: 'slider', label: 'Skyline distance ×', obj: state, key: 'skylineDistance', min: 0.3, max: 3, step: 0.05, onChange: applyThemeLook },
-          ],
+          title: 'Glass',
+          controls: [{ type: 'slider', label: 'Opacity', obj: state, key: 'glass', min: 0, max: 1, step: 0.01, onChange: (v) => materials.setGlassOpacity(v) }],
         },
         {
-          title: 'Materials',
-          controls: [
-            { type: 'slider', label: 'Glass opacity', obj: state, key: 'glass', min: 0, max: 1, step: 0.01, onChange: (v) => materials.setGlassOpacity(v) },
-            { type: 'slider', label: 'Alternate colors', hint: 'New York', obj: state, key: 'altColors', min: 0, max: 1, step: 0.01, onChange: (v) => (globals.uAltRatio.value = v) },
-          ],
-        },
-        {
-          title: 'Bend',
-          controls: [
-            { type: 'slider', label: 'Bend° (− left / + right)', obj: state, key: 'bend', min: -45, max: 45, step: 0.5, onChange: applyBend },
-            { type: 'slider', label: 'Vertical° (+ down)', obj: state, key: 'bendVertical', min: -30, max: 30, step: 0.5, onChange: applyBend },
-            { type: 'button', label: 'Straight', action: () => ((state.bend = state.bendVertical = 0), applyBend(), settings.refresh()) },
-          ],
+          title: 'Alternate colors (New York)',
+          controls: [{ type: 'slider', label: 'Amount', obj: state, key: 'altColors', min: 0, max: 1, step: 0.01, onChange: (v) => (globals.uAltRatio.value = v) }],
         },
       ],
     },
+  ],
+  { title: '🎨 Rendering' },
+);
+
+const settings = createSettings(
+  document.getElementById('ui'),
+  [
     {
       tab: 'Camera',
       groups: [
@@ -818,6 +829,8 @@ const studio = createStudio({
 
 function enterStudio() {
   settings.close();
+  generation.close();
+  rendering.close();
   if (state.obstacleMode !== 'studio') {
     // Start from the run on screen when nothing was placed yet
     if (!state.studio.length) {
@@ -852,7 +865,9 @@ const ui = createUI(manifest, {
     rebuild();
   },
   screenshot: screenshotBlob,
-  openSettings: () => settings.open(),
+  openSettings: () => (generation.close(), rendering.close(), settings.open()),
+  openGeneration: () => (settings.close(), rendering.close(), generation.open()),
+  openRendering: () => (settings.close(), generation.close(), rendering.toggle()),
   openStudio: () => enterStudio(),
   thumbnail: themeThumbnail,
   saveThumbnail: async (dataUrl) => {
@@ -871,8 +886,9 @@ addEventListener('keydown', (e) => {
     document.body.classList.toggle('ui-hidden');
   } else if (e.code === 'KeyM' && !studio.active) {
     settings.toggle();
-  } else if (e.code === 'Escape' && settings.isOpen()) {
+  } else if (e.code === 'Escape' && (settings.isOpen() || generation.isOpen())) {
     settings.close();
+    generation.close();
   }
 });
 

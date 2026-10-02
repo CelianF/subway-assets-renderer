@@ -122,6 +122,7 @@ export function createSettings(root, schema, { title = 'Settings' } = {}) {
     tabs,
     body,
   );
+  if (schema.length === 1) tabs.classList.add('hidden'); // single page: no tab strip
   const overlay = el('div', { class: 'menu-overlay hidden', onclick: (e) => e.target === overlay && close() }, panel);
   root.append(overlay);
 
@@ -149,4 +150,54 @@ export function createSettings(root, schema, { title = 'Settings' } = {}) {
     refresh,
     isOpen: () => !overlay.classList.contains('hidden'),
   };
+}
+
+/**
+ * Bottom work bar (studio-style) for settings you tune while looking at the scene:
+ * a main bar with one button per group, and the chosen group's controls above it.
+ * Same schema groups as createSettings: [{ title, controls }].
+ * @returns {{ open(), close(), toggle(), refresh(), isOpen() }}
+ */
+export function createWorkbar(root, groups, { title = 'Settings', onClose = null } = {}) {
+  const refreshers = [];
+  let current = 0;
+  // A group is either a flat control list or side-by-side titled columns
+  const pages = groups.map((g) => {
+    const columns = g.columns ?? [{ controls: g.controls }];
+    const page = el('div', { class: 'workbar-controls', style: `grid-template-columns: repeat(${columns.length}, 1fr)` });
+    for (const col of columns) {
+      const colEl = el('div', { class: 'workbar-column' }, col.title ? el('h4', {}, col.title) : null);
+      for (const c of col.controls) colEl.append(buildControl(c, refreshers));
+      page.append(colEl);
+    }
+    return page;
+  });
+  const contextBar = el('div', { class: 'studio-bar workbar-context' });
+  const groupButtons = groups.map((g, i) => el('button', { class: 'tool', onclick: () => show(i) }, g.title));
+  const mainBar = el(
+    'div',
+    { class: 'studio-bar' },
+    el('div', { class: 'studio-row' }, el('strong', {}, title), ...groupButtons, el('span', { class: 'studio-sep' }), el('button', { class: 'primary', onclick: () => close() }, 'Done')),
+  );
+  const bar = el('div', { class: 'studio-palette workbar hidden' }, contextBar, mainBar);
+  root.append(bar);
+
+  function show(i) {
+    current = i;
+    contextBar.replaceChildren(pages[i]);
+    groupButtons.forEach((b, k) => b.classList.toggle('active', k === i));
+  }
+  const refresh = () => refreshers.forEach((r) => r());
+  function open() {
+    refresh();
+    show(current);
+    bar.classList.remove('hidden');
+    document.body.classList.add('workbar-open');
+  }
+  function close() {
+    bar.classList.add('hidden');
+    document.body.classList.remove('workbar-open');
+    onClose?.();
+  }
+  return { open, close, toggle: () => (bar.classList.contains('hidden') ? open() : close()), refresh, isOpen: () => !bar.classList.contains('hidden') };
 }

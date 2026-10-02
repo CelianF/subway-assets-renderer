@@ -3,7 +3,7 @@
 // mounted by the Vite dev server and by server/index.js in production.
 import { spawn } from 'node:child_process';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -171,6 +171,14 @@ async function runJob(job, apkPath, sourceName) {
     job.label = STAGES[s] ?? s;
   };
   try {
+    // An APK/XAPK is a zip: catch HTML/XML error pages saved as .apk (expired download links)
+    const head = Buffer.alloc(4);
+    const fh = await open(apkPath, 'r');
+    await fh.read(head, 0, 4, 0);
+    await fh.close();
+    if (head.toString('latin1', 0, 2) !== 'PK') {
+      throw new Error('This file is not an APK (it looks like a web page or an error message). Download the APK again.');
+    }
     const [cmd, pre] = ripperCommand();
     await run(cmd, [...pre, exportDir, apkPath], (line) => {
       const m = line.match(/^@@stage (\S+)/);
@@ -206,6 +214,7 @@ async function runJob(job, apkPath, sourceName) {
     job.status = 'error';
     job.error = job.error ?? e.message;
     log(String(e.stack ?? e));
+    await rm(dir, { recursive: true, force: true }); // don't leave a ~2 GB half export behind
   }
 }
 

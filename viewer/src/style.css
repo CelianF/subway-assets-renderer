@@ -450,6 +450,8 @@ button.danger {
 
 /* ---------------------------------------------------------------- studio */
 
+body.workbar-open .toolbar,
+body.workbar-open #status,
 body.studio #status,
 body.studio .toolbar,
 body.studio .browser,
@@ -544,4 +546,35 @@ body.studio #view {
   .panel {
     width: calc(100vw - 20px);
   }
+}
+
+.workbar-controls {
+  display: grid;
+  column-gap: 0;
+}
+.workbar-column {
+  padding: 0 16px;
+  border-left: 1px solid var(--panel-border);
+}
+.workbar-column:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+.workbar-column:last-child {
+  padding-right: 0;
+}
+.workbar-column h4 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.workbar-column .ctl-label {
+  white-space: nowrap;
+}
+.workbar-column input[type='range'] {
+  flex: 1;
+  min-width: 60px;
 }

@@ -22,7 +22,7 @@ npm run dev          # http://localhost:5173
 1. **Home page**: drop an `.apk` (APKPure `.zip` and `.xapk` work too). Extraction takes a few minutes. Each map becomes an environment card with Open and Delete.
 2. **Sharing**: *Share* on a card downloads a `.subwaymap` file. Drop it on someone else's home page to install the map, with no APK or extraction needed. A `.subwaymap` is a plain zip of the environment folder plus a `subwaymap.json` header.
 3. **Viewer**: fly around the map. *← Environments* goes back to pick another map.
-   - Drag to look, WASD to move, Space/Shift for up/down, Ctrl to sprint, −/= for fly speed, mouse wheel for field of view. **M** opens the settings menu, **Tab** hides the interface, P takes a screenshot, B opens the piece browser, H shows help.
+   - Drag to look, WASD to move, Space/Shift for up/down, Ctrl to sprint, −/= for fly speed, mouse wheel for field of view. **M** opens the settings menu, **Tab** hides the interface, P takes a screenshot, H shows help (add `?debug=true` to the URL for the piece browser, B).
    - **Settings menu**: generation (seed, sections, which section types, trains, obstacles, decorations and signals to generate, density), layers, rendering (fog, skyline opacity/distance, glass, bend), camera and screenshots.
    - **Studio**: a top view of the run with placement spots. Draw trains from a start cell to an end cell (the longest train that fits is used), drop obstacles, power boxes, pillars and signal lights, or remove them. It can start from the auto-generated run. Placements are saved per map in the browser.
 
