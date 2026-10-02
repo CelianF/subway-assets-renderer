@@ -173,9 +173,11 @@ function removeLowLods(obj, lodHidden = []) {
   const remove = [];
   // A "X_low" next to a "X_high" sibling is a LOD pair even when its LODGroup lives in
   // a nested prefab the export dropped (e.g. train ramps)
+  // Skipped when the LODGroup data already hid the "_high" one (some themes swap the names)
   const lowWithHigh = (o) => {
     const m = o.name.match(/^(.*)_low(_\d+)?$/);
-    return m && o.parent?.children.some((c) => c.name.replace(/_\d+$/, '') === `${m[1]}_high`);
+    if (!m || nodeKey(hidden, `${m[1]}_high`)) return false;
+    return o.parent?.children.some((c) => c.name.replace(/_\d+$/, '') === `${m[1]}_high`);
   };
   obj.traverse((o) => (nodeKey(hidden, o.name) || /_LOD[1-9](_\d+)?$/.test(o.name) || lowWithHigh(o)) && remove.push(o));
   remove.forEach((o) => o.removeFromParent());
