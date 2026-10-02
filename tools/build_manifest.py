@@ -83,6 +83,41 @@ def resolve_theme(guid, guid_index, cache) -> dict:
     return slots
 
 
+def parse_boundaries(path: Path, guid_index) -> dict:
+    """<Theme>_Boundaries.asset: transition pieces placed where a boundary run starts/ends
+    (e.g. tube_start/tube_end around boundary_tube), plus per-boundary track settings."""
+    name = lambda g: guid_index[g].stem if g in guid_index else None
+    transitions, track_infos = [], {}
+    section, current = None, None
+    for line in path.read_text(errors="ignore").splitlines():
+        s = line.strip()
+        if s in ("TrackInfos:", "TransitionInfo:"):
+            section = s[:-1]
+            continue
+        m = GUID_RE.search(s)
+        if section == "TrackInfos":
+            if s.startswith("- BoundaryType:") and m:
+                current = track_infos.setdefault(name(m.group(1)), {})
+            elif current is not None and ":" in s and not s.startswith("-"):
+                k, v = s.split(":", 1)
+                current[k.strip()] = v.strip() == "1"
+        elif section == "TransitionInfo":
+            if s.startswith("- BoundaryType:") and m:
+                current = {"slot": name(m.group(1)), "exceptions": []}
+                transitions.append(current)
+            elif current is None:
+                continue
+            elif s.startswith("AssetType:") and m:
+                current["prefab"] = name(m.group(1))
+            elif s.startswith("Transition:"):
+                current["at"] = "end" if s.split(":")[1].strip() == "1" else "start"
+            elif s.startswith("Probability:"):
+                current["probability"] = float(s.split(":")[1])
+            elif s.startswith("- {fileID") and m:
+                current["exceptions"].append(name(m.group(1)))
+    return {"transitions": [t for t in transitions if t.get("prefab")], "trackInfos": track_infos}
+
+
 TRACK_TYPES = {
     0: "Invisible", 1: "TrackNormal", 2: "TrackShadow", 3: "TrackShadowStart", 4: "TrackShadowEnd",
     5: "TrackShadowStartEnd", 6: "GroundNormal", 7: "GroundShadow", 8: "GroundShadowStart",
@@ -117,6 +152,66 @@ def parse_track_configs(prefab: Path, guid_index) -> dict:
             if not s.startswith(("MeshLOD", "Materials")):
                 current = None
     return configs
+
+
+def parse_randomizers(prefab: Path, guid_index) -> dict:
+    """RandomChildRandomizer components: GameObject name -> activation probability.
+
+    At runtime the game enables one random child of such a node (with that probability)
+    and disables the others; the glb export contains all of them.
+    """
+    text = prefab.read_text(errors="ignore")
+    names = {}
+    for doc in text.split("\n--- "):
+        m = re.match(r"!u!1 &(\d+)", doc)
+        if m:
+            nm = re.search(r"m_Name: (.*)", doc)
+            names[m.group(1)] = nm.group(1).strip() if nm else ""
+    out = {}
+    for doc in text.split("\n--- "):
+        if not doc.startswith("!u!114"):
+            continue
+        script = re.search(r"m_Script: .*guid: (\w+)", doc)
+        if not script or script.group(1) not in guid_index:
+            continue
+        if guid_index[script.group(1)].stem != "RandomChildRandomizer":
+            continue
+        go = re.search(r"m_GameObject: \{fileID: (\d+)", doc)
+        prob = re.search(r"_activationProbability: ([\d.]+)", doc)
+        if go and go.group(1) in names:
+            out[names[go.group(1)]] = float(prob.group(1)) if prob else 1.0
+    return out
+
+
+def parse_lod_groups(prefab: Path) -> list:
+    """Names of GameObjects whose renderers only belong to LOD1+ of a LODGroup.
+
+    The game swaps between high/low models by screen size; the glb export
+    contains every level at once, so the viewer keeps LOD0 only.
+    """
+    docs = prefab.read_text(errors="ignore").split("\n--- ")
+    go_names, owner = {}, {}
+    for doc in docs:
+        m = re.match(r"!u!(\d+) &(\d+)", doc)
+        if not m:
+            continue
+        if m.group(1) == "1":
+            nm = re.search(r"m_Name: (.*)", doc)
+            go_names[m.group(2)] = nm.group(1).strip() if nm else ""
+        else:
+            go = re.search(r"m_GameObject: \{fileID: (\d+)", doc)
+            if go:
+                owner[m.group(2)] = go.group(1)
+    lod0, lower = set(), set()
+    for doc in docs:
+        if not doc.startswith("!u!205 "):
+            continue
+        for level, block in enumerate(re.split(r"\n\s*- screenRelativeHeight:", doc)[1:]):
+            for rid in re.findall(r"renderer: \{fileID: (\d+)", block):
+                name = go_names.get(owner.get(rid, ""), None)
+                if name is not None:
+                    (lod0 if level == 0 else lower).add(name)
+    return sorted(lower - lod0)
 
 
 def slot_category(slot: str) -> str:
@@ -260,13 +355,22 @@ def main():
         themes[path.stem.removesuffix("_Theme")] = resolve_theme(guid, guid_index, theme_cache)
     log(f"Themes: {', '.join(themes)}")
 
+    # Boundary transitions (tube entrances/exits, …) per theme
+    boundaries = {}
+    for theme in themes:
+        path = project / "MonoBehaviour" / f"{theme}_Boundaries.asset"
+        if path.exists():
+            boundaries[theme] = parse_boundaries(path, guid_index)
+    log(f"Transitions: {sum(len(b['transitions']) for b in boundaries.values())} in {len(boundaries)} themes")
+
     # Prefabs referenced by any theme
     out_glb = args.out / "glb"
     out_glb.mkdir(parents=True, exist_ok=True)
     prefabs = {}
     missing, empty = [], []
-    for slots in themes.values():
-        for names in slots.values():
+    transition_prefabs = [[t["prefab"] for t in b["transitions"]] for b in boundaries.values()]
+    for names in [n for slots in themes.values() for n in slots.values()] + transition_prefabs:
+        if True:
             for name in names:
                 if name in prefabs:
                     continue
@@ -280,6 +384,17 @@ def main():
                     empty.append(name)
                 copy_if_newer(src, out_glb / src.name)
                 prefabs[name] = {"glb": f"glb/{src.name}", **stats}
+
+    # Random variant groups (only one child is active in game)
+    for name, info in prefabs.items():
+        prefab_path = project / "GameObject" / f"{name}.prefab"
+        if prefab_path.exists() and info.get("glb"):
+            randomizers = parse_randomizers(prefab_path, guid_index)
+            if randomizers:
+                info["randomizers"] = randomizers
+            lod_hidden = parse_lod_groups(prefab_path)
+            if lod_hidden:
+                info["lodHidden"] = lod_hidden
 
     # Runtime-assigned track meshes (TrackController configurations)
     out_mesh = args.out / "mesh"
@@ -304,7 +419,9 @@ def main():
 
     # Materials used by those prefabs
     used_mats = {m for p in prefabs.values() for m in p.get("materials", [])}
-    mat_files = {p.stem: p for p in (project / "Material").glob("*.mat")}
+    # Materials live both in Material/ and loose at the Assets root; Material/ wins on name clashes
+    mat_files = {p.stem: p for p in project.glob("*.mat")}
+    mat_files.update({p.stem: p for p in (project / "Material").glob("*.mat")})
     materials = {}
     for name in sorted(used_mats):
         if name in mat_files:
@@ -332,6 +449,7 @@ def main():
             }
             for theme, slots in themes.items()
         },
+        "boundaries": boundaries,
         "prefabs": prefabs,
         "materials": materials,
     }
@@ -341,6 +459,8 @@ def main():
     shaders = {}
     for m in materials.values():
         shaders[m["shader"]] = shaders.get(m["shader"], 0) + 1
+    log(f"Randomizer groups: {sum(len(p.get('randomizers', {})) for p in prefabs.values())} in {sum('randomizers' in p for p in prefabs.values())} prefabs")
+    log(f"LOD1+ renderers removed: {sum(len(p.get('lodHidden', [])) for p in prefabs.values())} in {sum('lodHidden' in p for p in prefabs.values())} prefabs")
     log(f"Prefabs: {len(prefabs)} ({len(empty)} without geometry, {len(missing)} missing glb)")
     log(f"Materials: {len(materials)}/{len(used_mats)} resolved; shaders: {shaders}")
     if empty:
