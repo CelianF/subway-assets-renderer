@@ -31,7 +31,7 @@ function pieceLength(prefab) {
 export function generateLayout(
   manifest,
   themeName,
-  { seed = 1, sections = 12, obstacles = true, trains = true, signals = true, trainTheme = null } = {},
+  { seed = 1, sections = 12, obstacles = true, trains = true, signals = true, trainTheme = null, obstacleMode = 'random' } = {},
 ) {
   const theme = manifest.themes[themeName];
   const slots = Object.assign({}, ...Object.values(theme));
@@ -185,7 +185,46 @@ export function generateLayout(
     for (const x of LANES) place('track_track', [x, 0, tz], 'track', { trackType });
   }
 
-  if (obstacles || trains || signals) placeObstacles();
+  if (obstacleMode === 'chunks' && manifest.chunks) placeChunks();
+  else if (obstacles || trains || signals) placeObstacles();
+
+  // The game's chase chunks (ChunkAssetPlacer layouts) laid back to back. Their random
+  // groups keep one option and MirrorRandomizer flips subtrees left/right.
+  function placeChunks() {
+    const names = Object.keys(manifest.chunks);
+    const seen = new Set();
+    let cz = SEGMENT;
+    while (cz < length - SEGMENT) {
+      const chunk = manifest.chunks[pick(rng, names)];
+      if (noTrackRanges.some(([a, b]) => cz < b && cz + chunk.length > a - 30)) {
+        cz += 90;
+        continue;
+      }
+      const choice = new Map(); // group -> chosen option (or null)
+      const mirrored = new Map(); // mirror node -> flip?
+      for (const pl of chunk.placements) {
+        if (pl.group && !choice.has(pl.group)) {
+          const options = [...new Set(chunk.placements.filter((q) => q.group === pl.group).map((q) => q.option))];
+          choice.set(pl.group, rng() < pl.groupProbability ? pick(rng, options) : null);
+        }
+        if (pl.mirror && !mirrored.has(pl.mirror)) mirrored.set(pl.mirror, rng() < pl.mirrorProbability);
+      }
+      for (const pl of chunk.placements) {
+        if (pl.group && choice.get(pl.group) !== pl.option) continue;
+        if (pl.slot.startsWith('special_gate')) continue; // gate walls need a gate section around them
+        let [x, y, pz] = pl.pos;
+        if (pl.mirror && mirrored.get(pl.mirror)) x = 2 * pl.mirrorX - x;
+        const key = `${pl.slot}@${x},${pz + cz}`;
+        if (seen.has(key)) continue; // a chase entity and its themed child share a spot
+        seen.add(key);
+        const layer = pl.slot.startsWith('train_') ? 'train' : 'obstacle';
+        if ((layer === 'train' && !trains) || (layer === 'obstacle' && !obstacles)) continue;
+        // Trains in one lane of a chunk hide together in the cutaway
+        place(pl.slot, [x, y, pz + cz], layer, layer === 'train' ? { group: `chunk${cz}x${x}` } : {});
+      }
+      cz += chunk.length;
+    }
+  }
 
   function placeObstacles() {
     const trainSlots = ['train_static_1', 'train_static_2', 'train_static_3', 'train_static_5', 'train_moving_3', 'train_moving_5'].filter(has);

@@ -6,6 +6,7 @@ import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky } from './materials.js';
 import { generateLayout, mulberry32 } from './layout.js';
+import { createUI } from './ui.js';
 
 const DATA = '/data';
 const params = new URLSearchParams(location.search);
@@ -29,19 +30,23 @@ orbit.enableDamping = true;
 const fly = new FlyControls(camera, canvas);
 
 const CAMERA_PRESETS = {
-  // Roughly the in-game chase camera: behind and above the middle lane
-  game: { pos: [0, 45, -60], target: [0, 15, 80] },
-  overview: { pos: [420, 380, -200], target: [0, 0, 500] },
-  side: { pos: [260, 60, 300], target: [0, 20, 300] },
+  // camConfig_Run: offset (0, 33, -33) from the runner (placed 90 into the run), FOV 68
+  game: { pos: [0, 33, 57], target: [0, 9, 120], fov: 68 },
+  overview: { pos: [420, 380, -200], target: [0, 0, 500], fov: 55 },
+  side: { pos: [260, 60, 300], target: [0, 20, 300], fov: 55 },
 };
 
 function applyCamera(name) {
   const p = CAMERA_PRESETS[name];
   // Side view starts inside the left-hand buildings: cut them away
   state.cutaway = name === 'side';
-  gui.controllersRecursive().forEach((c) => c.updateDisplay());
   camera.position.set(...p.pos);
   camera.lookAt(...p.target);
+  if (p.fov) {
+    state.fov = camera.fov = p.fov;
+    camera.updateProjectionMatrix();
+  }
+  gui.controllersRecursive().forEach((c) => c.updateDisplay());
   orbit.target.set(...p.target);
   if (orbit.enabled) orbit.update();
 }
@@ -61,7 +66,9 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  renderer.getDrawingBufferSize(globals.uResolution.value);
 });
+renderer.getDrawingBufferSize(globals.uResolution.value);
 
 const status = document.getElementById('status');
 
@@ -180,6 +187,8 @@ async function applySignalColor(obj, seed) {
 }
 
 function applyMaterial(mesh, mat) {
+  // Unity's untextured placeholder material: helper geometry never visible in game
+  if (mat.name === 'DefaultMaterial') mesh.visible = false;
   mesh.material = mat;
   mesh.renderOrder = mat.userData.renderQueue ?? 2000;
 }
@@ -227,6 +236,9 @@ const state = {
   fogScale: Number(params.get('fogScale') ?? 1),
   glass: 1,
   skyline: true,
+  obstacleMode: params.get('obstacleMode') ?? 'random',
+  inspect: params.get('prefab')?.split(',') ?? null, // prefab names shown alone, or null for the run
+  altColors: Number(params.get('altColors') ?? 0),
   camera: params.get('cam') ?? 'game',
   controls: 'fly',
   cutaway: false,
@@ -247,10 +259,10 @@ let buildId = 0;
 
 async function rebuild() {
   const id = ++buildId;
-  // ?prefab=Name[,Name…] shows only those pieces, side by side (debug / inspection)
-  const only = params.get('prefab')?.split(',');
+  // Inspection: only the given pieces, side by side along X
+  const only = state.inspect;
   const { items, length } = only
-    ? { items: only.map((prefab, i) => ({ prefab, layer: 'environment', pos: [i * 120, 0, 0], variantSeed: 1 })), length: 0 }
+    ? { items: inspectLayout(only), length: 0 }
     : generateLayout(manifest, state.theme, { ...state, trainTheme: state.trainTheme === 'same' ? null : state.trainTheme });
   applyThemeLook();
   status.textContent = `Loading ${state.theme}…`;
@@ -279,8 +291,47 @@ async function rebuild() {
   updateVisibility();
   applyBend();
   const missing = objs.filter(([, o]) => !o).length;
-  status.textContent = `${state.theme} · seed ${state.seed} · ${items.length} pieces · ${Math.round(length)} units${missing ? ` · ${missing} without geometry` : ''}`;
+  status.textContent = only
+    ? `Inspecting ${only.length} piece${only.length > 1 ? 's' : ''}`
+    : `${state.theme} · seed ${state.seed} · ${items.length} pieces · ${Math.round(length)} units${missing ? ` · ${missing} without geometry` : ''}`;
+  ui?.themeChanged(state.theme);
+  ui?.setInspecting(only);
+  if (only) frameInspection(items);
+  else ui?.themeLoaded(state.theme);
   window.__ready = true;
+}
+
+/** Pieces for inspection, spaced by their width so they don't overlap. */
+function inspectLayout(names) {
+  let x = 0;
+  return names.map((prefab) => {
+    const bb = manifest.prefabs[prefab]?.bbox ?? [[-50, 0, 0], [50, 0, 0]];
+    const pos = [x - bb[0][0], 0, 0];
+    x += bb[1][0] - bb[0][0] + 20;
+    return { prefab, layer: 'environment', pos, variantSeed: state.seed };
+  });
+}
+
+/** Orbit camera around the inspected pieces. */
+function frameInspection(items) {
+  const box = new THREE.Box3();
+  for (const it of items) {
+    const bb = manifest.prefabs[it.prefab]?.bbox;
+    if (!bb) continue;
+    box.expandByPoint(new THREE.Vector3(...bb[0]).add(new THREE.Vector3(...it.pos)));
+    box.expandByPoint(new THREE.Vector3(...bb[1]).add(new THREE.Vector3(...it.pos)));
+  }
+  if (box.isEmpty()) return;
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = box.getSize(new THREE.Vector3()).length() / 2;
+  state.controls = 'orbit';
+  setControlMode('orbit');
+  // Side buildings face the track: look at them from the track side
+  const side = Math.abs(center.x) > 15 ? -Math.sign(center.x) : 1;
+  camera.position.copy(center).add(new THREE.Vector3(0.7 * side, 0.45, -0.7).normalize().multiplyScalar(radius * 2.2));
+  orbit.target.copy(center);
+  orbit.update();
+  gui.controllersRecursive().forEach((c) => c.updateDisplay());
 }
 
 const CUTAWAY_LAYERS = ['environment', 'train', 'obstacle', 'signal'];
@@ -294,14 +345,16 @@ let skylineTheme = null;
 /** Fog, sky and skyline from the theme's ThemeConfig. */
 function applyThemeLook() {
   const cfg = manifest.themeConfigs?.[state.theme] ?? {};
-  setFog(cfg.fog, state.fog, state.fogScale);
+  // No fog/skyline while inspecting: the camera frames pieces from far away
+  setFog(cfg.fog, state.fog && !state.inspect, state.fogScale);
   sky.setColors(cfg.sky);
   if (skylineTheme !== state.theme) {
     skylineTheme = state.theme;
     skylineGroup.clear();
     if (cfg.background) loadSkyline(cfg.background);
   }
-  skylineGroup.visible = state.skyline;
+  skylineGroup.visible = state.skyline && !state.inspect;
+  globals.uAltRatio.value = state.altColors;
 }
 
 /**
@@ -385,6 +438,8 @@ function renderScreenshot() {
   shotCam.updateProjectionMatrix();
 
   sky.visible = !screenshot.transparent;
+  const screenRes = globals.uResolution.value.clone();
+  globals.uResolution.value.set(width, height);
   renderer.setRenderTarget(target);
   renderer.setClearColor(0x000000, screenshot.transparent ? 0 : 1);
   renderer.clear();
@@ -394,6 +449,7 @@ function renderScreenshot() {
   renderer.setRenderTarget(null);
   renderer.setClearColor(0x000000, 1);
   sky.visible = true;
+  globals.uResolution.value.copy(screenRes);
   target.dispose();
 
   // WebGL rows are bottom-up; flip into a 2D canvas
@@ -408,38 +464,51 @@ function renderScreenshot() {
   return out;
 }
 
-/** Saves a screenshot PNG via a download. */
-async function takeScreenshot() {
+/** Screenshot as a PNG blob plus a descriptive file name (the UI downloads and lists it). */
+async function screenshotBlob() {
   const out = renderScreenshot();
-  const { width, height } = out;
   const blob = await new Promise((r) => out.toBlob(r, 'image/png'));
   const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `subway_${state.theme}_seed${state.seed}_${stamp}.png`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  flashStatus(`Saved ${a.download} (${width}×${height})`);
+  const what = state.inspect ? state.inspect[0] : `${state.theme}_seed${state.seed}`;
+  return { blob, name: `subway_${what}_${stamp}.png`, width: out.width, height: out.height };
 }
 
-let statusTimer;
-function flashStatus(msg) {
-  const prev = status.textContent;
-  status.textContent = msg;
-  clearTimeout(statusTimer);
-  statusTimer = setTimeout(() => (status.textContent = prev), 2500);
+/** Small JPEG of the theme from the game camera, for the theme bar. */
+function themeThumbnail() {
+  const saved = { pos: camera.position.clone(), quat: camera.quaternion.clone(), fov: camera.fov, res: screenshot.resolution };
+  const p = CAMERA_PRESETS.game;
+  camera.position.set(...p.pos);
+  camera.lookAt(...p.target);
+  camera.fov = p.fov;
+  camera.updateProjectionMatrix();
+  updateSkyline();
+  RESOLUTIONS.thumb = [320, 180];
+  screenshot.resolution = 'thumb';
+  let url = null;
+  try {
+    url = renderScreenshot().toDataURL('image/jpeg', 0.7);
+  } finally {
+    delete RESOLUTIONS.thumb;
+    screenshot.resolution = saved.res;
+    camera.position.copy(saved.pos);
+    camera.quaternion.copy(saved.quat);
+    camera.fov = saved.fov;
+    camera.updateProjectionMatrix();
+  }
+  return url;
 }
 
 // ---------------------------------------------------------------- UI
 
 const gui = new GUI({ title: 'Environment' });
-gui.add(state, 'theme', Object.keys(manifest.themes)).onChange(rebuild);
+gui.add(state, 'theme', Object.keys(manifest.themes)).onChange(() => ((state.inspect = null), rebuild()));
 gui.add(state, 'seed', 1, 9999, 1).onFinishChange(rebuild);
 gui.add(state, 'sections', 1, 40, 1).onFinishChange(rebuild);
 gui.add({ shuffle: () => ((state.seed = Math.floor(Math.random() * 9999) + 1), gui.controllersRecursive().forEach((c) => c.updateDisplay()), rebuild()) }, 'shuffle');
 gui.add(state, 'trains').onChange(updateVisibility);
 gui.add(state, 'trainTheme', ['same', ...Object.keys(manifest.themes)]).name('trains from').onChange(rebuild);
 gui.add(state, 'obstacles').onChange(updateVisibility);
+gui.add(state, 'obstacleMode', { 'random': 'random', "game's chase chunks": 'chunks' }).name('obstacle layout').onChange(rebuild);
 gui.add(state, 'signals').name('signal lights').onChange(updateVisibility);
 
 const lookFolder = gui.addFolder('Rendering');
@@ -447,6 +516,7 @@ lookFolder.add(state, 'fog').onChange(applyThemeLook);
 lookFolder.add(state, 'fogScale', 0.25, 6, 0.05).name('fog distance ×').onChange(applyThemeLook);
 lookFolder.add(state, 'skyline').onChange(applyThemeLook);
 lookFolder.add(state, 'glass', 0, 1, 0.01).name('glass opacity').onChange((v) => materials.setGlassOpacity(v));
+lookFolder.add(state, 'altColors', 0, 1, 0.01).name('alternate colors (NY)').onChange((v) => (globals.uAltRatio.value = v));
 
 const bendFolder = gui.addFolder('Bend');
 const onBend = applyBend;
@@ -469,11 +539,34 @@ camFolder
 const shotFolder = gui.addFolder('Screenshot');
 shotFolder.add(screenshot, 'resolution', Object.keys(RESOLUTIONS));
 shotFolder.add(screenshot, 'transparent').name('transparent bg');
-shotFolder.add({ take: () => takeScreenshot() }, 'take').name('📷 Save screenshot (P)');
-addEventListener('keydown', (e) => {
-  if (e.code === 'KeyP' && !(e.target instanceof HTMLInputElement)) takeScreenshot();
+shotFolder.add({ take: () => ui.takeShot() }, 'take').name('📷 Save screenshot (P)');
+
+const ui = createUI(manifest, {
+  getState: () => state,
+  setTheme: (theme) => {
+    state.theme = theme;
+    state.inspect = null;
+    gui.controllersRecursive().forEach((c) => c.updateDisplay());
+    rebuild();
+  },
+  inspect: (names) => {
+    state.inspect = names;
+    rebuild();
+  },
+  exitInspect: () => {
+    state.inspect = null;
+    state.controls = 'fly';
+    setControlMode('fly');
+    applyCamera('game');
+    rebuild();
+  },
+  screenshot: screenshotBlob,
+  thumbnail: themeThumbnail,
 });
-if (params.has('shot')) gui.hide();
+if (params.has('shot')) {
+  gui.hide();
+  document.getElementById('ui').classList.add('hidden');
+}
 
 applyCamera(state.camera);
 setControlMode(state.controls);

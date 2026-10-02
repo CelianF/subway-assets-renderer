@@ -42,6 +42,8 @@ export const globals = {
   uFogRange: { value: new THREE.Vector2(428, 600) }, // ThemeConfig FogStart/EndDistance
   uFogOn: { value: 1 },
   uBend: bend,
+  uResolution: { value: new THREE.Vector2(1920, 1080) }, // render target size (screen-space masks)
+  uAltRatio: { value: 0 }, // _AlternateColorRatio (New York "Play2Plant" variant textures)
 };
 
 /** Applies a theme's fog (ThemeConfig); `scale` stretches the distances for free roaming. */
@@ -58,6 +60,19 @@ uniform vec2 uBend;
 uniform float uTime;
 uniform vec4 uMainST;
 uniform vec2 uScroll;
+#ifdef WAVE
+#ifndef USE_COLOR
+attribute vec3 color; // VertexWave: vertex color = sway weight
+#endif
+uniform vec3 uWaveDir;
+uniform vec3 uWavePlane;
+uniform vec3 uWaveParams; // frequency, speed, height
+#endif
+#ifdef LAVA
+uniform sampler2D uDisplaceTex;
+uniform vec2 uDisplaceScroll;
+uniform float uMeshDisplace;
+#endif
 varying vec2 vUv;
 varying float vDepth;
 varying vec3 vNormalV;
@@ -71,7 +86,16 @@ void main() {
 #ifdef SCROLL
   vUv += uScroll * uTime / 20.0; // Unity _Time.x
 #endif
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vec3 p = position;
+#ifdef WAVE
+  vec3 wp = (modelMatrix * vec4(p, 1.0)).xyz;
+  float phase = uTime * uWaveParams.y * 0.1 + dot(wp, uWavePlane) * uWaveParams.x * 0.1;
+  p += uWaveDir * sin(phase) * uWaveParams.z * color.r;
+#endif
+#ifdef LAVA
+  p.y += (texture2D(uDisplaceTex, uv + uDisplaceScroll * uTime / 20.0).r - 0.5) * uMeshDisplace;
+#endif
+  vec4 mv = modelViewMatrix * vec4(p, 1.0);
   float depth = max(-mv.z, 0.0);
   mv.xy += vec2(uBend.x, -uBend.y) * depth * depth;
   vDepth = -mv.z;
@@ -103,6 +127,11 @@ uniform vec4 uRimColor;
 uniform float uRimPower;
 uniform float uRimAmount;
 uniform float uFogMultiplier;
+uniform sampler2D uAltTex;
+uniform sampler2D uAltRef;
+uniform float uAltRatio;
+uniform sampler2D uMaskTex;
+uniform vec2 uResolution;
 varying vec2 vUv;
 varying float vDepth;
 varying vec3 vNormalV;
@@ -114,6 +143,9 @@ ${FOG_GLSL}
 
 void main() {
   vec4 c = texture2D(uMap, vUv);
+#ifdef ALTERNATE
+  c = mix(c, texture2D(uAltTex, vUv), uAltRatio);
+#endif
 #ifdef MASK_TEXTURE
   c = vec4(vec3(c.r), c.r); // channel-packed masks (fountain foam): red = fill
 #endif
@@ -125,7 +157,15 @@ void main() {
 #endif
 #ifdef REFLECTIONS
   vec3 n = normalize(vNormalV);
-  c.rgb += texture2D(uRefTex, n.xy * 0.5 + 0.5).rgb * uRefColor.rgb * uRefColor.a;
+  vec3 refl = texture2D(uRefTex, n.xy * 0.5 + 0.5).rgb;
+#ifdef ALTERNATE
+  refl = mix(refl, texture2D(uAltRef, n.xy * 0.5 + 0.5).rgb, uAltRatio);
+#endif
+  c.rgb += refl * uRefColor.rgb * uRefColor.a;
+#endif
+#ifdef SCREEN_MASK
+  // ScreenMask (rails): a highlight band picked by screen height, added on top
+  c.rgb += texture2D(uMaskTex, vec2(0.5, 1.0 - gl_FragCoord.y / uResolution.y)).rgb;
 #endif
 #ifdef RIM
   float rim = pow(1.0 - clamp(dot(normalize(vNormalV), normalize(vViewDir)), 0.0, 1.0), uRimPower) * uRimAmount;
@@ -163,6 +203,28 @@ void main() {
   vec4 m = texture2D(uMap, vUv);
   if (max(m.r, m.g) < uAlphaKill) discard;
   vec3 c = mix(uMainColor.rgb, uFoamColor.rgb, m.r) + vec3(m.r * 0.6); // foam fill is bright
+  gl_FragColor = vec4(mix(c, uFogColor, fogFactor(vDepth)), 1.0);
+}
+`;
+
+// SYBO/Bend/Specials/NoFloorLava: noise-distorted scrolling lava, channels remapped to colors
+const LAVA_FRAGMENT = /* glsl */ `
+uniform sampler2D uMap;
+uniform sampler2D uDisplaceTex;
+uniform vec2 uDisplaceScroll;
+uniform float uDisplaceStrength;
+uniform vec3 uColorR;
+uniform vec3 uColorG;
+uniform vec3 uColorB;
+uniform float uTime;
+varying vec2 vUv;
+varying float vDepth;
+${FOG_GLSL}
+
+void main() {
+  float d = texture2D(uDisplaceTex, vUv + uDisplaceScroll * uTime / 20.0).r - 0.5;
+  vec3 t = texture2D(uMap, vUv + d * uDisplaceStrength).rgb;
+  vec3 c = t.r * uColorR + t.g * uColorG + t.b * uColorB;
   gl_FragColor = vec4(mix(c, uFogColor, fogFactor(vDepth)), 1.0);
 }
 `;
@@ -250,7 +312,8 @@ export class MaterialLibrary {
     let mat;
     if (!def) mat = this.fromFallback(name, fallback);
     else if (def.shader === 'SYBO/Bend/Specials/Fountain') mat = this.fountain(name, def);
-    else mat = this.combined(name, def); // VertexWave/ScreenMask/NoFloorLava extras not emulated yet
+    else if (def.shader === 'SYBO/Bend/Specials/NoFloorLava') mat = this.lava(name, def);
+    else mat = this.combined(name, def); // incl. Legacy/VertexWave and Common/ScreenMask variants
     this.cache.set(name, mat);
     return mat;
   }
@@ -273,6 +336,12 @@ export class MaterialLibrary {
     const refTex = this.tex(def, '_RefCube');
     if (on('_HasReflections', 'REFLECTIONS_ENABLED') && refTex) defines.REFLECTIONS = '';
     if (/fountain/i.test(main?.url ?? '')) defines.MASK_TEXTURE = '';
+    const altTex = this.tex(def, '_AlternateTex');
+    if (on('_HasAlternateColors', 'ALTERNATE_COLORS_ENABLED') && altTex) defines.ALTERNATE = '';
+    const maskTex = def.shader === 'SYBO/Bend/Common/ScreenMask' ? this.tex(def, '_MaskTex') : null;
+    if (maskTex) defines.SCREEN_MASK = '';
+    const wave = def.shader === 'SYBO/Bend/Legacy/VertexWave';
+    if (wave) defines.WAVE = '';
 
     const tint = color4(c._Color);
     const mat = new THREE.ShaderMaterial({
@@ -294,6 +363,12 @@ export class MaterialLibrary {
         uRimPower: { value: f._RimPower ?? 2.75 },
         uRimAmount: { value: f._RimAmount ?? 1.5 },
         uFogMultiplier: { value: f._FogMultiplier ?? 1 },
+        uAltTex: { value: altTex ?? WHITE },
+        uAltRef: { value: this.tex(def, '_AlternateRef') ?? refTex ?? WHITE },
+        uMaskTex: { value: maskTex ?? WHITE },
+        uWaveDir: { value: new THREE.Vector3(...(c._WaveDirection ?? [0, 0, 0]).slice(0, 3)) },
+        uWavePlane: { value: new THREE.Vector3(...(c._WavePlaneNormal ?? [0, 0, 0]).slice(0, 3)) },
+        uWaveParams: { value: new THREE.Vector3(f._Frequency ?? 1, f._Speed ?? 1, f._WaveHeight ?? 0) },
       },
     });
     this.applyRenderState(mat, name, def);
@@ -321,6 +396,34 @@ export class MaterialLibrary {
         uMainColor: { value: color4(c._MainColor) },
         uFoamColor: { value: color4(c._FoamColor) },
         uAlphaKill: { value: def.floats._AlphaKillValue ?? 0.5 },
+      },
+    });
+    this.applyRenderState(mat, name, def);
+    return mat;
+  }
+
+  lava(name, def) {
+    const f = def.floats;
+    const c = def.colors;
+    const main = def.textures._MainTex;
+    const rgb = (k) => new THREE.Vector3(...(c[k] ?? [1, 1, 1]).slice(0, 3));
+    const mat = new THREE.ShaderMaterial({
+      name,
+      defines: { SCROLL: '', LAVA: '' },
+      vertexShader: COMBINED_VERTEX,
+      fragmentShader: LAVA_FRAGMENT,
+      uniforms: {
+        ...globals,
+        uMap: { value: this.tex(def, '_MainTex') ?? WHITE },
+        uMainST: { value: new THREE.Vector4(...(main?.scale ?? [1, 1]), ...(main?.offset ?? [0, 0])) },
+        uScroll: { value: new THREE.Vector2(c._TextureScrollSpeed?.[0] ?? 0, c._TextureScrollSpeed?.[1] ?? 0) },
+        uDisplaceTex: { value: this.tex(def, '_DisplaceTex') ?? WHITE },
+        uDisplaceScroll: { value: new THREE.Vector2(c._DisplaceScrollSpeed?.[0] ?? 0, c._DisplaceScrollSpeed?.[1] ?? 0) },
+        uDisplaceStrength: { value: f._DisplaceStrength ?? 0.1 },
+        uMeshDisplace: { value: f._MeshDisplaceStrength ?? 0 },
+        uColorR: { value: rgb('_ColorR') },
+        uColorG: { value: rgb('_ColorG') },
+        uColorB: { value: rgb('_ColorB') },
       },
     });
     this.applyRenderState(mat, name, def);
@@ -373,6 +476,9 @@ export class MaterialLibrary {
         uRimPower: { value: 1 },
         uRimAmount: { value: 0 },
         uFogMultiplier: { value: 1 },
+        uAltTex: { value: WHITE },
+        uAltRef: { value: WHITE },
+        uMaskTex: { value: WHITE },
       },
     });
   }

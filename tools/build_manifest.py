@@ -149,6 +149,91 @@ def parse_theme_config(path: Path, guid_index) -> dict:
     return out
 
 
+# Chase-mode asset types -> the regular theme slot that looks the same
+CHUNK_SLOT_ALIASES = {
+    "ct_moving_obstacle_jump": "obstacle_barrier_jump",
+    "ct_moving_obstacle_standard": "obstacle_barrier_standard",
+    "ct_moving_obstacle_roll": "obstacle_barrier_roll",
+    "ct_moving_obstacle_full": "obstacle_barrier_full",
+    "ct_moving_obstacle_train_platform": "obstacle_train_platform",
+    "ct_vanish_obstacles_train": "train_static_1",
+    "ct_vanish_obstacles_train_3": "train_static_3",
+    "ct_vanish_obstacles_train_5": "train_static_5",
+    "ct_vanish_obstacles_moving_train_3": "train_moving_3",
+    "ct_vanish_obstacles_moving_train_5": "train_moving_5",
+    "ct_vanish_obstacles_full": "obstacle_barrier_full",
+    "ct_vanish_obstacles_standard": "obstacle_barrier_standard",
+    "ct_vanish_obstacles_train_platform": "obstacle_train_platform",
+}
+
+
+def parse_chunk(prefab: Path, guid_index) -> dict:
+    """Chase chunk prefab: ChunkAssetPlacer components (slot + position) with the
+    RandomChildRandomizer / MirrorRandomizer structure above them, and its length."""
+    docs = prefab.read_text(errors="ignore").split("\n--- ")
+    transforms, go_transform, scripts_on_go = {}, {}, {}
+    placers = []
+    for doc in docs:
+        m = re.match(r"!u!(\d+) &(\d+)", doc)
+        if not m:
+            continue
+        kind, fid = m.groups()
+        go = re.search(r"m_GameObject: \{fileID: (\d+)", doc)
+        if kind == "4":
+            pos = re.search(r"m_LocalPosition: \{x: ([-\d.e]+), y: ([-\d.e]+), z: ([-\d.e]+)\}", doc)
+            father = re.search(r"m_Father: \{fileID: (\d+)", doc)
+            transforms[fid] = ([float(pos.group(i)) for i in (1, 2, 3)], father.group(1) if father else "0")
+            if go:
+                go_transform[go.group(1)] = fid
+        elif kind == "114" and go:
+            script = re.search(r"m_Script: .*guid: (\w+)", doc)
+            name = guid_index[script.group(1)].stem if script and script.group(1) in guid_index else ""
+            scripts_on_go.setdefault(go.group(1), {})[name] = doc
+            asset = re.search(r"_assetType: \{fileID: \d+, guid: (\w+)", doc)
+            if name == "ChunkAssetPlacer" and asset and asset.group(1) in guid_index:
+                placers.append((go.group(1), guid_index[asset.group(1)].stem))
+    owner = {tid: go for go, tid in go_transform.items()}
+
+    def world(tid):
+        x = [0.0, 0.0, 0.0]
+        while tid in transforms:
+            p, tid = transforms[tid][0], transforms[tid][1]
+            x = [x[i] + p[i] for i in range(3)]
+        return x
+
+    def ancestors(tid):
+        chain = []
+        while tid in transforms:
+            chain.append(tid)
+            tid = transforms[tid][1]
+        return chain
+
+    placements = []
+    for go, slot in placers:
+        slot = CHUNK_SLOT_ALIASES.get(slot, slot)
+        if slot.startswith(("track_", "boundary_")):
+            continue  # rails/boundaries come from the run generator
+        tid = go_transform.get(go)
+        x, y, z = world(tid)
+        entry = {"slot": slot, "pos": [-x, y, z]}  # Unity -> glTF: mirror X
+        chain = ancestors(tid)
+        for i, t in enumerate(chain):
+            scripts = scripts_on_go.get(owner.get(t), {})
+            if "RandomChildRandomizer" in scripts and i > 0 and "group" not in entry:
+                prob = re.search(r"_activationProbability: ([\d.]+)", scripts["RandomChildRandomizer"])
+                entry["group"] = t
+                entry["option"] = chain[i - 1]
+                entry["groupProbability"] = float(prob.group(1)) if prob else 1.0
+            if "MirrorRandomizer" in scripts and "mirror" not in entry:
+                prob = re.search(r"_mirrorProbability: ([\d.]+)", scripts["MirrorRandomizer"])
+                entry["mirror"] = t
+                entry["mirrorX"] = -world(t)[0]
+                entry["mirrorProbability"] = float(prob.group(1)) if prob else 0.5
+        placements.append(entry)
+    exit_z = re.search(r"ExitAnchorOffset:\s*\n\s*x: [-\d.]+\s*\n\s*y: [-\d.]+\s*\n\s*z: ([-\d.]+)", "\n--- ".join(docs))
+    return {"length": float(exit_z.group(1)) * 11.25 if exit_z else 540.0, "placements": placements}
+
+
 # Prefabs the viewer needs beyond theme slots
 EXTRA_PREFABS = ["_Common_LightSignal_Light_Green", "_Common_LightSignal_Light_Red"]
 
@@ -398,6 +483,13 @@ def main():
             boundaries[theme] = parse_boundaries(path, guid_index)
     log(f"Transitions: {sum(len(b['transitions']) for b in boundaries.values())} in {len(boundaries)} themes")
 
+    chunks = {}
+    for path in sorted((project / "GameObject").glob("Chase_Chunk_*.prefab")):
+        chunk = parse_chunk(path, guid_index)
+        if chunk["placements"]:
+            chunks[path.stem.removeprefix("Chase_Chunk_")] = chunk
+    log(f"Chunks: {len(chunks)} ({sum(len(c['placements']) for c in chunks.values())} placements)")
+
     theme_configs = {}
     for theme in themes:
         path = project / f"{theme}_Config.asset"
@@ -495,6 +587,7 @@ def main():
         },
         "boundaries": boundaries,
         "themeConfigs": theme_configs,
+        "chunks": chunks,
         "prefabs": prefabs,
         "materials": materials,
     }
