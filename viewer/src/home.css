@@ -53,8 +53,18 @@ button {
   padding: 6px 14px;
   cursor: pointer;
 }
-button:hover {
+button:hover,
+a.button:hover {
   background: rgba(255, 255, 255, 0.14);
+}
+a.button {
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 14px;
+  text-decoration: none;
 }
 button.primary {
   background: var(--accent);

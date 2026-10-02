@@ -42,6 +42,7 @@ async function loadEnvs() {
             'div',
             { class: 'env-actions' },
             el('button', { class: 'primary', onclick: open }, 'Open'),
+            el('a', { class: 'button', href: `/api/envs/${encodeURIComponent(env.id)}/export`, download: '', title: 'Download a .subwaymap file to share this map' }, 'Share'),
             el(
               'button',
               {
@@ -70,6 +71,35 @@ function showJob(label, fraction, log = '') {
   $('job-bar').style.width = `${Math.round((fraction ?? 0) * 100)}%`;
   $('job-log').textContent = log;
 }
+
+/** Installs a shared .subwaymap package. */
+async function installPackage(file) {
+  $('drop').classList.add('busy');
+  $('job').classList.remove('failed');
+  try {
+    const env = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/import?name=${encodeURIComponent(file.name)}`);
+      xhr.upload.onprogress = (e) => e.lengthComputable && showJob(`Installing ${file.name}`, e.loaded / e.total);
+      xhr.onload = () => {
+        const body = JSON.parse(xhr.responseText || '{}');
+        xhr.status < 300 ? resolve(body) : reject(new Error(body.error ?? xhr.statusText));
+      };
+      xhr.onerror = () => reject(new Error('Upload failed'));
+      xhr.send(file);
+    });
+    showJob(`Installed ${prettyTheme(env.theme)} (v${env.gameVersion})`, 1);
+  } catch (e) {
+    showJob(`Install failed: ${e.message}`, null);
+    $('job').classList.add('failed');
+  } finally {
+    $('drop').classList.remove('busy');
+    loadEnvs();
+  }
+}
+
+/** Routes a dropped/chosen file: .subwaymap installs, anything else extracts. */
+const handleFile = (file) => (/\.subwaymap$/i.test(file.name) ? installPackage(file) : upload(file));
 
 async function upload(file) {
   $('drop').classList.add('busy');
@@ -123,14 +153,14 @@ async function followJob(jobId) {
 
 const drop = $('drop');
 drop.addEventListener('click', () => !drop.classList.contains('busy') && $('file').click());
-$('file').addEventListener('change', (e) => e.target.files[0] && upload(e.target.files[0]));
+$('file').addEventListener('change', (e) => e.target.files[0] && handleFile(e.target.files[0]));
 drop.addEventListener('dragover', (e) => (e.preventDefault(), drop.classList.add('over')));
 drop.addEventListener('dragleave', () => drop.classList.remove('over'));
 drop.addEventListener('drop', (e) => {
   e.preventDefault();
   drop.classList.remove('over');
   const file = e.dataTransfer.files[0];
-  if (file && !drop.classList.contains('busy')) upload(file);
+  if (file && !drop.classList.contains('busy')) handleFile(file);
 });
 
 loadEnvs();

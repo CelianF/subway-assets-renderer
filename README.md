@@ -20,7 +20,8 @@ npm run dev          # http://localhost:5173
 ## Using it
 
 1. **Home page**: drop an `.apk` (APKPure `.zip` and `.xapk` work too). Extraction takes a few minutes. Each map becomes an environment card with Open and Delete.
-2. **Viewer**: fly around the map. *← Environments* goes back to pick another map.
+2. **Sharing**: *Share* on a card downloads a `.subwaymap` file. Drop it on someone else's home page to install the map, with no APK or extraction needed. A `.subwaymap` is a plain zip of the environment folder plus a `subwaymap.json` header.
+3. **Viewer**: fly around the map. *← Environments* goes back to pick another map.
    - Drag to look, WASD to move, Space/Shift for up/down, P for screenshots, B for the piece browser, H for help.
    - The settings panel controls the layout (seed, sections, obstacle layout), the layers, trains from another environment, fog, bend and camera.
 

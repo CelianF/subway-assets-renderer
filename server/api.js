@@ -7,6 +7,7 @@ import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/p
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readZip, writeZip } from './zip.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORKSPACE = process.env.SUBWAY_WORKSPACE ? path.resolve(process.env.SUBWAY_WORKSPACE) : path.join(ROOT, 'workspace');
@@ -73,6 +74,76 @@ async function listEnvs() {
     }
   }
   return out.sort((a, b) => a.theme.localeCompare(b.theme) || String(b.gameVersion).localeCompare(String(a.gameVersion)));
+}
+
+// ---------------------------------------------------------------- .subwaymap packages
+// A .subwaymap is a zip of one environment folder plus a subwaymap.json header:
+//   subwaymap.json  { format, id, theme, gameVersion, createdAt }
+//   env.json, manifest.json, thumbnail.jpg?, glb/…, mesh/…, tex/…
+
+const SUBWAYMAP_FORMAT = 1;
+const MAX_PACKAGE = 512 * 1024 * 1024;
+
+async function listFiles(dir, base = dir) {
+  const out = [];
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...(await listFiles(full, base)));
+    else out.push(path.relative(base, full).split(path.sep).join('/'));
+  }
+  return out;
+}
+
+async function exportEnv(id) {
+  const dir = path.join(ENVS, slug(id));
+  const env = JSON.parse(await readFile(path.join(dir, 'env.json'), 'utf8'));
+  const header = { format: SUBWAYMAP_FORMAT, id: env.id, theme: env.theme, gameVersion: env.gameVersion, createdAt: env.createdAt };
+  const entries = [{ name: 'subwaymap.json', data: Buffer.from(JSON.stringify(header, null, 1)) }];
+  for (const rel of await listFiles(dir)) entries.push({ name: rel, data: await readFile(path.join(dir, rel)) });
+  return { env, zip: writeZip(entries) };
+}
+
+async function importEnv(buf, sourceName) {
+  const entries = readZip(buf);
+  const headerEntry = entries.find((e) => e.name === 'subwaymap.json');
+  if (!headerEntry) throw new Error('Not a .subwaymap package (subwaymap.json missing)');
+  const header = JSON.parse(headerEntry.data.toString('utf8'));
+  if (header.format > SUBWAYMAP_FORMAT) throw new Error('This .subwaymap was made by a newer version of the viewer');
+  if (!entries.some((e) => e.name === 'manifest.json')) throw new Error('Package has no manifest.json');
+  const id = slug(header.id ?? `${header.theme}_${header.gameVersion}`);
+  const staging = path.join(JOBS, `import-${randomUUID()}`);
+  try {
+    return await installPackage(entries, header, id, staging, sourceName);
+  } catch (e) {
+    await rm(staging, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+async function installPackage(entries, header, id, staging, sourceName) {
+  for (const { name, data } of entries) {
+    if (name === 'subwaymap.json') continue;
+    const target = path.resolve(staging, name);
+    if (!target.startsWith(staging + path.sep)) throw new Error(`Unsafe path in package: ${name}`);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, data);
+  }
+  const env = {
+    thumbnail: entries.some((e) => e.name === 'thumbnail.jpg'),
+    ...JSON.parse(entries.find((e) => e.name === 'env.json')?.data.toString('utf8') ?? '{}'),
+    id,
+    theme: header.theme,
+    gameVersion: header.gameVersion,
+    importedFrom: sourceName,
+  };
+  env.source ??= sourceName;
+  env.createdAt ??= new Date().toISOString();
+  await writeFile(path.join(staging, 'env.json'), JSON.stringify(env, null, 1));
+  await mkdir(ENVS, { recursive: true });
+  const dest = path.join(ENVS, id);
+  await rm(dest, { recursive: true, force: true }); // same map + version: replace
+  await rename(staging, dest);
+  return env;
 }
 
 // ---------------------------------------------------------------- extraction job
@@ -185,6 +256,26 @@ export async function handle(req, res) {
       if (!existsSync(dir)) return sendJson(res, 404, { error: 'Not found' }), true;
       await rm(dir, { recursive: true, force: true });
       sendJson(res, 200, { ok: true });
+      return true;
+    }
+    // GET /api/envs/:id/export  -> <Theme>_<version>.subwaymap
+    if (parts[1] === 'envs' && parts[3] === 'export' && req.method === 'GET') {
+      if (!existsSync(path.join(ENVS, slug(parts[2]), 'env.json'))) return sendJson(res, 404, { error: 'Not found' }), true;
+      const { env, zip } = await exportEnv(parts[2]);
+      res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': `attachment; filename="${slug(`${env.theme}_${env.gameVersion}`)}.subwaymap"`,
+        'Content-Length': zip.length,
+      });
+      res.end(zip);
+      return true;
+    }
+    // POST /api/import?name=<file>   (.subwaymap body)
+    if (parts[1] === 'import' && req.method === 'POST') {
+      const name = path.basename(url.searchParams.get('name') ?? 'map.subwaymap');
+      await mkdir(JOBS, { recursive: true });
+      const env = await importEnv(await readBody(req, MAX_PACKAGE), name);
+      sendJson(res, 200, env);
       return true;
     }
     // PUT /api/envs/:id/thumbnail  (image/jpeg body)
