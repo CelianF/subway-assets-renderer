@@ -135,7 +135,7 @@ async function followJob(jobId) {
       const step = Math.max(0, STAGE_ORDER.indexOf(job.stage));
       showJob(job.label ?? job.stage, 0.1 + (0.9 * step) / (STAGE_ORDER.length - 1), job.log.join('\n'));
       if (job.status === 'done') {
-        showJob(`Done: ${job.envs.length} environment${job.envs.length === 1 ? '' : 's'} extracted`, 1, '');
+        showJob(`Done: ${job.envs.length} environment${job.envs.length === 1 ? '' : 's'} extracted`, 1, job.warning ? `Note: ${job.warning}` : '');
         break;
       }
       if (job.status === 'error') {

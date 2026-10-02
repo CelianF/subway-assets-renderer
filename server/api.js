@@ -174,8 +174,9 @@ async function runJob(job, apkPath, sourceName) {
     const [cmd, pre] = ripperCommand();
     await run(cmd, [...pre, exportDir, apkPath], (line) => {
       const m = line.match(/^@@stage (\S+)/);
-      if (m) setStage(m[1]);
+      if (m) setStage(m[1] === 'done' ? 'build' : m[1]); // the job is done only after the build
       else if (line.startsWith('@@error')) job.error = line.slice(8);
+      else if (line.startsWith('@@warning')) job.warning = line.slice(10);
       else log(line);
     });
     await rm(apkPath, { force: true });

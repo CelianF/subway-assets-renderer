@@ -297,6 +297,28 @@ function loadTexture(url) {
 
 const color4 = (c, fallback = [1, 1, 1, 1]) => new THREE.Vector4(...(c ?? fallback));
 
+// Pre-3.0 games used one shader per effect ("Bend/Additive", "Bend/UVScroll", …) instead
+// of the keyword-driven SYBO/Bend/Combined. Translate them into Combined settings.
+// BlendMode: 0 Zero, 1 One, 2 DstColor, 5 SrcAlpha, 10 OneMinusSrcAlpha.
+const LEGACY_SHADERS = [
+  [/Additive/i, { FADE_MODE: 2, _SrcMode: 1, _DstMode: 1, _ZWrite: 0, _HasTint: 1 }],
+  [/Multiply/i, { FADE_MODE: 3, _SrcMode: 2, _DstMode: 0, _ZWrite: 0 }],
+  [/Transparent|Alpha/i, { FADE_MODE: 1, _SrcMode: 5, _DstMode: 10, _ZWrite: 0, _HasTint: 1 }],
+  [/UVScroll/i, { _HasScroll: 1, _HasTint: 1 }],
+  [/Reflection/i, { _HasReflections: 1, _HasTint: 1 }],
+  [/Diffuse|MatCap/i, { _HasTint: 1 }],
+];
+
+function translateLegacy(def) {
+  if (!/^(SYBO\/)?Bend\//.test(def.shader) || /Combined|Specials|Common\/ScreenMask|Legacy\/VertexWave/.test(def.shader)) return def;
+  const floats = { ...def.floats };
+  for (const [re, flags] of LEGACY_SHADERS) if (re.test(def.shader)) Object.assign(floats, flags, def.floats.FADE_MODE != null ? {} : {});
+  if (floats._ColorMultiplier != null) Object.assign(floats, { _HasMultiplier: 1, _Multiplier: floats._ColorMultiplier });
+  // Legacy transparent queues were left at -1 (shader default)
+  const renderQueue = def.renderQueue > 0 ? def.renderQueue : floats._DstMode ? 3000 : 2000;
+  return { ...def, floats, renderQueue };
+}
+
 export class MaterialLibrary {
   constructor(manifest, baseUrl) {
     this.defs = manifest.materials;
@@ -318,7 +340,7 @@ export class MaterialLibrary {
     if (!def) mat = this.fromFallback(name, fallback);
     else if (def.shader === 'SYBO/Bend/Specials/Fountain') mat = this.fountain(name, def);
     else if (def.shader === 'SYBO/Bend/Specials/NoFloorLava') mat = this.lava(name, def);
-    else mat = this.combined(name, def); // incl. Legacy/VertexWave and Common/ScreenMask variants
+    else mat = this.combined(name, translateLegacy(def)); // incl. VertexWave, ScreenMask and pre-3.0 Bend/* shaders
     this.cache.set(name, mat);
     return mat;
   }

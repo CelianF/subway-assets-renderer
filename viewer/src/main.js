@@ -234,9 +234,9 @@ function applyMaterial(mesh, mat) {
 /** Instantiates a prefab (or one of its runtime track configs) with manifest materials. */
 async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null) {
   const prefab = manifest.prefabs[name];
-  const config = trackType && prefab.trackConfigs?.[trackType];
+  // Runtime track meshes; old games leave the table empty and model the rails in the prefab
+  const config = trackType && prefab.trackConfigs?.[trackType]?.glb ? prefab.trackConfigs[trackType] : null;
   if (config) {
-    if (!config.glb) return null;
     const obj = (await loadGlb(config.glb)).clone();
     let i = 0;
     obj.traverse((o) => {

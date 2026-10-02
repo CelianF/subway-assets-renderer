@@ -4,6 +4,7 @@ using AssetRipper.Export.UnityProjects;
 using AssetRipper.Import.Logging;
 using AssetRipper.IO.Files;
 using AssetRipper.Processing;
+using System.Reflection;
 
 namespace SubwayRipper;
 
@@ -45,7 +46,7 @@ static class Program
 
 			Stage("export-content");
 			settings.ExportRootPath = Path.Join(output, "Files");
-			PrimaryContentExporter.CreateDefault(gameData, settings).Export(gameData.GameBundle, settings, LocalFileSystem.Instance);
+			ExportPrimaryContent(PrimaryContentExporter.CreateDefault(gameData, settings), gameData, settings);
 
 			Stage("done");
 			return 0;
@@ -66,6 +67,47 @@ static class Program
 	}
 
 	static void Stage(string name) => Console.WriteLine($"@@stage {name}");
+
+	/// <summary>
+	/// PrimaryContentExporter.Export, but one broken asset (e.g. a prefab whose transform
+	/// holds NaN) is skipped with a warning instead of aborting the whole export.
+	/// </summary>
+	static void ExportPrimaryContent(PrimaryContentExporter exporter, GameData gameData, FullConfiguration settings)
+	{
+		MethodInfo? createCollections = typeof(PrimaryContentExporter).GetMethod("CreateCollections", BindingFlags.Instance | BindingFlags.NonPublic);
+		if (createCollections is null)
+		{
+			exporter.Export(gameData.GameBundle, settings, LocalFileSystem.Instance); // AssetRipper changed: plain export
+			return;
+		}
+		var collections = (List<ExportCollectionBase>)createCollections.Invoke(exporter, [gameData.GameBundle])!;
+		int skipped = 0;
+		for (int i = 0; i < collections.Count; i++)
+		{
+			ExportCollectionBase collection = collections[i];
+			if (!collection.Exportable)
+			{
+				continue;
+			}
+			Logger.Info(LogCategory.ExportProgress, $"({i + 1}/{collections.Count}) Exporting '{collection.Name}'");
+			try
+			{
+				if (!collection.Export(settings.ExportRootPath, LocalFileSystem.Instance))
+				{
+					Logger.Warning(LogCategory.ExportProgress, $"Failed to export '{collection.Name}'");
+				}
+			}
+			catch (Exception ex)
+			{
+				skipped++;
+				Logger.Warning(LogCategory.ExportProgress, $"Skipped '{collection.Name}': {ex.Message.ReplaceLineEndings(" ")}");
+			}
+		}
+		if (skipped > 0)
+		{
+			Console.WriteLine($"@@warning {skipped} asset(s) could not be exported and were skipped");
+		}
+	}
 
 	private sealed class ProgressLogger : ILogger
 	{
