@@ -1,0 +1,10 @@
+{
+  "name": "subway-assets-renderer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "npm run dev --prefix viewer",
+    "start": "npm run build --prefix viewer && node server/index.js"
+  }
+}

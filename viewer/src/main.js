@@ -8,8 +8,11 @@ import { MaterialLibrary, setBendDegrees, globals, setFog, createSky } from './m
 import { generateLayout, mulberry32 } from './layout.js';
 import { createUI } from './ui.js';
 
-const DATA = '/data';
 const params = new URLSearchParams(location.search);
+// One environment (= one map) per page; maps are picked on the home page
+const ENV_ID = params.get('env');
+if (!ENV_ID) location.replace('/');
+const DATA = `/envs/${encodeURIComponent(ENV_ID)}`;
 
 // ---------------------------------------------------------------- scene
 
@@ -74,8 +77,43 @@ const status = document.getElementById('status');
 
 // ---------------------------------------------------------------- assets
 
-const manifest = await (await fetch(`${DATA}/manifest.json`)).json();
+const manifestRes = await fetch(`${DATA}/manifest.json`);
+if (!manifestRes.ok) location.replace('/');
+const manifest = await manifestRes.json();
+const envList = await (await fetch('/api/envs')).json().catch(() => []);
+const envInfo = envList.find((e) => e.id === ENV_ID) ?? { id: ENV_ID, theme: manifest.theme };
+document.title = `${envInfo.theme} · Subway Viewer`;
 const materials = new MaterialLibrary(manifest, DATA);
+
+/**
+ * Merges another environment's trains into this manifest ("trains from" option).
+ * Its file paths become absolute so they load from that environment's folder.
+ */
+const mergedEnvs = new Set();
+async function mergeEnvironment(envId) {
+  if (mergedEnvs.has(envId)) return;
+  const base = `/envs/${encodeURIComponent(envId)}`;
+  const other = await (await fetch(`${base}/manifest.json`)).json();
+  const abs = (url) => (url && !url.startsWith('/') ? `${base}/${url}` : url);
+  for (const [name, prefab] of Object.entries(other.prefabs)) {
+    if (manifest.prefabs[name]) continue;
+    const copy = structuredClone(prefab);
+    copy.glb = abs(copy.glb);
+    for (const cfg of Object.values(copy.trackConfigs ?? {})) cfg.glb = abs(cfg.glb);
+    manifest.prefabs[name] = copy;
+  }
+  for (const [name, mat] of Object.entries(other.materials)) {
+    if (manifest.materials[name]) continue;
+    const copy = structuredClone(mat);
+    for (const t of Object.values(copy.textures)) t.url = abs(t.url);
+    manifest.materials[name] = copy;
+  }
+  manifest.themes[other.theme] = other.themes[other.theme];
+  mergedEnvs.add(envId);
+}
+
+/** Relative manifest paths live in this environment's folder; merged ones are absolute. */
+const dataUrl = (url) => (url.startsWith('/') ? url : `${DATA}/${url}`);
 const loader = new GLTFLoader();
 const glbCache = new Map();
 
@@ -88,7 +126,7 @@ function loadGlb(url, { cutaway = null } = {}) {
   if (!glbCache.has(key)) {
     glbCache.set(
       key,
-      loader.loadAsync(`${DATA}/${url}`).then((g) => {
+      loader.loadAsync(dataUrl(url)).then((g) => {
         prepareGeometry(g.scene);
         if (cutaway) prepareCutaway(g.scene, cutaway === 'floor' ? FLOOR_Y : -Infinity);
         return g.scene;
@@ -225,13 +263,13 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
 // ---------------------------------------------------------------- run
 
 const state = {
-  theme: params.get('theme') ?? Object.keys(manifest.themes)[0],
+  theme: manifest.theme ?? Object.keys(manifest.themes)[0],
   seed: Number(params.get('seed') ?? 1),
   sections: Number(params.get('sections') ?? 12),
   obstacles: params.get('obstacles') !== '0',
   trains: params.get('trains') !== '0',
   signals: params.get('signals') !== '0',
-  trainTheme: params.get('trainTheme') ?? 'same',
+  trainEnv: 'same', // environment id whose trains are used
   fog: params.get('fog') !== '0',
   fogScale: Number(params.get('fogScale') ?? 1),
   glass: 1,
@@ -263,7 +301,7 @@ async function rebuild() {
   const only = state.inspect;
   const { items, length } = only
     ? { items: inspectLayout(only), length: 0 }
-    : generateLayout(manifest, state.theme, { ...state, trainTheme: state.trainTheme === 'same' ? null : state.trainTheme });
+    : generateLayout(manifest, state.theme, { ...state, trainTheme: trainTheme() });
   applyThemeLook();
   status.textContent = `Loading ${state.theme}…`;
   const objs = await Promise.all(
@@ -299,6 +337,12 @@ async function rebuild() {
   if (only) frameInspection(items);
   else ui?.themeLoaded(state.theme);
   window.__ready = true;
+}
+
+/** Theme whose trains are used: this map's, or a merged environment's. */
+function trainTheme() {
+  if (state.trainEnv === 'same') return null;
+  return envList.find((e) => e.id === state.trainEnv)?.theme ?? null;
 }
 
 /** Pieces for inspection, spaced by their width so they don't overlap. */
@@ -501,12 +545,16 @@ function themeThumbnail() {
 // ---------------------------------------------------------------- UI
 
 const gui = new GUI({ title: 'Environment' });
-gui.add(state, 'theme', Object.keys(manifest.themes)).onChange(() => ((state.inspect = null), rebuild()));
 gui.add(state, 'seed', 1, 9999, 1).onFinishChange(rebuild);
 gui.add(state, 'sections', 1, 40, 1).onFinishChange(rebuild);
 gui.add({ shuffle: () => ((state.seed = Math.floor(Math.random() * 9999) + 1), gui.controllersRecursive().forEach((c) => c.updateDisplay()), rebuild()) }, 'shuffle');
 gui.add(state, 'trains').onChange(updateVisibility);
-gui.add(state, 'trainTheme', ['same', ...Object.keys(manifest.themes)]).name('trains from').onChange(rebuild);
+const trainOptions = { 'this map': 'same' };
+for (const e of envList) if (e.id !== ENV_ID) trainOptions[`${e.theme} (v${e.gameVersion})`] = e.id;
+gui.add(state, 'trainEnv', trainOptions).name('trains from').onChange(async (id) => {
+  if (id !== 'same') await mergeEnvironment(id);
+  rebuild();
+});
 gui.add(state, 'obstacles').onChange(updateVisibility);
 gui.add(state, 'obstacleMode', { 'random': 'random', "game's chase chunks": 'chunks' }).name('obstacle layout').onChange(rebuild);
 gui.add(state, 'signals').name('signal lights').onChange(updateVisibility);
@@ -543,12 +591,7 @@ shotFolder.add({ take: () => ui.takeShot() }, 'take').name('📷 Save screenshot
 
 const ui = createUI(manifest, {
   getState: () => state,
-  setTheme: (theme) => {
-    state.theme = theme;
-    state.inspect = null;
-    gui.controllersRecursive().forEach((c) => c.updateDisplay());
-    rebuild();
-  },
+  env: envInfo,
   inspect: (names) => {
     state.inspect = names;
     rebuild();
@@ -562,6 +605,11 @@ const ui = createUI(manifest, {
   },
   screenshot: screenshotBlob,
   thumbnail: themeThumbnail,
+  saveThumbnail: async (dataUrl) => {
+    const blob = await (await fetch(dataUrl)).blob();
+    await fetch(`/api/envs/${encodeURIComponent(ENV_ID)}/thumbnail`, { method: 'PUT', body: blob });
+    envInfo.thumbnail = true;
+  },
 });
 if (params.has('shot')) {
   gui.hide();

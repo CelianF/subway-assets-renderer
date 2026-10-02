@@ -452,7 +452,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("export", type=Path, help="AssetRipper export root (contains ExportedProject/ and Files/)")
     ap.add_argument("--out", type=Path, default=Path(__file__).resolve().parent.parent / "viewer/public/data")
+    ap.add_argument("--split", action="store_true",
+                    help="write one self-contained environment per theme: <out>/<Theme>/{manifest.json,glb,mesh,tex}")
+    ap.add_argument("--source-name", help="label of the input (e.g. the APK file name) stored in the manifest")
     args = ap.parse_args()
+    final_out = args.out
+    if args.split:
+        args.out = final_out / "_all"  # combined staging, split per theme at the end
 
     root = args.export.resolve()
     project = root / "ExportedProject" / "Assets"
@@ -511,6 +517,8 @@ def main():
                 if name in prefabs:
                     continue
                 src = glb_dir / f"{name}.glb"
+                if not src.exists():
+                    src = glb_dir.parent / f"{name}.glb"  # some prefabs export at the Assets root
                 if not src.exists():
                     missing.append(name)
                     prefabs[name] = {"glb": None}
@@ -575,8 +583,10 @@ def main():
             copy_if_newer(src, out_tex / src.name)
             tex["url"] = f"tex/{src.name}"
 
+    settings = root / "ExportedProject" / "ProjectSettings" / "ProjectSettings.asset"
+    version = re.search(r"bundleVersion: (.+)", settings.read_text(errors="ignore")) if settings.exists() else None
     manifest = {
-        "source": str(root),
+        "source": {"name": args.source_name or root.name, "gameVersion": version.group(1).strip() if version else None},
         "world": {"laneWidth": 20.0, "lanes": 3, "cellDepth": 11.25, "cellHeight": 14.0},
         "themes": {
             theme: {
@@ -606,6 +616,46 @@ def main():
     if missing:
         log(f"  missing glb: {', '.join(sorted(missing))}")
     log(f"Wrote {args.out / 'manifest.json'}")
+    if args.split:
+        split_by_theme(manifest, args.out, final_out)
+
+
+def split_by_theme(manifest: dict, staging: Path, out: Path):
+    """One environment folder per theme with only the files that theme uses."""
+    for theme in manifest["themes"]:
+        names = {n for slots in manifest["themes"][theme].values() for ns in slots.values() for n in ns}
+        names |= {t["prefab"] for t in manifest["boundaries"].get(theme, {}).get("transitions", [])}
+        names |= set(EXTRA_PREFABS)
+        bg = manifest["themeConfigs"].get(theme, {}).get("background")
+        if bg:
+            names.add(bg["prefab"])
+        prefabs = {n: manifest["prefabs"][n] for n in sorted(names) if n in manifest["prefabs"]}
+        mats = {m for p in prefabs.values() for m in p.get("materials", [])}
+        materials = {m: manifest["materials"][m] for m in sorted(mats) if m in manifest["materials"]}
+        files = {p["glb"] for p in prefabs.values() if p.get("glb")}
+        files |= {c["glb"] for p in prefabs.values() for c in p.get("trackConfigs", {}).values() if c.get("glb")}
+        files |= {t["url"] for m in materials.values() for t in m["textures"].values() if t.get("url")}
+        dest = out / theme
+        if dest.exists():
+            shutil.rmtree(dest)
+        for rel in files:
+            (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(staging / rel, dest / rel)
+            except OSError:
+                shutil.copy2(staging / rel, dest / rel)
+        env = {
+            **{k: v for k, v in manifest.items() if k not in ("themes", "boundaries", "themeConfigs", "prefabs", "materials")},
+            "theme": theme,
+            "themes": {theme: manifest["themes"][theme]},
+            "boundaries": {theme: manifest["boundaries"][theme]} if theme in manifest["boundaries"] else {},
+            "themeConfigs": {theme: manifest["themeConfigs"][theme]} if theme in manifest["themeConfigs"] else {},
+            "prefabs": prefabs,
+            "materials": materials,
+        }
+        (dest / "manifest.json").write_text(json.dumps(env, indent=1))
+        log(f"  environment {theme}: {len(prefabs)} prefabs, {len(files)} files")
+    shutil.rmtree(staging)
 
 
 if __name__ == "__main__":

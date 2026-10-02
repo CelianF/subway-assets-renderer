@@ -1,30 +1,47 @@
 # Subway Assets Renderer
 
-Environment viewer for Subway Surfers themes: lays out a city's environment pieces as a run, with trains and obstacles as toggleable layers.
+Environment viewer for Subway Surfers maps. Upload an APK, and each map it contains becomes an environment you can explore: the city laid out as a run, with trains, obstacles and signal lights as toggleable layers.
 
-No game assets are included in this repo. You need your own AssetRipper export.
+No game assets are included in this repo. Everything is extracted locally from your own game package.
+
+## Setup
+
+Requirements: Node 20+, Python 3, and the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) to build the extractor. Works on macOS and Windows.
+
+```sh
+git clone --recursive https://github.com/CelianF/subway-assets-renderer
+cd subway-assets-renderer
+npm run setup        # builds the extractor + installs the viewer
+npm run dev          # http://localhost:5173
+```
+
+`npm run setup -- --self-contained` builds an extractor for the current OS that runs without the .NET runtime.
+
+## Using it
+
+1. **Home page**: drop an `.apk` (APKPure `.zip` and `.xapk` work too). Extraction takes a few minutes. Each map becomes an environment card with Open and Delete.
+2. **Viewer**: fly around the map. *← Environments* goes back to pick another map.
+   - Drag to look, WASD to move, Space/Shift for up/down, P for screenshots, B for the piece browser, H for help.
+   - The settings panel controls the layout (seed, sections, obstacle layout), the layers, trains from another environment, fog, bend and camera.
 
 ## Pipeline
 
 ```
-APK ──(rename to .zip, open in AssetRipper)──▶ export folder
-export folder ──tools/build_manifest.py──▶ viewer/public/data/ (manifest.json, glb/, mesh/, tex/)
-viewer/ (Vite + three.js) ──▶ browser
+APK ──tools/ripper (headless AssetRipper)──▶ Unity project + glb export   (temporary, ~2 GB)
+    ──tools/build_manifest.py --split──────▶ workspace/envs/<Map>_<version>/  (manifest.json, glb/, mesh/, tex/)
+    ──viewer (Vite + three.js)──────────────▶ browser
 ```
 
-## Usage
-
-```sh
-python3 tools/build_manifest.py "/path/to/69.1 assets"
-cd viewer && npm install && npm run dev
-```
-
-URL params: `theme`, `seed`, `sections`, `cam` (`game` | `overview` | `side`), `trains=0`, `obstacles=0`.
+- `tools/ripper/`: a small .NET CLI on top of the AssetRipper libraries (pinned as the `third_party/AssetRipper` submodule). The default build is framework-dependent, so a single build runs on macOS and Windows. CI (`.github/workflows/ripper.yml`) also produces self-contained builds for macOS arm64/x64 and Windows x64.
+- `server/api.js`: upload, extraction jobs, environment list and delete. It is mounted on the Vite dev server, and `server/index.js` serves the production build (`npm start`).
+- `tools/build_manifest.py`: can also be run by hand on an AssetRipper export (`python3 tools/build_manifest.py <export> --split --out <dir>`).
 
 ## How the game's data maps to the viewer
 
-- **Themes** (`MonoBehaviour/<City>_Theme.asset`) map *slot types* (`boundary_high_left`, `train_static_3`, `obstacle_barrier_jump`, …) to prefab variants. Themes inherit from `_Common_Theme`.
-- **Grid** (`WorldConstants`): 3 lanes × 20 units, cells 11.25 deep, so a boundary segment is 180 deep (16 cells).
-- **Tracks**: `*_tracks_general` holds no geometry. Its TrackController assigns a mesh and materials per `TrackType` at runtime, and the manifest records those configs.
-- **Materials**: most use `SYBO/Bend/Combined`, an übershader with feature toggles. The export only keeps its property block, so it is reimplemented in the viewer.
-- **Layout**: the game's route generation logic is stripped from the export. `viewer/src/layout.js` generates a plausible sequence from the same pieces.
+- **Themes** (`<City>_Theme.asset`) map *slot types* (`boundary_high_left`, `train_static_3`, …) to prefab variants. Themes inherit from `_Common_Theme`.
+- **Boundaries** (`<City>_Boundaries.asset`): transition pieces such as tube entrances, plus which stretches show track shadows.
+- **Theme config** (`<City>_Config.asset`): fog color and distances, skybox gradient, skyline.
+- **Grid** (`WorldConstants`): 3 lanes × 20 units, cells 11.25 deep, so a boundary segment is 180 deep.
+- **Prefab runtime behaviour**, emulated by the viewer: `RandomChildRandomizer` (one variant per group), `LODGroup` (LOD0 only), TrackController (per-type rail meshes).
+- **Shaders**: `SYBO/Bend/*` keep only their property blocks in the export and are reimplemented in `viewer/src/materials.js`. The math is done in gamma space, like the Unity project.
+- **Layout**: route generation is stripped from the export, so `viewer/src/layout.js` generates plausible runs. Obstacles can also follow the game's 30 chase chunks.

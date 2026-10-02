@@ -1,0 +1,192 @@
+:root {
+  --bg: #0f1218;
+  --card: #181d26;
+  --border: rgba(255, 255, 255, 0.09);
+  --text: #e8ecf2;
+  --muted: #94a0b2;
+  --accent: #ffcc33;
+  --accent-ink: #1a1a1a;
+  --danger: #ff6b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, sans-serif;
+}
+
+main {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 40px 16px 64px;
+}
+
+.hero h1 {
+  margin: 0 0 4px;
+  font-size: 28px;
+}
+.hero p {
+  margin: 0 0 28px;
+  color: var(--muted);
+}
+
+h2 {
+  font-size: 18px;
+  margin: 36px 0 14px;
+}
+h2 small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+button.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+  font-weight: 600;
+}
+button.danger {
+  color: var(--danger);
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ---------------------------------------------------------------- upload */
+
+.drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 32px 16px;
+  border: 2px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 14px;
+  background: var(--card);
+  cursor: pointer;
+  text-align: center;
+}
+.drop strong {
+  font-size: 18px;
+}
+.drop span {
+  color: var(--muted);
+}
+.drop.over {
+  border-color: var(--accent);
+}
+.drop.busy {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.job {
+  margin-top: 14px;
+  padding: 14px 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.job-head {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+}
+.bar {
+  height: 6px;
+  margin: 10px 0;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.bar div {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.4s;
+}
+.job pre {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+.job.failed .job-head {
+  color: var(--danger);
+}
+
+/* ---------------------------------------------------------------- grid */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.env {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.thumb-btn {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+.thumb {
+  aspect-ratio: 16 / 9;
+  background: linear-gradient(#2a3b55, #1b2433) center / cover no-repeat;
+  display: grid;
+  place-items: center;
+}
+.thumb span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.env-info {
+  padding: 10px 12px 12px;
+}
+.env-info h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.env-info p {
+  margin: 2px 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.env-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.empty {
+  color: var(--muted);
+}

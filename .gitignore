@@ -15,3 +15,12 @@ node_modules/
 dist/
 
 .DS_Store
+
+# Local toolchains and extraction workspace
+/.tools/
+/workspace/
+/dist/
+
+# .NET build output
+bin/
+obj/

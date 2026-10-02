@@ -51,62 +51,40 @@ button:hover {
   display: none !important;
 }
 
-/* ---------------------------------------------------------------- theme bar */
+/* ---------------------------------------------------------------- header */
 
-.theme-bar {
+.env-header {
   position: fixed;
   top: 10px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 10px;
   display: flex;
-  gap: 8px;
-  padding: 8px;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px 8px 8px;
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);
   border-radius: var(--radius);
   backdrop-filter: blur(8px);
-  max-width: calc(100vw - 340px);
-  overflow-x: auto;
 }
-
-.theme-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 4px;
-  width: 104px;
-  flex: none;
-  background: transparent;
-  border: 2px solid transparent;
-}
-.theme-card.active {
-  border-color: var(--accent);
-}
-.theme-card .thumb {
-  width: 96px;
-  height: 54px;
-  border-radius: 6px;
-  background-size: cover !important;
-  background-position: center !important;
-}
-.theme-card span {
-  font-size: 11px;
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 96px;
-}
-.theme-card.active span {
+.env-header .back {
   color: var(--text);
+  text-decoration: none;
+  padding: 5px 10px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.env-header .back:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+.env-header small {
+  color: var(--muted);
 }
 
 /* ---------------------------------------------------------------- panels */
 
 .panel {
   position: fixed;
-  top: 100px;
+  top: 64px;
   bottom: 56px;
   width: 300px;
   display: flex;
@@ -229,7 +207,7 @@ button:hover {
 
 .inspect-banner {
   position: fixed;
-  top: 96px;
+  top: 12px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -314,9 +292,6 @@ button:hover {
 }
 
 @media (max-width: 700px) {
-  .theme-bar {
-    max-width: calc(100vw - 20px);
-  }
   .panel {
     width: calc(100vw - 20px);
   }

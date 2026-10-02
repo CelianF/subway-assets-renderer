@@ -11,7 +11,6 @@ const CATEGORY_LABELS = {
   transition: 'Transitions',
 };
 
-const THUMB_KEY = (theme) => `subway-thumb:${theme}`;
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -24,39 +23,25 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
-const rgb = (c) => (c ? `rgb(${c.slice(0, 3).map((v) => Math.round(v * 255)).join(',')})` : '#678');
 const prettySlot = (slot) => slot.replace(/^(boundary|track|special|obstacle|train|prop)_/, '').replaceAll('_', ' ');
 const prettyTheme = (t) => t.replace(/([a-z])([A-Z0-9])/g, '$1 $2');
 
-function readThumb(theme) {
-  try {
-    return localStorage.getItem(THUMB_KEY(theme));
-  } catch {
-    return null;
-  }
-}
-
 /**
  * @param manifest viewer manifest
- * @param actions { getState, setTheme, inspect(names), exitInspect, screenshot() -> {blob, name, width, height}, thumbnail() -> dataURL }
+ * @param actions { getState, env, inspect(names), exitInspect, screenshot() -> {blob, name, width, height},
+ *                   thumbnail() -> dataURL, saveThumbnail(dataURL) }
  */
 export function createUI(manifest, actions) {
   const root = document.getElementById('ui');
-  const themes = Object.keys(manifest.themes);
+  const { env } = actions;
 
-  // ------------------------------------------------------------ theme bar
-  const themeBar = el('div', { class: 'theme-bar' });
-  const themeCards = new Map();
-  for (const theme of themes) {
-    const sky = manifest.themeConfigs?.[theme]?.sky;
-    const thumb = el('div', { class: 'thumb' });
-    thumb.style.background = `linear-gradient(${rgb(sky?.top)}, ${rgb(sky?.bottom)})`;
-    const saved = readThumb(theme);
-    if (saved) thumb.style.backgroundImage = `url(${saved})`;
-    const card = el('button', { class: 'theme-card', title: theme, onclick: () => actions.setTheme(theme) }, thumb, el('span', {}, prettyTheme(theme)));
-    themeCards.set(theme, { card, thumb });
-    themeBar.append(card);
-  }
+  // ------------------------------------------------------------ header (maps are chosen on the home page)
+  const header = el(
+    'div',
+    { class: 'env-header' },
+    el('a', { class: 'back', href: '/', title: 'Back to environments' }, '← Environments'),
+    el('div', {}, el('strong', {}, prettyTheme(env.theme)), env.gameVersion ? el('small', {}, ` v${env.gameVersion}`) : null),
+  );
 
   // ------------------------------------------------------------ piece browser
   const browser = el('aside', { class: 'panel browser hidden' });
@@ -243,26 +228,17 @@ export function createUI(manifest, actions) {
     }
   });
 
-  root.append(themeBar, inspectBanner, browser, gallery, toolbar, help, toastEl);
+  root.append(header, inspectBanner, browser, gallery, toolbar, help, toastEl);
 
   return {
-    /** Highlights the active theme and refreshes theme-dependent panels. */
-    themeChanged(theme) {
-      for (const [t, { card }] of themeCards) card.classList.toggle('active', t === theme);
+    themeChanged() {
       if (!browser.classList.contains('hidden')) renderBrowser();
     },
-    /** Stores a thumbnail for a theme the first time it is shown. */
-    themeLoaded(theme) {
-      const { thumb } = themeCards.get(theme) ?? {};
-      if (!thumb || readThumb(theme)) return;
+    /** Saves a preview for the home page the first time the map is shown. */
+    themeLoaded() {
+      if (env.thumbnail) return;
       const url = actions.thumbnail();
-      if (!url) return;
-      thumb.style.backgroundImage = `url(${url})`;
-      try {
-        localStorage.setItem(THUMB_KEY(theme), url);
-      } catch {
-        // storage full or blocked: the gradient swatch stays
-      }
+      if (url) actions.saveThumbnail(url).catch(() => {});
     },
     setInspecting,
     takeShot,

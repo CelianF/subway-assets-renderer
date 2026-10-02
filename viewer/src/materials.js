@@ -303,7 +303,8 @@ export class MaterialLibrary {
 
   tex(def, name) {
     const t = def.textures[name];
-    return t?.url ? loadTexture(`${this.baseUrl}/${t.url}`) : null;
+    if (!t?.url) return null;
+    return loadTexture(t.url.startsWith('/') ? t.url : `${this.baseUrl}/${t.url}`); // merged envs use absolute paths
   }
 
   get(name, fallback) {

@@ -3,13 +3,35 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Subway Environment Viewer</title>
-    <link rel="stylesheet" href="/src/style.css" />
+    <title>Subway Environments</title>
+    <link rel="stylesheet" href="/src/home.css" />
   </head>
   <body>
-    <canvas id="view"></canvas>
-    <div id="status"></div>
-    <div id="ui"></div>
-    <script type="module" src="/src/main.js"></script>
+    <main>
+      <header class="hero">
+        <h1>Subway Environments</h1>
+        <p>Extract the maps from a Subway Surfers APK, then open one to explore it.</p>
+      </header>
+
+      <section class="upload" id="upload">
+        <input type="file" id="file" accept=".apk,.xapk,.zip" hidden />
+        <div class="drop" id="drop">
+          <strong>Upload APK</strong>
+          <span>Drop an .apk here or click to choose. APKPure .zip and .xapk files work too.</span>
+        </div>
+        <div class="job hidden" id="job">
+          <div class="job-head"><span id="job-label">Uploading…</span><span id="job-pct"></span></div>
+          <div class="bar"><div id="job-bar"></div></div>
+          <pre id="job-log"></pre>
+        </div>
+      </section>
+
+      <section>
+        <h2>Environments <small id="count"></small></h2>
+        <div class="grid" id="envs"></div>
+        <p class="empty hidden" id="empty">No environment yet. Upload an APK to extract its maps.</p>
+      </section>
+    </main>
+    <script type="module" src="/src/home.js"></script>
   </body>
 </html>
