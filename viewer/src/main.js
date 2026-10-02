@@ -328,6 +328,7 @@ async function rebuild() {
       registerPiece(obj, { openBacks: it.layer === 'environment', whole: it.layer === 'train', group: it.group });
     }
   }
+  if (!only) await addThemeEffects(length, id);
   updateVisibility();
   applyBend();
   const missing = objs.filter(([, o]) => !o).length;
@@ -339,6 +340,27 @@ async function rebuild() {
   if (only) frameInspection(items);
   else ui?.themeLoaded(state.theme);
   window.__ready = true;
+}
+
+/**
+ * ThemeConfig effects: segmented grounds the game leapfrogs under the runner
+ * (Floor Is Lava's lava). Laid out statically over the whole run here.
+ */
+async function addThemeEffects(length, id) {
+  for (const effect of manifest.themeConfigs?.[state.theme]?.effects ?? []) {
+    const prefab = manifest.prefabs[effect.prefab];
+    if (!prefab?.glb || !effect.segments.length) continue;
+    const root = await loadGlb(prefab.glb);
+    if (id !== buildId) return;
+    const segment = root.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(effect.segments[0]));
+    if (!segment) continue;
+    segment.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
+    for (let z = -effect.segmentSize; z < length + effect.segmentSize; z += effect.segmentSize) {
+      const copy = segment.clone();
+      copy.position.set(0, segment.position.y, z);
+      layers.track.add(copy);
+    }
+  }
 }
 
 /** Theme whose trains are used: this map's, or a merged environment's. */

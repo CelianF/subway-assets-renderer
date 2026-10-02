@@ -234,6 +234,37 @@ def parse_chunk(prefab: Path, guid_index) -> dict:
     return {"length": float(exit_z.group(1)) * 11.25 if exit_z else 540.0, "placements": placements}
 
 
+def parse_theme_effect(prefab: Path, guid_index) -> dict | None:
+    """ThemeConfig.ThemeEffects entry: segmented ground effects (Floor Is Lava's lava)
+    that the game leapfrogs under the runner. Returns the segment node names and size."""
+    docs = prefab.read_text(errors="ignore").split("\n--- ")
+    go_names, transform_go = {}, {}
+    for doc in docs:
+        m = re.match(r"!u!(\d+) &(\d+)", doc)
+        if not m:
+            continue
+        if m.group(1) == "1":
+            nm = re.search(r"m_Name: (.*)", doc)
+            go_names[m.group(2)] = nm.group(1).strip() if nm else ""
+        elif m.group(1) == "4":
+            go = re.search(r"m_GameObject: \{fileID: (\d+)", doc)
+            if go:
+                transform_go[m.group(2)] = go.group(1)
+    for doc in docs:
+        size = re.search(r"_segmentSize: ([\d.]+)", doc)
+        if not doc.startswith("!u!114") or not size:
+            continue
+        segments = [go_names.get(transform_go.get(f, ""), None) for f in re.findall(r"_segment[AB]: \{fileID: (\d+)", doc)]
+        script = re.search(r"m_Script: .*guid: (\w+)", doc)
+        return {
+            "prefab": prefab.stem,
+            "script": guid_index[script.group(1)].stem if script and script.group(1) in guid_index else None,
+            "segmentSize": float(size.group(1)),
+            "segments": [n for n in segments if n],
+        }
+    return None
+
+
 # Prefabs the viewer needs beyond theme slots
 EXTRA_PREFABS = ["_Common_LightSignal_Light_Green", "_Common_LightSignal_Light_Red"]
 
@@ -523,6 +554,15 @@ def main():
         path = find(f"{theme}_Config.asset")
         if path:
             theme_configs[theme] = parse_theme_config(path, guid_index)
+            effects_block = re.search(r"ThemeEffects:\n((?:  - .*\n)+)", path.read_text(errors="ignore"))
+            effects = []
+            for g in GUID_RE.findall(effects_block.group(1) if effects_block else ""):
+                effect_path = guid_index.get(g)
+                effect = parse_theme_effect(effect_path, guid_index) if effect_path and effect_path.suffix == ".prefab" else None
+                if effect:
+                    effects.append(effect)
+            if effects:
+                theme_configs[theme]["effects"] = effects
     log(f"Theme configs: {len(theme_configs)}")
 
     # Slot types declare their length in cells (BoundaryType.CellDepth); bounding boxes
@@ -543,6 +583,7 @@ def main():
     transition_prefabs = [[t["prefab"] for t in b["transitions"]] for b in boundaries.values()]
     transition_prefabs.append(EXTRA_PREFABS)
     transition_prefabs.append([c["background"]["prefab"] for c in theme_configs.values() if "background" in c])
+    transition_prefabs.append([e["prefab"] for c in theme_configs.values() for e in c.get("effects", [])])
     for names in [n for slots in themes.values() for n in slots.values()] + transition_prefabs:
         if True:
             for name in names:
@@ -658,6 +699,7 @@ def split_by_theme(manifest: dict, staging: Path, out: Path):
         bg = manifest["themeConfigs"].get(theme, {}).get("background")
         if bg:
             names.add(bg["prefab"])
+        names |= {e["prefab"] for e in manifest["themeConfigs"].get(theme, {}).get("effects", [])}
         prefabs = {n: manifest["prefabs"][n] for n in sorted(names) if n in manifest["prefabs"]}
         mats = {m for p in prefabs.values() for m in p.get("materials", [])}
         materials = {m: manifest["materials"][m] for m in sorted(mats) if m in manifest["materials"]}
