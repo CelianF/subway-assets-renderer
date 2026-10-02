@@ -4,7 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import GUI from 'lil-gui';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
-import { MaterialLibrary, bend, setBendDegrees } from './materials.js';
+import { MaterialLibrary, setBendDegrees, globals, setFog, createSky } from './materials.js';
 import { generateLayout, mulberry32 } from './layout.js';
 
 const DATA = '/data';
@@ -18,7 +18,9 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x9fd3f0);
+// Theme skybox gradient, drawn as a full-screen quad behind everything (gamma workflow)
+const sky = createSky();
+scene.add(sky);
 
 // near = 2 (not 1) doubles depth precision; distant coplanar details z-fight less
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 2, 8000);
@@ -80,12 +82,29 @@ function loadGlb(url, { cutaway = null } = {}) {
     glbCache.set(
       key,
       loader.loadAsync(`${DATA}/${url}`).then((g) => {
+        prepareGeometry(g.scene);
         if (cutaway) prepareCutaway(g.scene, cutaway === 'floor' ? FLOOR_Y : -Infinity);
         return g.scene;
       }),
     );
   }
   return glbCache.get(key);
+}
+
+/**
+ * The exported meshes have no normals (reflections/rim need them) and vertex-color
+ * materials may land on meshes without colors (unset attributes read as black).
+ */
+function prepareGeometry(root) {
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    const geo = o.geometry;
+    if (!geo.attributes.normal) geo.computeVertexNormals();
+    const wantsColors = manifest.materials[o.material?.name]?.floats?._HasVertexColors;
+    if (wantsColors && !geo.attributes.color) {
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(geo.attributes.position.count * 3).fill(1), 3));
+    }
+  });
 }
 
 /**
@@ -132,13 +151,41 @@ function applyRandomizers(obj, randomizers, seed) {
   }
 }
 
+/**
+ * Signal lights show red or green. Themes whose signal has both lights keep one;
+ * London-style signals only carry the red light, so green swaps in the green light
+ * mesh on the lower lamp of the housing.
+ */
+async function applySignalColor(obj, seed) {
+  const rng = mulberry32(seed);
+  let red = null;
+  let green = null;
+  obj.traverse((o) => {
+    if (o.name.startsWith('_Common_LightSignal_Light_Red')) red ??= o;
+    if (o.name.startsWith('_Common_LightSignal_Light_Green')) green ??= o;
+  });
+  const wantGreen = rng() < 0.5;
+  if (red && green) {
+    (wantGreen ? red : green).removeFromParent();
+  } else if (red && wantGreen && manifest.prefabs._Common_LightSignal_Light_Green?.glb) {
+    const light = (await loadGlb(manifest.prefabs._Common_LightSignal_Light_Green.glb)).clone();
+    light.position.copy(red.position);
+    light.position.y -= 11.3; // red lamp -> green lamp in the single-light housing
+    light.quaternion.copy(red.quaternion);
+    light.scale.copy(red.scale);
+    light.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
+    red.parent.add(light);
+    red.removeFromParent();
+  }
+}
+
 function applyMaterial(mesh, mat) {
   mesh.material = mat;
   mesh.renderOrder = mat.userData.renderQueue ?? 2000;
 }
 
 /** Instantiates a prefab (or one of its runtime track configs) with manifest materials. */
-async function instantiate(name, trackType, layer, variantSeed = 1) {
+async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null) {
   const prefab = manifest.prefabs[name];
   const config = trackType && prefab.trackConfigs?.[trackType];
   if (config) {
@@ -162,6 +209,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1) {
     if (out.length === 1) applyMaterial(o, out[0]);
     else o.material = out;
   });
+  if (signalSeed != null) await applySignalColor(obj, signalSeed);
   return obj;
 }
 
@@ -173,6 +221,12 @@ const state = {
   sections: Number(params.get('sections') ?? 12),
   obstacles: params.get('obstacles') !== '0',
   trains: params.get('trains') !== '0',
+  signals: params.get('signals') !== '0',
+  trainTheme: params.get('trainTheme') ?? 'same',
+  fog: params.get('fog') !== '0',
+  fogScale: Number(params.get('fogScale') ?? 1),
+  glass: 1,
+  skyline: true,
   camera: params.get('cam') ?? 'game',
   controls: 'fly',
   cutaway: false,
@@ -181,7 +235,13 @@ const state = {
   fov: 55,
 };
 
-const layers = { environment: new THREE.Group(), track: new THREE.Group(), train: new THREE.Group(), obstacle: new THREE.Group() };
+const layers = {
+  environment: new THREE.Group(),
+  track: new THREE.Group(),
+  train: new THREE.Group(),
+  obstacle: new THREE.Group(),
+  signal: new THREE.Group(),
+};
 Object.values(layers).forEach((g) => scene.add(g));
 let buildId = 0;
 
@@ -191,12 +251,13 @@ async function rebuild() {
   const only = params.get('prefab')?.split(',');
   const { items, length } = only
     ? { items: only.map((prefab, i) => ({ prefab, layer: 'environment', pos: [i * 120, 0, 0], variantSeed: 1 })), length: 0 }
-    : generateLayout(manifest, state.theme, state);
+    : generateLayout(manifest, state.theme, { ...state, trainTheme: state.trainTheme === 'same' ? null : state.trainTheme });
+  applyThemeLook();
   status.textContent = `Loading ${state.theme}…`;
   const objs = await Promise.all(
     items.map(async (it) => {
       try {
-        const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed);
+        const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed, it.signalSeed);
         if (obj) obj.position.set(...it.pos);
         return [it, obj];
       } catch (e) {
@@ -222,7 +283,63 @@ async function rebuild() {
   window.__ready = true;
 }
 
-const CUTAWAY_LAYERS = ['environment', 'train', 'obstacle'];
+const CUTAWAY_LAYERS = ['environment', 'train', 'obstacle', 'signal'];
+
+// ---------------------------------------------------------------- theme look
+
+const skylineGroup = new THREE.Group();
+scene.add(skylineGroup);
+let skylineTheme = null;
+
+/** Fog, sky and skyline from the theme's ThemeConfig. */
+function applyThemeLook() {
+  const cfg = manifest.themeConfigs?.[state.theme] ?? {};
+  setFog(cfg.fog, state.fog, state.fogScale);
+  sky.setColors(cfg.sky);
+  if (skylineTheme !== state.theme) {
+    skylineTheme = state.theme;
+    skylineGroup.clear();
+    if (cfg.background) loadSkyline(cfg.background);
+  }
+  skylineGroup.visible = state.skyline;
+}
+
+/**
+ * BackgroundLayer: a skyline silhouette kept at a fixed distance ahead of the camera,
+ * colored with the config's vertical gradient (ColorMode 1) and unaffected by fog.
+ */
+async function loadSkyline(bg) {
+  const prefab = manifest.prefabs[bg.prefab];
+  if (!prefab?.glb || !prefab.bbox) return;
+  const obj = (await loadGlb(prefab.glb)).clone();
+  const [lo, hi] = prefab.bbox;
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uA: { value: new THREE.Vector3(...(bg.gradientA ?? [1, 1, 1])) },
+      uB: { value: new THREE.Vector3(...(bg.gradientB ?? [1, 1, 1])) },
+      uTint: { value: new THREE.Vector3(...(bg.tint ?? [1, 1, 1])) },
+      uRange: { value: new THREE.Vector2(Math.max(lo[1], 0), hi[1]) },
+    },
+    vertexShader: `varying float vY; void main() { vY = position.y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform vec3 uA; uniform vec3 uB; uniform vec3 uTint; uniform vec2 uRange; varying float vY;
+      void main() { float t = clamp((vY - uRange.x) / max(uRange.y - uRange.x, 1.0), 0.0, 1.0);
+        gl_FragColor = vec4(mix(uB, uA, t) * mix(vec3(1.0), uTint, 0.35), 1.0); }`,
+    side: THREE.DoubleSide,
+  });
+  obj.traverse((o) => {
+    if (o.isMesh) {
+      o.material = mat;
+      o.frustumCulled = false;
+      o.renderOrder = -1000; // behind the level, in front of the sky
+    }
+  });
+  obj.userData.distance = bg.distance ?? 1000;
+  skylineGroup.add(obj);
+}
+
+function updateSkyline() {
+  for (const obj of skylineGroup.children) obj.position.set(0, 0, camera.position.z + obj.userData.distance);
+}
 
 /** Hides the geometry islands (buildings, train cars, …) the camera is inside. */
 function updateCutaway() {
@@ -233,12 +350,13 @@ function applyBend() {
   setBendDegrees(state.bend, state.bendVertical);
   // Bent geometry can appear outside its unbent bounds: skip frustum culling while bending
   const culled = state.bend === 0 && state.bendVertical === 0;
-  scene.traverse((o) => o.isMesh && (o.frustumCulled = culled));
+  Object.values(layers).forEach((g) => g.traverse((o) => o.isMesh && (o.frustumCulled = culled))); // not the sky/skyline
 }
 
 function updateVisibility() {
   layers.train.visible = state.trains;
   layers.obstacle.visible = state.obstacles;
+  layers.signal.visible = state.signals;
 }
 
 // ---------------------------------------------------------------- screenshot
@@ -260,13 +378,13 @@ function renderScreenshot() {
   const width = Math.floor(w * scale);
   const height = Math.floor(h * scale);
 
-  const target = new THREE.WebGLRenderTarget(width, height, { samples: 4, colorSpace: THREE.SRGBColorSpace });
+  // Raw RGBA8: shaders already output gamma-space values
+  const target = new THREE.WebGLRenderTarget(width, height, { samples: 4 });
   const shotCam = camera.clone();
   shotCam.aspect = width / height;
   shotCam.updateProjectionMatrix();
 
-  const bg = scene.background;
-  if (screenshot.transparent) scene.background = null;
+  sky.visible = !screenshot.transparent;
   renderer.setRenderTarget(target);
   renderer.setClearColor(0x000000, screenshot.transparent ? 0 : 1);
   renderer.clear();
@@ -275,7 +393,7 @@ function renderScreenshot() {
   renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
   renderer.setRenderTarget(null);
   renderer.setClearColor(0x000000, 1);
-  scene.background = bg;
+  sky.visible = true;
   target.dispose();
 
   // WebGL rows are bottom-up; flip into a 2D canvas
@@ -320,7 +438,15 @@ gui.add(state, 'seed', 1, 9999, 1).onFinishChange(rebuild);
 gui.add(state, 'sections', 1, 40, 1).onFinishChange(rebuild);
 gui.add({ shuffle: () => ((state.seed = Math.floor(Math.random() * 9999) + 1), gui.controllersRecursive().forEach((c) => c.updateDisplay()), rebuild()) }, 'shuffle');
 gui.add(state, 'trains').onChange(updateVisibility);
+gui.add(state, 'trainTheme', ['same', ...Object.keys(manifest.themes)]).name('trains from').onChange(rebuild);
 gui.add(state, 'obstacles').onChange(updateVisibility);
+gui.add(state, 'signals').name('signal lights').onChange(updateVisibility);
+
+const lookFolder = gui.addFolder('Rendering');
+lookFolder.add(state, 'fog').onChange(applyThemeLook);
+lookFolder.add(state, 'fogScale', 0.25, 6, 0.05).name('fog distance ×').onChange(applyThemeLook);
+lookFolder.add(state, 'skyline').onChange(applyThemeLook);
+lookFolder.add(state, 'glass', 0, 1, 0.01).name('glass opacity').onChange((v) => materials.setGlassOpacity(v));
 
 const bendFolder = gui.addFolder('Bend');
 const onBend = applyBend;
@@ -351,12 +477,15 @@ if (params.has('shot')) gui.hide();
 
 applyCamera(state.camera);
 setControlMode(state.controls);
-window.__viewer = { renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter };
+window.__viewer = { renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE };
 await rebuild();
 
+const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
+  globals.uTime.value = clock.getElapsedTime();
   if (orbit.enabled) orbit.update();
   fly.update();
+  updateSkyline();
   updateCutaway();
   renderer.render(scene, camera);
 });

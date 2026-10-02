@@ -1,5 +1,9 @@
 import * as THREE from 'three';
 
+// Reimplementation of SYBO's mobile shaders (the export only keeps their property
+// blocks). The Unity project renders in Gamma color space, so all math here is done
+// on raw sRGB values: textures are sampled without decoding and written as-is.
+
 // UnityEngine.Rendering.BlendMode -> three.js blend factors
 const BLEND = [
   THREE.ZeroFactor,
@@ -18,8 +22,9 @@ const BLEND = [
 // UnityEngine.Rendering.CullMode: 0 Off, 1 Front, 2 Back
 const SIDE = [THREE.DoubleSide, THREE.BackSide, THREE.FrontSide];
 
-// Curved-world bend shared by every material (SYBO/Bend/* shaders bend in the vertex stage).
-// Offset grows with the square of the view depth, like the game's BendShaderController.
+// ---------------------------------------------------------------- shared uniforms
+
+// Curved-world bend (BendShaderController): offset grows with the square of view depth
 export const bend = { value: new THREE.Vector2(0, 0) }; // x: left/right, y: down/up
 
 // Depth at which `degrees` is reached: tan(heading) = 2·k·D
@@ -31,80 +36,302 @@ export function setBendDegrees(horizontal, vertical = 0) {
   bend.value.set(k(horizontal), k(vertical));
 }
 
-function addBend(mat) {
-  mat.onBeforeCompile = (shader) => {
-    shader.uniforms.uBend = bend;
-    shader.vertexShader = shader.vertexShader
-      .replace('void main() {', 'uniform vec2 uBend;\nvoid main() {')
-      .replace(
-        '#include <project_vertex>',
-        `#include <project_vertex>
-        float bendDepth = max(-mvPosition.z, 0.0);
-        mvPosition.xy += vec2(uBend.x, -uBend.y) * bendDepth * bendDepth;
-        gl_Position = projectionMatrix * mvPosition;`,
-      );
-  };
-  mat.customProgramCacheKey = () => 'bend';
-  return mat;
+export const globals = {
+  uTime: { value: 0 },
+  uFogColor: { value: new THREE.Color(0.63, 0.69, 0.74) },
+  uFogRange: { value: new THREE.Vector2(428, 600) }, // ThemeConfig FogStart/EndDistance
+  uFogOn: { value: 1 },
+  uBend: bend,
+};
+
+/** Applies a theme's fog (ThemeConfig); `scale` stretches the distances for free roaming. */
+export function setFog({ color, start, end } = {}, enabled = true, scale = 1) {
+  if (color) globals.uFogColor.value.setRGB(color[0], color[1], color[2]); // raw gamma values
+  if (start != null) globals.uFogRange.value.set(start * scale, end * scale);
+  globals.uFogOn.value = enabled ? 1 : 0;
 }
+
+// ---------------------------------------------------------------- shaders
+
+const COMBINED_VERTEX = /* glsl */ `
+uniform vec2 uBend;
+uniform float uTime;
+uniform vec4 uMainST;
+uniform vec2 uScroll;
+varying vec2 vUv;
+varying float vDepth;
+varying vec3 vNormalV;
+varying vec3 vViewDir;
+#ifdef USE_COLOR
+varying vec3 vColor;
+#endif
+
+void main() {
+  vUv = uv * uMainST.xy + uMainST.zw;
+#ifdef SCROLL
+  vUv += uScroll * uTime / 20.0; // Unity _Time.x
+#endif
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  float depth = max(-mv.z, 0.0);
+  mv.xy += vec2(uBend.x, -uBend.y) * depth * depth;
+  vDepth = -mv.z;
+  vNormalV = normalize(normalMatrix * normal);
+  vViewDir = normalize(-mv.xyz);
+#ifdef USE_COLOR
+  vColor = color;
+#endif
+  gl_Position = projectionMatrix * mv;
+}
+`;
+
+const FOG_GLSL = /* glsl */ `
+uniform vec3 uFogColor;
+uniform vec2 uFogRange;
+uniform float uFogOn;
+float fogFactor(float depth) {
+  return uFogOn * clamp((depth - uFogRange.x) / max(uFogRange.y - uFogRange.x, 1.0), 0.0, 1.0);
+}
+`;
+
+const COMBINED_FRAGMENT = /* glsl */ `
+uniform sampler2D uMap;
+uniform vec4 uColor;
+uniform float uMultiplier;
+uniform sampler2D uRefTex;
+uniform vec4 uRefColor;
+uniform vec4 uRimColor;
+uniform float uRimPower;
+uniform float uRimAmount;
+uniform float uFogMultiplier;
+varying vec2 vUv;
+varying float vDepth;
+varying vec3 vNormalV;
+varying vec3 vViewDir;
+#ifdef USE_COLOR
+varying vec3 vColor;
+#endif
+${FOG_GLSL}
+
+void main() {
+  vec4 c = texture2D(uMap, vUv);
+#ifdef MASK_TEXTURE
+  c = vec4(vec3(c.r), c.r); // channel-packed masks (fountain foam): red = fill
+#endif
+#ifdef TINT
+  c *= uColor;
+#endif
+#ifdef USE_COLOR
+  c.rgb *= vColor;
+#endif
+#ifdef REFLECTIONS
+  vec3 n = normalize(vNormalV);
+  c.rgb += texture2D(uRefTex, n.xy * 0.5 + 0.5).rgb * uRefColor.rgb * uRefColor.a;
+#endif
+#ifdef RIM
+  float rim = pow(1.0 - clamp(dot(normalize(vNormalV), normalize(vViewDir)), 0.0, 1.0), uRimPower) * uRimAmount;
+  c.rgb += uRimColor.rgb * rim;
+#endif
+#ifdef MULTIPLIER
+  c.rgb *= uMultiplier;
+#endif
+  float fog = fogFactor(vDepth);
+#ifdef FOG_MULTIPLIER
+  fog = clamp(fog * uFogMultiplier, 0.0, 1.0);
+#endif
+#if FADE_MODE == 2
+  c.rgb = mix(c.rgb, vec3(0.0), fog); // additive fades to nothing
+#elif FADE_MODE == 3
+  c.rgb = mix(c.rgb, vec3(1.0), fog); // multiply fades to neutral
+#else
+  c.rgb = mix(c.rgb, uFogColor, fog);
+#endif
+  gl_FragColor = c;
+}
+`;
+
+// SYBO/Bend/Specials/Fountain: scrolling channel-packed mask, alpha-killed
+const FOUNTAIN_FRAGMENT = /* glsl */ `
+uniform sampler2D uMap;
+uniform vec4 uMainColor;
+uniform vec4 uFoamColor;
+uniform float uAlphaKill;
+varying vec2 vUv;
+varying float vDepth;
+${FOG_GLSL}
+
+void main() {
+  vec4 m = texture2D(uMap, vUv);
+  if (max(m.r, m.g) < uAlphaKill) discard;
+  vec3 c = mix(uMainColor.rgb, uFoamColor.rgb, m.r) + vec3(m.r * 0.6); // foam fill is bright
+  gl_FragColor = vec4(mix(c, uFogColor, fogFactor(vDepth)), 1.0);
+}
+`;
+
+// SYBO/Skybox: screen-space vertical gradient
+const SKY_VERTEX = /* glsl */ `
+varying float vY;
+void main() {
+  vY = position.y * 0.5 + 0.5;
+  gl_Position = vec4(position.xy, 0.0, 1.0); // mid-depth: never clipped (depth test is off anyway)
+}
+`;
+const SKY_FRAGMENT = /* glsl */ `
+uniform vec3 uTop;
+uniform vec3 uBottom;
+uniform float uPower;
+varying float vY;
+void main() {
+  gl_FragColor = vec4(mix(uBottom, uTop, pow(clamp(vY, 0.0, 1.0), uPower)), 1.0);
+}
+`;
+
+/** Full-screen gradient drawn behind everything (ThemeConfig skybox material). */
+export function createSky() {
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: SKY_VERTEX,
+    fragmentShader: SKY_FRAGMENT,
+    uniforms: {
+      uTop: { value: new THREE.Color(0.6, 0.65, 0.7) },
+      uBottom: { value: new THREE.Color(0.74, 0.83, 0.91) },
+      uPower: { value: 3 },
+    },
+    depthTest: false,
+    depthWrite: false,
+  });
+  const sky = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+  sky.frustumCulled = false;
+  sky.renderOrder = -10000;
+  sky.setColors = ({ top, bottom, power } = {}) => {
+    if (top) mat.uniforms.uTop.value.setRGB(top[0], top[1], top[2]);
+    if (bottom) mat.uniforms.uBottom.value.setRGB(bottom[0], bottom[1], bottom[2]);
+    if (power) mat.uniforms.uPower.value = power;
+  };
+  return sky;
+}
+
+// ---------------------------------------------------------------- textures
 
 const textureLoader = new THREE.TextureLoader();
 const textureCache = new Map();
+const WHITE = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+WHITE.needsUpdate = true;
 
 function loadTexture(url) {
   if (!textureCache.has(url)) {
     const tex = textureLoader.load(url);
     tex.flipY = false; // glTF UV convention
-    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.colorSpace = THREE.NoColorSpace; // gamma workflow: sample raw sRGB values
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
     textureCache.set(url, tex);
   }
   return textureCache.get(url);
 }
 
-/**
- * Builds three.js materials from the manifest's parsed Unity materials.
- * Basic unlit approximation of SYBO/Bend/Combined; the custom shader comes later.
- */
+// ---------------------------------------------------------------- library
+
+const color4 = (c, fallback = [1, 1, 1, 1]) => new THREE.Vector4(...(c ?? fallback));
+
 export class MaterialLibrary {
   constructor(manifest, baseUrl) {
     this.defs = manifest.materials;
     this.baseUrl = baseUrl;
     this.cache = new Map();
+    this.glassOpacity = 1; // multiplier on transparent glass alpha (UI)
+  }
+
+  tex(def, name) {
+    const t = def.textures[name];
+    return t?.url ? loadTexture(`${this.baseUrl}/${t.url}`) : null;
   }
 
   get(name, fallback) {
     if (this.cache.has(name)) return this.cache.get(name);
     const def = this.defs[name];
-    const mat = addBend(def ? this.build(name, def) : this.fromFallback(name, fallback));
+    let mat;
+    if (!def) mat = this.fromFallback(name, fallback);
+    else if (def.shader === 'SYBO/Bend/Specials/Fountain') mat = this.fountain(name, def);
+    else mat = this.combined(name, def); // VertexWave/ScreenMask/NoFloorLava extras not emulated yet
     this.cache.set(name, mat);
     return mat;
   }
 
-  build(name, def) {
+  /** SYBO/Bend/Combined: keyword-driven übershader. */
+  combined(name, def) {
     const f = def.floats;
     const c = def.colors;
-    const mat = new THREE.MeshBasicMaterial({ name });
-
     const main = def.textures._MainTex;
-    if (main?.url) {
-      const tex = loadTexture(`${this.baseUrl}/${main.url}`);
-      const hasXform = main.scale?.some((v) => v !== 1) || main.offset?.some((v) => v !== 0);
-      if (hasXform) {
-        mat.map = tex.clone();
-        mat.map.repeat.set(...main.scale);
-        mat.map.offset.set(...main.offset);
-      } else {
-        mat.map = tex;
-      }
-    }
+    const keywords = new Set(def.keywords);
+    const on = (flag, keyword) => !!f[flag] || keywords.has(keyword);
+    const fadeMode = f.FADE_MODE ?? 0;
 
-    if (f._HasTint && c._Color) mat.color.setRGB(c._Color[0], c._Color[1], c._Color[2], THREE.SRGBColorSpace);
-    if (f._HasMultiplier && f._Multiplier != null) mat.color.multiplyScalar(f._Multiplier);
-    mat.vertexColors = !!f._HasVertexColors;
+    const defines = { FADE_MODE: fadeMode };
+    if (on('_HasTint', 'TINT_ENABLED') || fadeMode === 1) defines.TINT = '';
+    if (on('_HasMultiplier', 'MULTIPLIER_ENABLED')) defines.MULTIPLIER = '';
+    if (on('_HasScroll', 'SCROLL_ENABLED')) defines.SCROLL = '';
+    if (on('_HasRim', 'RIM_ENABLED')) defines.RIM = '';
+    if (on('_HasFogMultiplier', 'FOG_MULTIPLIER_ENABLED')) defines.FOG_MULTIPLIER = '';
+    const refTex = this.tex(def, '_RefCube');
+    if (on('_HasReflections', 'REFLECTIONS_ENABLED') && refTex) defines.REFLECTIONS = '';
+    if (/fountain/i.test(main?.url ?? '')) defines.MASK_TEXTURE = '';
+
+    const tint = color4(c._Color);
+    const mat = new THREE.ShaderMaterial({
+      name,
+      defines,
+      vertexShader: COMBINED_VERTEX,
+      fragmentShader: COMBINED_FRAGMENT,
+      vertexColors: on('_HasVertexColors', 'VERTEX_COLORS_ENABLED'),
+      uniforms: {
+        ...globals,
+        uMap: { value: this.tex(def, '_MainTex') ?? WHITE },
+        uMainST: { value: new THREE.Vector4(...(main?.scale ?? [1, 1]), ...(main?.offset ?? [0, 0])) },
+        uColor: { value: tint },
+        uMultiplier: { value: f._Multiplier ?? 1 },
+        uScroll: { value: new THREE.Vector2(c._ScrollSpeed?.[0] ?? 0, c._ScrollSpeed?.[1] ?? 0) },
+        uRefTex: { value: refTex ?? WHITE },
+        uRefColor: { value: color4(c._RefColor, [1, 1, 1, 0]) },
+        uRimColor: { value: color4(c._RimColor) },
+        uRimPower: { value: f._RimPower ?? 2.75 },
+        uRimAmount: { value: f._RimAmount ?? 1.5 },
+        uFogMultiplier: { value: f._FogMultiplier ?? 1 },
+      },
+    });
+    this.applyRenderState(mat, name, def);
+    if (fadeMode === 1 && /glass/i.test(name)) {
+      mat.userData.glass = true;
+      mat.userData.baseAlpha = tint.w;
+      tint.w *= this.glassOpacity;
+    }
+    return mat;
+  }
+
+  fountain(name, def) {
+    const c = def.colors;
+    const main = def.textures._MainTex;
+    const mat = new THREE.ShaderMaterial({
+      name,
+      defines: { SCROLL: '' },
+      vertexShader: COMBINED_VERTEX,
+      fragmentShader: FOUNTAIN_FRAGMENT,
+      uniforms: {
+        ...globals,
+        uMap: { value: this.tex(def, '_MainTex') ?? WHITE },
+        uMainST: { value: new THREE.Vector4(...(main?.scale ?? [1, 1]), ...(main?.offset ?? [0, 0])) },
+        uScroll: { value: new THREE.Vector2(c._TextureScrollSpeed?.[0] ?? 0, c._TextureScrollSpeed?.[1] ?? 0) },
+        uMainColor: { value: color4(c._MainColor) },
+        uFoamColor: { value: color4(c._FoamColor) },
+        uAlphaKill: { value: def.floats._AlphaKillValue ?? 0.5 },
+      },
+    });
+    this.applyRenderState(mat, name, def);
+    return mat;
+  }
+
+  /** Blend / cull / depth state from the Unity material's _SrcMode/_DstMode/_CullMode/_ZWrite. */
+  applyRenderState(mat, name, def) {
+    const f = def.floats;
     mat.side = SIDE[f._CullMode ?? 2] ?? THREE.FrontSide;
     mat.depthWrite = (f._ZWrite ?? 1) !== 0;
-
     const src = f._SrcMode ?? 1;
     const dst = f._DstMode ?? 0;
     const transparent = !(src === 1 && dst === 0) || def.renderQueue >= 2500;
@@ -123,12 +350,38 @@ export class MaterialLibrary {
     }
     if (def.renderQueue > 0) mat.userData.renderQueue = def.renderQueue;
     mat.userData.unity = def;
-    return mat;
   }
 
   fromFallback(name, fallback) {
-    const mat = new THREE.MeshBasicMaterial({ name, map: fallback?.map ?? null });
-    if (!fallback?.map) mat.color.set(0xff00ff); // unresolved material: make it obvious
-    return mat;
+    const map = fallback?.map ?? null;
+    if (map) map.colorSpace = THREE.NoColorSpace;
+    return new THREE.ShaderMaterial({
+      name,
+      defines: { FADE_MODE: 0, TINT: '' },
+      vertexShader: COMBINED_VERTEX,
+      fragmentShader: COMBINED_FRAGMENT,
+      uniforms: {
+        ...globals,
+        uMap: { value: map ?? WHITE },
+        uMainST: { value: new THREE.Vector4(1, 1, 0, 0) },
+        uScroll: { value: new THREE.Vector2() },
+        uColor: { value: map ? new THREE.Vector4(1, 1, 1, 1) : new THREE.Vector4(1, 0, 1, 1) }, // magenta = unresolved
+        uMultiplier: { value: 1 },
+        uRefTex: { value: WHITE },
+        uRefColor: { value: new THREE.Vector4() },
+        uRimColor: { value: new THREE.Vector4() },
+        uRimPower: { value: 1 },
+        uRimAmount: { value: 0 },
+        uFogMultiplier: { value: 1 },
+      },
+    });
+  }
+
+  /** Scales the alpha of transparent glass materials (UI slider). */
+  setGlassOpacity(v) {
+    this.glassOpacity = v;
+    for (const mat of this.cache.values()) {
+      if (mat.userData.glass) mat.uniforms.uColor.value.w = mat.userData.baseAlpha * v;
+    }
   }
 }

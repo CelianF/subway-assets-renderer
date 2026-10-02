@@ -118,6 +118,41 @@ def parse_boundaries(path: Path, guid_index) -> dict:
     return {"transitions": [t for t in transitions if t.get("prefab")], "trackInfos": track_infos}
 
 
+def parse_theme_config(path: Path, guid_index) -> dict:
+    """<Theme>_Config.asset (ThemeConfig): fog, camera far plane, skybox material, skyline."""
+    text = path.read_text(errors="ignore")
+    color = lambda key: (lambda m: [float(m.group(i)) for i in range(1, 5)] if m else None)(
+        re.search(key + r": \{r: ([\d.e-]+), g: ([\d.e-]+), b: ([\d.e-]+), a: ([\d.e-]+)\}", text))
+    number = lambda key: (lambda m: float(m.group(1)) if m else None)(re.search(r"\n  " + key + r": ([\d.e-]+)", text))
+    ref = lambda key: (lambda m: guid_index.get(m.group(1)) if m else None)(re.search(key + r": \{fileID: \d+, guid: (\w+)", text))
+    out = {
+        "fog": {"color": color("FogColor"), "start": number("FogStartDistance"), "end": number("FogEndDistance")},
+        "cameraFar": number("CameraFar"),
+        "trainLight": color("TrainLight"),
+    }
+    skybox = ref("  Skybox")
+    if skybox and skybox.suffix == ".mat":
+        mat = skybox.read_text(errors="ignore")
+        c = lambda key: (lambda m: [float(m.group(i)) for i in range(1, 4)] if m else None)(
+            re.search(key + r": \{r: ([\d.e-]+), g: ([\d.e-]+), b: ([\d.e-]+)", mat))
+        power = re.search(r"_Power: ([\d.e-]+)", mat)
+        out["sky"] = {"top": c("_TopColor"), "bottom": c("_BottomColor"), "power": float(power.group(1)) if power else 1}
+    bg = re.search(r"BackgroundLayer:\n    Prefab: \{fileID: \d+, guid: (\w+)", text)
+    if bg and bg.group(1) in guid_index:
+        out["background"] = {
+            "prefab": guid_index[bg.group(1)].stem,
+            "distance": number("DistanceFromPlayer"),
+            "tint": color("    Tint"),
+            "gradientA": color("GradientA"),
+            "gradientB": color("GradientB"),
+        }
+    return out
+
+
+# Prefabs the viewer needs beyond theme slots
+EXTRA_PREFABS = ["_Common_LightSignal_Light_Green", "_Common_LightSignal_Light_Red"]
+
+
 TRACK_TYPES = {
     0: "Invisible", 1: "TrackNormal", 2: "TrackShadow", 3: "TrackShadowStart", 4: "TrackShadowEnd",
     5: "TrackShadowStartEnd", 6: "GroundNormal", 7: "GroundShadow", 8: "GroundShadowStart",
@@ -363,12 +398,21 @@ def main():
             boundaries[theme] = parse_boundaries(path, guid_index)
     log(f"Transitions: {sum(len(b['transitions']) for b in boundaries.values())} in {len(boundaries)} themes")
 
+    theme_configs = {}
+    for theme in themes:
+        path = project / f"{theme}_Config.asset"
+        if path.exists():
+            theme_configs[theme] = parse_theme_config(path, guid_index)
+    log(f"Theme configs: {len(theme_configs)}")
+
     # Prefabs referenced by any theme
     out_glb = args.out / "glb"
     out_glb.mkdir(parents=True, exist_ok=True)
     prefabs = {}
     missing, empty = [], []
     transition_prefabs = [[t["prefab"] for t in b["transitions"]] for b in boundaries.values()]
+    transition_prefabs.append(EXTRA_PREFABS)
+    transition_prefabs.append([c["background"]["prefab"] for c in theme_configs.values() if "background" in c])
     for names in [n for slots in themes.values() for n in slots.values()] + transition_prefabs:
         if True:
             for name in names:
@@ -450,6 +494,7 @@ def main():
             for theme, slots in themes.items()
         },
         "boundaries": boundaries,
+        "themeConfigs": theme_configs,
         "prefabs": prefabs,
         "materials": materials,
     }

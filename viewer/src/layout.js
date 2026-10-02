@@ -28,9 +28,17 @@ function pieceLength(prefab) {
 /**
  * @returns {{items: Array<{prefab, slot, layer, pos:[x,y,z], trackType?}>, length: number}}
  */
-export function generateLayout(manifest, themeName, { seed = 1, sections = 12, obstacles = true, trains = true } = {}) {
+export function generateLayout(
+  manifest,
+  themeName,
+  { seed = 1, sections = 12, obstacles = true, trains = true, signals = true, trainTheme = null } = {},
+) {
   const theme = manifest.themes[themeName];
   const slots = Object.assign({}, ...Object.values(theme));
+  // Trains (and ramps) can come from another theme
+  if (trainTheme && trainTheme !== themeName && manifest.themes[trainTheme]) {
+    Object.assign(slots, manifest.themes[trainTheme].train);
+  }
   const has = (slot) => slots[slot]?.length > 0;
   const rng = mulberry32(seed);
   const items = [];
@@ -120,7 +128,14 @@ export function generateLayout(manifest, themeName, { seed = 1, sections = 12, o
   };
   force('epic', Math.floor(sections / 2));
   force('gate', Math.max(1, Math.floor(sections / 4)));
-  for (const section of plan) section.build();
+  // Covered/special sections never touch: the game always puts open-air buildings between them
+  const finalPlan = [];
+  for (const section of plan) {
+    const prev = finalPlan[finalPlan.length - 1];
+    if (prev && prev !== sectionTypes[0] && section !== sectionTypes[0]) finalPlan.push(sectionTypes[0]);
+    finalPlan.push(section);
+  }
+  for (const section of finalPlan) section.build();
   const length = z;
   placeTransitions();
 
@@ -151,13 +166,26 @@ export function generateLayout(manifest, themeName, { seed = 1, sections = 12, o
     }
   }
 
-  // Rails: one TrackNormal piece per lane per segment, skipping gate stretches
+  // Rails: one piece per lane per segment, skipping gate stretches. Under boundaries
+  // whose TrackInfos say ShowShadows (stations, tubes, pillars) the shadowed variants
+  // are used, with start/end pieces where the shadowed stretch begins and ends.
+  const trackInfos = manifest.boundaries?.[themeName]?.trackInfos ?? {};
+  const shadowedAt = (tz) => {
+    const run = runs.left.find((r) => tz >= r.z0 && tz < r.z1);
+    return !!(run && trackInfos[run.slot]?.ShowShadows);
+  };
   for (let tz = 0; tz < length; tz += SEGMENT) {
     if (noTrackRanges.some(([a, b]) => tz >= a && tz < b)) continue;
-    for (const x of LANES) place('track_track', [x, 0, tz], 'track', { trackType: 'TrackNormal' });
+    let trackType = 'TrackNormal';
+    if (shadowedAt(tz)) {
+      const starts = !shadowedAt(tz - SEGMENT);
+      const ends = !shadowedAt(tz + SEGMENT);
+      trackType = starts && ends ? 'TrackShadowStartEnd' : starts ? 'TrackShadowStart' : ends ? 'TrackShadowEnd' : 'TrackShadow';
+    }
+    for (const x of LANES) place('track_track', [x, 0, tz], 'track', { trackType });
   }
 
-  if (obstacles || trains) placeObstacles();
+  if (obstacles || trains || signals) placeObstacles();
 
   function placeObstacles() {
     const trainSlots = ['train_static_1', 'train_static_2', 'train_static_3', 'train_static_5', 'train_moving_3', 'train_moving_5'].filter(has);
@@ -185,9 +213,10 @@ export function generateLayout(manifest, themeName, { seed = 1, sections = 12, o
           if (ramp) place('train_ramp', [x, 0, oz + 36], 'train', { group });
           place(slot, [x, 0, oz + ramp], 'train', { group });
           // Signal light at the track edge before some trains (outer edge for side lanes)
-          if (obstacles && has('obstacle_lightSignal') && rng() < 0.5) {
-            const side = x === 0 ? (rng() < 0.5 ? -1 : 1) : Math.sign(x);
-            place('obstacle_lightSignal', [x + side * 12, 0, oz - 15], 'obstacle');
+          // Signal light between two tracks (the game's LightSignal sits at x = ±10)
+          if (signals && has('obstacle_lightSignal') && rng() < 0.5) {
+            const sx = x === 0 ? (rng() < 0.5 ? -10 : 10) : Math.sign(x) * 10;
+            place('obstacle_lightSignal', [sx, 0, oz - 15], 'signal', { signalSeed: Math.floor(rng() * 2 ** 31) });
           }
           oz += ramp + trainLength;
         } else if (obstacles && blockerSlots.length) {
