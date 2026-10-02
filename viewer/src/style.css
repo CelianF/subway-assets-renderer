@@ -353,6 +353,10 @@ body.ui-hidden #status {
 .ctl-label {
   flex: 1;
 }
+.ctl-extra {
+  padding: 2px 8px;
+  font-size: 13px;
+}
 .ctl-label small {
   margin-left: 6px;
   color: var(--muted);

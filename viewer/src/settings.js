@@ -29,6 +29,8 @@ function buildControl(c, refreshers) {
   if (c.type === 'toggle') {
     const input = el('input', { type: 'checkbox', onchange: (e) => changed(e.target.checked) });
     row.append(el('label', { class: 'switch' }, input, el('i')), label);
+    // Optional side button (e.g. 👁 preview)
+    if (c.extra) row.append(el('button', { class: 'icon ctl-extra', title: c.extra.title ?? '', onclick: (e) => (e.stopPropagation(), c.extra.action()) }, c.extra.label));
     refresh = () => (input.checked = !!c.obj[c.key]);
     row.classList.add('clickable');
     row.addEventListener('click', (e) => {

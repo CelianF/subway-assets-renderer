@@ -61,11 +61,12 @@ const RAMP_LENGTH = 76; // ramp wagon in front of a train (origin 36 behind its 
 
 /** Generation filters ("advanced generation"); everything on by default. */
 export const DEFAULT_GEN = {
-  sections: { station: true, tube: true, pillars: true, gate: true, epic: true },
+  sections: { buildings: true, station: true, tube: true, pillars: true, gate: true, epic: true },
   trains: { static: true, moving: true, falling: true, ramps: true, start: true },
   obstacles: { jump: true, roll: true, standard: true, bush: true, dumpster: true, powerBox: true, pillar: true },
   signals: true,
   decorations: true,
+  pieces: {}, // building piece key ("low_01", "high_03"…) -> false to leave it out
   density: 1, // obstacles per distance (gaps shrink as it grows)
   trainShare: 0.55, // chance a spot gets a train rather than an obstacle
 };
@@ -86,6 +87,25 @@ export function fitTrain(options, span) {
   return fitting.length ? fitting[fitting.length - 1] : options[0];
 }
 export { RAMP_LENGTH };
+
+/** Building piece key shared by a left/right pair: "London_low_01_left" -> "low_01". */
+export const buildingPieceKey = (name) => name.match(/_((?:low|med|medium|high)_\d+)_(?:left|right)$/i)?.[1]?.toLowerCase() ?? null;
+
+/** Building pieces of a theme, grouped by height, for the "map sections" picker. */
+export function buildingPieces(manifest, themeName) {
+  const slots = Object.assign({}, ...Object.values(manifest.themes[themeName]));
+  const out = {};
+  for (const height of ['low', 'medium', 'high']) {
+    for (const side of ['left', 'right']) {
+      for (const name of slots[`boundary_${height}_${side}`] ?? []) {
+        const key = buildingPieceKey(name);
+        if (!key) continue;
+        (out[key] ??= { key, height, prefabs: [] }).prefabs.push(name);
+      }
+    }
+  }
+  return Object.values(out);
+}
 
 const hashString = (str) => [...str].reduce((h, c) => (Math.imul(h, 31) + c.charCodeAt(0)) | 0, 7) >>> 0;
 
@@ -174,24 +194,42 @@ export function generateLayout(
     { name: 'pillars', weight: 1, ok: () => has('boundary_pillars_mid'), build: pillars },
     { name: 'gate', weight: 0.5, ok: () => has('boundary_gate') && has('track_gates'), build: gate },
     { name: 'epic', weight: 0.4, ok: () => has('boundary_epic_start'), build: epic },
-  ].filter((s) => s.ok() && (s.name === 'buildings' || gen.sections[s.name] !== false));
+  ].filter((s) => s.ok() && gen.sections[s.name] !== false);
+  // Nothing enabled (or available): plain buildings
+  if (!sectionTypes.length) sectionTypes.push({ name: 'buildings', weight: 1, build: buildings });
+  const buildingsType = sectionTypes.find((t) => t.name === 'buildings');
 
   function buildings() {
     const n = randInt(rng, 2, 5);
+    // Heights that still have an allowed piece on both sides ("map sections" picker)
+    const allowed = (slot) => (slots[slot] ?? []).filter((nm) => gen.pieces[buildingPieceKey(nm)] !== false);
+    let heights = ['low', 'medium', 'high'].filter((h) => allowed(`boundary_${h}_left`).length && allowed(`boundary_${h}_right`).length);
+    const usePieces = heights.length > 0;
+    if (!usePieces) heights = ['low', 'medium', 'high'];
     for (let i = 0; i < n; i++) {
-      const height = pick(rng, ['low', 'medium', 'high']);
+      const height = pick(rng, heights);
       // Ad slots replace a right-hand building now and then (in exports without an
       // active campaign they point at regular buildings)
       const sponsored = ['boundary_sponsored_right_front', 'boundary_sponsored_right_back'].filter(has);
       const right = sponsored.length && rng() < 0.15 ? pick(rng, sponsored) : `boundary_${height}_right`;
-      place(`boundary_${height}_left`, [0, 0, z]);
-      place(right, [0, 0, z]);
+      placeAllowed(`boundary_${height}_left`, usePieces);
+      if (right.startsWith('boundary_sponsored')) place(right, [0, 0, z]);
+      else placeAllowed(right, usePieces);
       addRun('left', `boundary_${height}_left`, z, z + SEGMENT);
       addRun('right', right, z, z + SEGMENT);
       decorate(z);
       z += SEGMENT;
     }
   }
+  /** Places a building slot using only the pieces left on in the picker. */
+  function placeAllowed(slot, restrict) {
+    if (!restrict) return place(slot, [0, 0, z]);
+    const names = slots[slot].filter((nm) => gen.pieces[buildingPieceKey(nm)] !== false);
+    const prefab = pick(placeRng, names);
+    items.push({ prefab, slot, layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(placeRng() * 2 ** 31) });
+    return prefab;
+  }
+
   function station() {
     const start = z;
     placeRun('boundary_station_start');
@@ -273,18 +311,19 @@ export function generateLayout(
     let r = rng() * total;
     return sectionTypes.find((t) => (r -= t.weight) < 0) ?? sectionTypes[0];
   });
-  plan[0] = sectionTypes[0]; // open with plain buildings so the camera starts somewhere readable
+  if (buildingsType) plan[0] = buildingsType; // open with plain buildings so the camera starts somewhere readable
   const force = (name, at) => {
     const type = sectionTypes.find((t) => t.name === name);
     if (type && sections >= 4 && !plan.includes(type)) plan[at] = type;
   };
   force('epic', Math.floor(sections / 2));
   force('gate', Math.max(1, Math.floor(sections / 4)));
-  // Covered/special sections never touch: the game always puts open-air buildings between them
+  // Covered/special sections never touch: the game always puts open-air buildings between
+  // them (unless buildings are switched off, then the chosen sections chain directly)
   const finalPlan = [];
   for (const section of plan) {
     const prev = finalPlan[finalPlan.length - 1];
-    if (prev && prev !== sectionTypes[0] && section !== sectionTypes[0]) finalPlan.push(sectionTypes[0]);
+    if (buildingsType && prev && prev !== buildingsType && section !== buildingsType) finalPlan.push(buildingsType);
     finalPlan.push(section);
   }
   for (const section of finalPlan) section.build();

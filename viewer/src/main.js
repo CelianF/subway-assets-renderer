@@ -4,7 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces } from './layout.js';
 import { createSettings } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
@@ -421,6 +421,7 @@ function trainTheme() {
 
 /** Pieces for inspection, spaced by their width so they don't overlap. */
 function inspectLayout(names) {
+  if (state.inspectTogether) return names.map((prefab) => ({ prefab, layer: 'environment', pos: [0, 0, 0], variantSeed: state.seed }));
   let x = 0;
   return names.map((prefab) => {
     const bb = manifest.prefabs[prefab]?.bbox ?? [[-50, 0, 0], [50, 0, 0]];
@@ -537,7 +538,7 @@ function updateVisibility() {
   layers.train.visible = state.trains;
   layers.obstacle.visible = state.obstacles;
   layers.signal.visible = state.signals;
-  layers.wall.visible = state.walls;
+  layers.wall.visible = true; // gate walls are part of the gate section
 }
 
 // ---------------------------------------------------------------- screenshot
@@ -640,6 +641,9 @@ const shuffle = () => {
 };
 const regen = () => rebuild();
 const catalog = () => studioCatalog(manifest, state.theme, trainTheme());
+// "low_01" -> "Low 01" ("med" pieces read as "Medium")
+const pieceLabel = (key) => key.replace(/^med_/, 'medium_').replace(/^(\w)/, (c) => c.toUpperCase()).replace('_', ' ');
+for (const piece of buildingPieces(manifest, state.theme)) state.gen.pieces[piece.key] ??= true;
 const toggles = (obj, entries, onChange = regen) => entries.filter(([, , show = true]) => show).map(([key, label]) => ({ type: 'toggle', label, obj, key, onChange }));
 const hasSlot = (slot) => Object.values(manifest.themes[state.theme]).some((c) => c[slot]?.length);
 const isAuto = () => state.obstacleMode !== 'studio';
@@ -673,45 +677,29 @@ const settings = createSettings(
           ],
         },
         {
-          title: 'Sections',
+          title: 'Map sections',
           controls: toggles(state.gen.sections, [
+            ['buildings', 'Buildings'],
             ['station', 'Stations', hasSlot('boundary_station_mid')],
             ['tube', 'Tubes', hasSlot('boundary_tube')],
             ['pillars', 'Pillar halls', hasSlot('boundary_pillars_mid')],
             ['gate', 'Gates', hasSlot('boundary_gate')],
             ['epic', 'Landmark', hasSlot('boundary_epic_start')],
-          ]).concat([{ type: 'toggle', label: 'Event decorations', obj: state.gen, key: 'decorations', onChange: regen }]),
+          ]),
         },
         {
-          title: 'Trains (auto)',
-          visible: isAuto,
+          title: 'Building pieces',
+          visible: () => state.gen.sections.buildings !== false,
           controls: [
-            ...toggles(state.gen.trains, [
-              ['static', 'Parked trains'],
-              ['moving', 'Moving trains'],
-              ['falling', 'Lava trains', hasSlot('train_falling_1')],
-              ['ramps', 'Ramps'],
-              ['start', 'Start train'],
-            ]),
-            { type: 'slider', label: 'Train share', hint: 'trains vs obstacles', obj: state.gen, key: 'trainShare', min: 0, max: 1, step: 0.05, lazy: true, onChange: regen },
-          ],
-        },
-        {
-          title: 'Obstacles (auto)',
-          visible: isAuto,
-          controls: [
-            ...toggles(state.gen.obstacles, [
-              ['jump', 'Jump barriers'],
-              ['roll', 'Roll barriers'],
-              ['standard', 'Barriers'],
-              ['bush', 'Bushes', hasSlot('obstacle_bush')],
-              ['dumpster', 'Dumpsters', hasSlot('obstacle_dumpster')],
-              ['powerBox', 'Power boxes', hasSlot('obstacle_powerBox')],
-              ['pillar', 'Middle pillars', hasSlot('obstacle_pillar')],
-            ]),
-            { type: 'toggle', label: 'Signal lights', obj: state.gen, key: 'signals', onChange: regen },
-            { type: 'slider', label: 'Density', obj: state.gen, key: 'density', min: 0.25, max: 3, step: 0.05, lazy: true, onChange: regen },
-            { type: 'button', label: 'Reset generation options', action: () => (Object.assign(state.gen, structuredClone(DEFAULT_GEN)), regen(), settings.refresh()) },
+            ...buildingPieces(manifest, state.theme).map((piece) => ({
+              type: 'toggle',
+              label: pieceLabel(piece.key),
+              obj: state.gen.pieces,
+              key: piece.key,
+              onChange: regen,
+              extra: { label: '👁', title: 'Preview this piece', action: () => (settings.close(), inspectPieces(piece.prefabs, { together: true })) },
+            })),
+            { type: 'button', label: 'All pieces', action: () => (Object.keys(state.gen.pieces).forEach((k) => (state.gen.pieces[k] = true)), regen(), settings.refresh()) },
           ],
         },
       ],
@@ -724,7 +712,6 @@ const settings = createSettings(
           controls: toggles(state, [
             ['trains', 'Trains'],
             ['obstacles', 'Barriers & props'],
-            ['walls', 'Gate walls'],
             ['signals', 'Signal lights'],
           ], updateVisibility),
         },
@@ -765,12 +752,11 @@ const settings = createSettings(
       groups: [
         {
           controls: [
-            { type: 'select', label: 'Preset', obj: state, key: 'camera', options: Object.fromEntries(Object.keys(CAMERA_PRESETS).map((k) => [k, k])), onChange: applyCamera },
-            { type: 'select', label: 'Mode', obj: state, key: 'controls', options: { Fly: 'fly', Orbit: 'orbit' }, onChange: setControlMode },
+            { type: 'button', label: '🎥 Reset to game camera', action: () => (applyCamera('game'), settings.refresh()) },
             { type: 'toggle', label: 'Hide piece around camera', obj: state, key: 'cutaway' },
-            { type: 'slider', label: 'Fly speed', obj: fly, key: 'speed', min: 5, max: 3000, step: 1 },
-            { type: 'slider', label: 'Field of view', obj: state, key: 'fov', min: 20, max: 110, step: 1, onChange: (v) => ((camera.fov = v), camera.updateProjectionMatrix()) },
-            { type: 'note', label: 'Drag: look · WASD: move · Space/Shift: up/down · Alt: fast · Wheel: speed' },
+            { type: 'slider', label: 'Fly speed', hint: '− / =', obj: fly, key: 'speed', min: 5, max: 3000, step: 1 },
+            { type: 'slider', label: 'Field of view', hint: 'wheel', obj: state, key: 'fov', min: 20, max: 110, step: 1, onChange: setFov },
+            { type: 'note', label: 'Drag: look · WASD: move · Space/Shift: up/down · Ctrl: sprint · −/=: speed · Wheel: field of view' },
           ],
         },
       ],
@@ -791,6 +777,20 @@ const settings = createSettings(
   { title: 'Settings' },
 );
 fly.onSpeedChange = () => settings.refresh();
+fly.onWheel = (deltaY) => setFov(THREE.MathUtils.clamp(state.fov + (deltaY > 0 ? 2 : -2), 20, 110));
+
+function setFov(v) {
+  state.fov = camera.fov = v;
+  camera.updateProjectionMatrix();
+  if (settings.isOpen()) settings.refresh();
+}
+
+/** Shows only the given prefabs (piece browser, 👁 previews); "Back to run" restores the run. */
+function inspectPieces(names, { together = false } = {}) {
+  state.inspect = names;
+  state.inspectTogether = together; // a building's left + right halves, assembled in place
+  rebuild();
+}
 
 // ---------------------------------------------------------------- studio
 
@@ -843,10 +843,7 @@ function exitStudio() {
 const ui = createUI(manifest, {
   getState: () => state,
   env: envInfo,
-  inspect: (names) => {
-    state.inspect = names;
-    rebuild();
-  },
+  inspect: (names) => inspectPieces(names),
   exitInspect: () => {
     state.inspect = null;
     state.controls = 'fly';
@@ -881,7 +878,7 @@ addEventListener('keydown', (e) => {
 
 applyCamera(state.camera);
 setControlMode(state.controls);
-window.__viewer = { renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, settings, enterStudio, exitStudio };
+window.__viewer = { fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, settings, enterStudio, exitStudio };
 await rebuild();
 
 const clock = new THREE.Clock();

@@ -9,7 +9,7 @@ import { fitTrain, trainLength, RAMP_LENGTH } from './layout.js';
 
 const CELL = 11.25;
 const LANES = [20, 0, -20]; // left, middle, right (glTF X; the game's left is +X)
-const SIGNAL_X = [10, -10];
+const SIGNAL_X = [30, 10, -10, -30]; // outer left edge, between tracks, outer right edge
 const CLIP_HEIGHT = 34;
 const TILT = THREE.MathUtils.degToRad(28); // from straight down
 
