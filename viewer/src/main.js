@@ -269,6 +269,7 @@ const state = {
   obstacles: params.get('obstacles') !== '0',
   trains: params.get('trains') !== '0',
   signals: params.get('signals') !== '0',
+  walls: params.get('walls') !== '0',
   trainEnv: 'same', // environment id whose trains are used
   fog: params.get('fog') !== '0',
   fogScale: Number(params.get('fogScale') ?? 1),
@@ -290,6 +291,7 @@ const layers = {
   track: new THREE.Group(),
   train: new THREE.Group(),
   obstacle: new THREE.Group(),
+  wall: new THREE.Group(), // gate walls, open on one lane
   signal: new THREE.Group(),
 };
 Object.values(layers).forEach((g) => scene.add(g));
@@ -378,7 +380,7 @@ function frameInspection(items) {
   gui.controllersRecursive().forEach((c) => c.updateDisplay());
 }
 
-const CUTAWAY_LAYERS = ['environment', 'train', 'obstacle', 'signal'];
+const CUTAWAY_LAYERS = ['environment', 'train', 'obstacle', 'wall', 'signal'];
 
 // ---------------------------------------------------------------- theme look
 
@@ -454,6 +456,7 @@ function updateVisibility() {
   layers.train.visible = state.trains;
   layers.obstacle.visible = state.obstacles;
   layers.signal.visible = state.signals;
+  layers.wall.visible = state.walls;
 }
 
 // ---------------------------------------------------------------- screenshot
@@ -555,7 +558,8 @@ gui.add(state, 'trainEnv', trainOptions).name('trains from').onChange(async (id)
   if (id !== 'same') await mergeEnvironment(id);
   rebuild();
 });
-gui.add(state, 'obstacles').onChange(updateVisibility);
+gui.add(state, 'obstacles').name('barriers').onChange(updateVisibility);
+gui.add(state, 'walls').name('walls (gates)').onChange(updateVisibility);
 gui.add(state, 'obstacleMode', { 'random': 'random', "game's chase chunks": 'chunks' }).name('obstacle layout').onChange(rebuild);
 gui.add(state, 'signals').name('signal lights').onChange(updateVisibility);
 

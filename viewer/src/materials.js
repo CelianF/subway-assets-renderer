@@ -82,10 +82,14 @@ varying vec3 vColor;
 #endif
 
 void main() {
-  vUv = uv * uMainST.xy + uMainST.zw;
+  // Unity applies tiling/offset (and scrolls) with V pointing up; glTF UVs have V
+  // flipped, so convert to Unity space and back or scrolling runs the wrong way.
+  vec2 offset = uMainST.zw;
 #ifdef SCROLL
-  vUv += uScroll * uTime / 20.0; // Unity _Time.x
+  offset += uScroll * uTime / 20.0; // Unity _Time.x
 #endif
+  vec2 unityUv = vec2(uv.x, 1.0 - uv.y) * uMainST.xy + offset;
+  vUv = vec2(unityUv.x, 1.0 - unityUv.y);
   vec3 p = position;
 #ifdef WAVE
   vec3 wp = (modelMatrix * vec4(p, 1.0)).xyz;
@@ -93,7 +97,7 @@ void main() {
   p += uWaveDir * sin(phase) * uWaveParams.z * color.r;
 #endif
 #ifdef LAVA
-  p.y += (texture2D(uDisplaceTex, uv + uDisplaceScroll * uTime / 20.0).r - 0.5) * uMeshDisplace;
+  p.y += (texture2D(uDisplaceTex, uv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5) * uMeshDisplace;
 #endif
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   float depth = max(-mv.z, 0.0);
@@ -102,7 +106,7 @@ void main() {
   vNormalV = normalize(normalMatrix * normal);
   vViewDir = normalize(-mv.xyz);
 #ifdef USE_COLOR
-  vColor = color;
+  vColor = color.rgb; // vec3 or vec4 (RGBA vertex colors) depending on the mesh
 #endif
   gl_Position = projectionMatrix * mv;
 }
@@ -222,7 +226,7 @@ varying float vDepth;
 ${FOG_GLSL}
 
 void main() {
-  float d = texture2D(uDisplaceTex, vUv + uDisplaceScroll * uTime / 20.0).r - 0.5;
+  float d = texture2D(uDisplaceTex, vUv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5;
   vec3 t = texture2D(uMap, vUv + d * uDisplaceStrength).rgb;
   vec3 c = t.r * uColorR + t.g * uColorG + t.b * uColorB;
   gl_FragColor = vec4(mix(c, uFogColor, fogFactor(vDepth)), 1.0);

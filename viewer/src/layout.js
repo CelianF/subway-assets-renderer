@@ -19,10 +19,15 @@ export function mulberry32(seed) {
 const randInt = (rng, lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
 const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
 
-/** Length a piece occupies along Z, snapped to half segments. */
+/**
+ * Length a piece occupies along Z, in half segments. Rounds down with some slack:
+ * decoration often overhangs the piece's real end (Luoyang's gate reaches z 407
+ * for a 360 section), and rounding up would leave a gap without rails.
+ */
+const OVERHANG = 30;
 function pieceLength(prefab) {
   const maxZ = prefab?.bbox?.[1][2] ?? SEGMENT;
-  return Math.max(SEGMENT / 2, Math.round(maxZ / (SEGMENT / 2)) * (SEGMENT / 2));
+  return Math.max(SEGMENT / 2, Math.floor((maxZ + OVERHANG) / (SEGMENT / 2)) * (SEGMENT / 2));
 }
 
 /**
@@ -102,7 +107,7 @@ export function generateLayout(
     place('track_gates', [0, 0, z]);
     // The wall across the lanes, open on one lane (left/mid/right) or both sides
     const walls = ['special_gate_left', 'special_gate_mid', 'special_gate_right', 'special_gate_sides'].filter(has);
-    if (walls.length) place(pick(rng, walls), [0, 0, z], 'obstacle');
+    if (walls.length) place(pick(rng, walls), [0, 0, z], 'wall');
     placeRun('boundary_gate');
     z = Math.max(z, start + pieceLength(manifest.prefabs[slots.track_gates[0]]));
     noTrackRanges.push([start, z]);
@@ -185,7 +190,8 @@ export function generateLayout(
     for (const x of LANES) place('track_track', [x, 0, tz], 'track', { trackType });
   }
 
-  if (obstacleMode === 'chunks' && manifest.chunks) placeChunks();
+  // Older game versions ship no chase chunks: fall back to random obstacles
+  if (obstacleMode === 'chunks' && Object.keys(manifest.chunks ?? {}).length) placeChunks();
   else if (obstacles || trains || signals) placeObstacles();
 
   // The game's chase chunks (ChunkAssetPlacer layouts) laid back to back. Their random
