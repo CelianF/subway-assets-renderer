@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""Build the viewer manifest from an AssetRipper export of Subway Surfers.
+
+Reads theme slot tables (MonoBehaviour/*_Theme.asset), resolves theme
+inheritance, parses materials, measures each prefab glb and copies the
+referenced glbs into the viewer's data folder.
+
+Usage: python3 tools/build_manifest.py "/path/to/69.1 assets" [--out viewer/public/data]
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import struct
+import sys
+from pathlib import Path
+
+GUID_RE = re.compile(r"guid: ([0-9a-f]{32})")
+
+# Built-in Unity shaders referenced by fileID with the zero guid
+BUILTIN_SHADERS = {
+    "10720": "Mobile/Particles/Additive",
+    "10721": "Mobile/Particles/Alpha Blended",
+    "10750": "Unlit/Texture",
+    "10752": "Unlit/Transparent",
+    "10753": "Unlit/Transparent Cutout",
+    "10755": "Unlit/Color",
+    "10770": "UI/Default",
+    "46": "Standard",
+}
+
+
+def log(*a):
+    print(*a, file=sys.stderr)
+
+
+# ---------------------------------------------------------------- guid index
+
+def build_guid_index(project: Path) -> dict:
+    """guid -> asset path (without .meta) for every asset in ExportedProject."""
+    index = {}
+    for meta in project.rglob("*.meta"):
+        with open(meta, errors="ignore") as f:
+            m = GUID_RE.search(f.read(300))
+        if m:
+            index[m.group(1)] = meta.with_suffix("")
+    return index
+
+
+# ---------------------------------------------------------------- themes
+
+def parse_theme(path: Path) -> dict:
+    """Return {'parent': guid|None, 'slots': [(type_guid, [prefab_guid...])]}."""
+    parent = None
+    slots = []
+    for line in path.read_text(errors="ignore").splitlines():
+        m = GUID_RE.search(line)
+        stripped = line.strip()
+        if stripped.startswith("_parent:"):
+            parent = m.group(1) if m else None
+        elif stripped.startswith("- Type:") and m:
+            slots.append((m.group(1), []))
+        elif stripped.startswith("- {fileID:") and m and slots:
+            slots[-1][1].append(m.group(1))
+    return {"parent": parent, "slots": slots}
+
+
+def resolve_theme(guid, guid_index, cache) -> dict:
+    """slot name -> [prefab names], with parent slots overridden by children."""
+    if guid in cache:
+        return cache[guid]
+    path = guid_index.get(guid)
+    if path is None or path.suffix != ".asset":
+        return {}
+    theme = parse_theme(path)
+    slots = dict(resolve_theme(theme["parent"], guid_index, cache)) if theme["parent"] else {}
+    for type_guid, prefabs in theme["slots"]:
+        type_path = guid_index.get(type_guid)
+        slot = type_path.stem if type_path else f"?{type_guid}"
+        slots[slot] = [guid_index[g].stem for g in prefabs if g in guid_index]
+    cache[guid] = slots
+    return slots
+
+
+TRACK_TYPES = {
+    0: "Invisible", 1: "TrackNormal", 2: "TrackShadow", 3: "TrackShadowStart", 4: "TrackShadowEnd",
+    5: "TrackShadowStartEnd", 6: "GroundNormal", 7: "GroundShadow", 8: "GroundShadowStart",
+    9: "GroundShadowEnd", 10: "GroundShadowStartEnd",
+}
+
+
+def parse_track_configs(prefab: Path, guid_index) -> dict:
+    """TrackController `_configurations`: TrackType -> {mesh, materials} (meshes assigned at runtime)."""
+    configs = {}
+    current = None
+    in_mats = False
+    for line in prefab.read_text(errors="ignore").splitlines():
+        s = line.strip()
+        if s.startswith("- TrackType:"):
+            current = {"mesh": None, "materials": []}
+            configs[TRACK_TYPES.get(int(s.split(":")[1]), s.split(":")[1].strip())] = current
+            in_mats = False
+        elif current is None:
+            continue
+        elif s.startswith("MeshLOD0:"):
+            m = GUID_RE.search(s)
+            current["mesh"] = guid_index[m.group(1)].stem if m and m.group(1) in guid_index else None
+        elif s.startswith("Materials:"):
+            in_mats = True
+        elif in_mats and s.startswith("- {fileID:"):
+            m = GUID_RE.search(s)
+            if m and m.group(1) in guid_index:
+                current["materials"].append(guid_index[m.group(1)].stem)
+        elif not s.startswith("- "):
+            in_mats = False
+            if not s.startswith(("MeshLOD", "Materials")):
+                current = None
+    return configs
+
+
+def slot_category(slot: str) -> str:
+    prefix = slot.split("_", 1)[0]
+    return prefix if prefix in {"boundary", "track", "obstacle", "train", "special", "prop"} else "other"
+
+
+# ---------------------------------------------------------------- glb stats
+
+def _qrot(q, v):
+    x, y, z, w = q
+    vx, vy, vz = v
+    tx, ty, tz = 2 * (y * vz - z * vy), 2 * (z * vx - x * vz), 2 * (x * vy - y * vx)
+    return (vx + w * tx + y * tz - z * ty, vy + w * ty + z * tx - x * tz, vz + w * tz + x * ty - y * tx)
+
+
+def glb_stats(path: Path) -> dict:
+    """Mesh/material counts and world-space AABB of a glb (from accessor bounds)."""
+    data = path.read_bytes()
+    json_len = struct.unpack("<I", data[12:16])[0]
+    gltf = json.loads(data[20:20 + json_len])
+    nodes, meshes, accessors = gltf.get("nodes", []), gltf.get("meshes", []), gltf.get("accessors", [])
+    lo, hi = [float("inf")] * 3, [float("-inf")] * 3
+
+    def walk(i, parent_xf):
+        node = nodes[i]
+        t = node.get("translation", [0, 0, 0])
+        r = node.get("rotation", [0, 0, 0, 1])
+        s = node.get("scale", [1, 1, 1])
+
+        def xf(p):
+            p = _qrot(r, [p[k] * s[k] for k in range(3)])
+            return parent_xf([p[k] + t[k] for k in range(3)])
+
+        if "mesh" in node:
+            for prim in meshes[node["mesh"]]["primitives"]:
+                acc = accessors[prim["attributes"]["POSITION"]]
+                for corner in range(8):
+                    p = xf([(acc["min"], acc["max"])[(corner >> k) & 1][k] for k in range(3)])
+                    for k in range(3):
+                        lo[k], hi[k] = min(lo[k], p[k]), max(hi[k], p[k])
+        for c in node.get("children", []):
+            walk(c, xf)
+
+    for root in gltf["scenes"][gltf.get("scene", 0)]["nodes"]:
+        walk(root, lambda p: p)
+
+    has_geo = lo[0] != float("inf")
+    return {
+        "meshes": len(meshes),
+        "materials": sorted({m.get("name", "") for m in gltf.get("materials", [])}),
+        "bbox": [[round(v, 3) for v in lo], [round(v, 3) for v in hi]] if has_geo else None,
+    }
+
+
+# ---------------------------------------------------------------- materials
+
+def shader_name(ref_line: str, guid_index) -> str:
+    m = GUID_RE.search(ref_line)
+    fid = re.search(r"fileID: (\d+)", ref_line)
+    if m and m.group(1) != "0000000000000000f000000000000000":
+        path = guid_index.get(m.group(1))
+        if path and path.suffix == ".shader":
+            first = path.read_text(errors="ignore").split("\n", 1)[0]
+            sm = re.match(r'Shader "([^"]+)"', first)
+            return sm.group(1) if sm else path.stem
+        return f"?{m.group(1)}"
+    return BUILTIN_SHADERS.get(fid.group(1) if fid else "", f"builtin:{fid.group(1) if fid else '?'}")
+
+
+def parse_material(path: Path, guid_index, export_root: Path) -> dict:
+    """Minimal parser for Unity .mat YAML (serializedVersion 8)."""
+    mat = {"shader": None, "keywords": [], "renderQueue": -1, "textures": {}, "floats": {}, "colors": {}}
+    section = None
+    tex_name = None
+    for line in path.read_text(errors="ignore").splitlines():
+        s = line.strip()
+        if s.startswith("m_Shader:"):
+            mat["shader"] = shader_name(s, guid_index)
+        elif s.startswith("m_CustomRenderQueue:"):
+            mat["renderQueue"] = int(s.split(":")[1])
+        elif s in ("m_ValidKeywords:", "m_TexEnvs:", "m_Floats:", "m_Colors:", "m_Ints: {}", "m_InvalidKeywords: []"):
+            section = s.rstrip(":")
+        elif s.startswith("m_") and not s.startswith(("m_Texture", "m_Scale", "m_Offset")):
+            section = None
+        elif section == "m_ValidKeywords" and s.startswith("- "):
+            mat["keywords"].append(s[2:])
+        elif section == "m_TexEnvs":
+            if s.endswith(":") and not s.startswith("m_"):
+                tex_name = s[:-1]
+            elif s.startswith("m_Texture:") and tex_name:
+                m = GUID_RE.search(s)
+                if m and m.group(1) in guid_index:
+                    mat["textures"][tex_name] = {"path": str(guid_index[m.group(1)].relative_to(export_root))}
+            elif s.startswith(("m_Scale:", "m_Offset:")) and tex_name in mat["textures"]:
+                nums = [float(v) for v in re.findall(r"-?[\d.]+(?:e-?\d+)?", s.split(":", 1)[1])]
+                mat["textures"][tex_name]["scale" if s.startswith("m_Scale") else "offset"] = nums
+        elif section == "m_Floats" and ":" in s:
+            k, v = s.split(":", 1)
+            try:
+                mat["floats"][k] = float(v)
+            except ValueError:
+                pass
+        elif section == "m_Colors" and ":" in s:
+            k, v = s.split(":", 1)
+            mat["colors"][k] = [float(x) for x in re.findall(r"-?[\d.]+(?:e-?\d+)?", v)]
+    return mat
+
+
+# ---------------------------------------------------------------- main
+
+def copy_if_newer(src: Path, dst: Path):
+    if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime:
+        shutil.copy2(src, dst)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("export", type=Path, help="AssetRipper export root (contains ExportedProject/ and Files/)")
+    ap.add_argument("--out", type=Path, default=Path(__file__).resolve().parent.parent / "viewer/public/data")
+    args = ap.parse_args()
+
+    root = args.export.resolve()
+    project = root / "ExportedProject" / "Assets"
+    glb_dir = root / "Files" / "Assets" / "PrefabHierarchyObject"
+    mesh_dir = root / "Files" / "Assets" / "Mesh"
+    if not project.is_dir() or not glb_dir.is_dir():
+        sys.exit(f"Not an AssetRipper export: {root}")
+
+    log("Indexing guids...")
+    guid_index = build_guid_index(project)
+    log(f"  {len(guid_index)} assets")
+
+    # Themes
+    theme_cache = {}
+    themes = {}
+    for path in sorted((project / "MonoBehaviour").glob("*_Theme.asset")):
+        if path.stem.startswith("_"):
+            continue  # abstract parent themes (e.g. _Common_Theme)
+        guid = GUID_RE.search((path.parent / (path.name + ".meta")).read_text()).group(1)
+        themes[path.stem.removesuffix("_Theme")] = resolve_theme(guid, guid_index, theme_cache)
+    log(f"Themes: {', '.join(themes)}")
+
+    # Prefabs referenced by any theme
+    out_glb = args.out / "glb"
+    out_glb.mkdir(parents=True, exist_ok=True)
+    prefabs = {}
+    missing, empty = [], []
+    for slots in themes.values():
+        for names in slots.values():
+            for name in names:
+                if name in prefabs:
+                    continue
+                src = glb_dir / f"{name}.glb"
+                if not src.exists():
+                    missing.append(name)
+                    prefabs[name] = {"glb": None}
+                    continue
+                stats = glb_stats(src)
+                if stats["bbox"] is None:
+                    empty.append(name)
+                copy_if_newer(src, out_glb / src.name)
+                prefabs[name] = {"glb": f"glb/{src.name}", **stats}
+
+    # Runtime-assigned track meshes (TrackController configurations)
+    out_mesh = args.out / "mesh"
+    out_mesh.mkdir(parents=True, exist_ok=True)
+    for name, info in prefabs.items():
+        prefab_path = project / "GameObject" / f"{name}.prefab"
+        if not prefab_path.exists():
+            continue
+        configs = parse_track_configs(prefab_path, guid_index)
+        if not configs:
+            continue
+        for cfg in configs.values():
+            src = mesh_dir / f"{cfg['mesh']}.glb" if cfg["mesh"] else None
+            if src and src.exists():
+                copy_if_newer(src, out_mesh / src.name)
+                cfg["glb"] = f"mesh/{src.name}"
+            elif cfg["mesh"]:
+                missing.append(f"mesh:{cfg['mesh']}")
+        info["trackConfigs"] = configs
+        info["materials"] = sorted(set(info.get("materials", [])) | {m for c in configs.values() for m in c["materials"]})
+    empty = [n for n in empty if "trackConfigs" not in prefabs[n]]
+
+    # Materials used by those prefabs
+    used_mats = {m for p in prefabs.values() for m in p.get("materials", [])}
+    mat_files = {p.stem: p for p in (project / "Material").glob("*.mat")}
+    materials = {}
+    for name in sorted(used_mats):
+        if name in mat_files:
+            materials[name] = parse_material(mat_files[name], guid_index, root)
+
+    # Textures referenced by materials -> data/tex/
+    out_tex = args.out / "tex"
+    out_tex.mkdir(parents=True, exist_ok=True)
+    for mat in materials.values():
+        for tex in mat["textures"].values():
+            src = root / tex.pop("path")
+            if src.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                tex["unsupported"] = src.name  # e.g. cubemaps (.asset) — handled later
+                continue
+            copy_if_newer(src, out_tex / src.name)
+            tex["url"] = f"tex/{src.name}"
+
+    manifest = {
+        "source": str(root),
+        "world": {"laneWidth": 20.0, "lanes": 3, "cellDepth": 11.25, "cellHeight": 14.0},
+        "themes": {
+            theme: {
+                cat: {slot: names for slot, names in sorted(slots.items()) if slot_category(slot) == cat}
+                for cat in ("boundary", "track", "special", "obstacle", "train", "prop", "other")
+            }
+            for theme, slots in themes.items()
+        },
+        "prefabs": prefabs,
+        "materials": materials,
+    }
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "manifest.json").write_text(json.dumps(manifest, indent=1))
+
+    shaders = {}
+    for m in materials.values():
+        shaders[m["shader"]] = shaders.get(m["shader"], 0) + 1
+    log(f"Prefabs: {len(prefabs)} ({len(empty)} without geometry, {len(missing)} missing glb)")
+    log(f"Materials: {len(materials)}/{len(used_mats)} resolved; shaders: {shaders}")
+    if empty:
+        log(f"  no geometry: {', '.join(sorted(empty))}")
+    if missing:
+        log(f"  missing glb: {', '.join(sorted(missing))}")
+    log(f"Wrote {args.out / 'manifest.json'}")
+
+
+if __name__ == "__main__":
+    main()
