@@ -37,7 +37,7 @@ async function loadEnvs() {
           'div',
           { class: 'env-info' },
           el('h3', {}, prettyTheme(env.theme)),
-          el('p', {}, `v${env.gameVersion} · ${env.source}`),
+          el('p', {}, `v${env.gameVersion}`),
           el(
             'div',
             { class: 'env-actions' },
@@ -83,8 +83,25 @@ async function upload(file) {
       xhr.onerror = () => reject(new Error('Upload failed'));
       xhr.send(file);
     });
+    await followJob(jobId);
+  } catch (e) {
+    showJob(`Upload failed: ${e.message}`, null);
+    $('job').classList.add('failed');
+  } finally {
+    $('drop').classList.remove('busy');
+    loadEnvs();
+  }
+}
+
+/** Polls an extraction job until it ends, updating the progress card. */
+async function followJob(jobId) {
+  $('drop').classList.add('busy');
+  $('job').classList.remove('failed');
+  try {
     for (;;) {
-      const job = await (await fetch(`/api/jobs/${jobId}`)).json();
+      const res = await fetch(`/api/jobs/${jobId}`);
+      if (!res.ok) break; // server restarted: the job is gone
+      const job = await res.json();
       const step = Math.max(0, STAGE_ORDER.indexOf(job.stage));
       showJob(job.label ?? job.stage, 0.1 + (0.9 * step) / (STAGE_ORDER.length - 1), job.log.join('\n'));
       if (job.status === 'done') {
@@ -98,9 +115,6 @@ async function upload(file) {
       }
       await new Promise((r) => setTimeout(r, 1000));
     }
-  } catch (e) {
-    showJob(`Upload failed: ${e.message}`, null);
-    $('job').classList.add('failed');
   } finally {
     $('drop').classList.remove('busy');
     loadEnvs();
@@ -120,3 +134,8 @@ drop.addEventListener('drop', (e) => {
 });
 
 loadEnvs();
+// Resume showing an extraction that is still running (page reloaded or reopened)
+fetch('/api/jobs')
+  .then((r) => r.json())
+  .then((running) => running[0] && followJob(running[0].id))
+  .catch(() => {});

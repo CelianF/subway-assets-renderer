@@ -19,13 +19,37 @@ export function mulberry32(seed) {
 const randInt = (rng, lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
 const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
 
+// BoundaryType.CellDepth per slot (cells of 11.25). The game's slot types are shared
+// across versions; manifests built since the field was added carry their own copy.
+const SLOT_CELLS = {
+  boundary_epic_start: 32,
+  boundary_epic_mid: 32,
+  boundary_epic_end: 32,
+  boundary_gate: 32,
+  boundary_tube: 16,
+  boundary_station_start: 8,
+  boundary_station_mid: 16,
+  boundary_station_end: 8,
+  boundary_pillars_start: 8,
+  boundary_pillars_mid: 16,
+  boundary_pillars_end: 8,
+  boundary_low_left: 16,
+  boundary_low_right: 16,
+  boundary_medium_left: 16,
+  boundary_medium_right: 16,
+  boundary_high_left: 16,
+  boundary_high_right: 16,
+};
+const CELL = 11.25;
+
 /**
- * Length a piece occupies along Z, in half segments. Rounds down with some slack:
- * decoration often overhangs the piece's real end (Luoyang's gate reaches z 407
- * for a 360 section), and rounding up would leave a gap without rails.
+ * Length a slot occupies along Z: its declared cell depth, else the piece's bounds
+ * rounded down with slack (decoration overhangs the real end of most pieces).
  */
 const OVERHANG = 30;
-function pieceLength(prefab) {
+function slotLength(manifest, slot, prefab) {
+  const cells = manifest.slotDepths?.[slot] ?? SLOT_CELLS[slot];
+  if (cells) return cells * CELL;
   const maxZ = prefab?.bbox?.[1][2] ?? SEGMENT;
   return Math.max(SEGMENT / 2, Math.floor((maxZ + OVERHANG) / (SEGMENT / 2)) * (SEGMENT / 2));
 }
@@ -48,6 +72,7 @@ export function generateLayout(
   const rng = mulberry32(seed);
   const items = [];
   const noTrackRanges = []; // [z0, z1) where the regular rails are replaced
+  const platformRanges = []; // [z0, z1) where platforms cover the two outer tracks
   let z = 0;
 
   const place = (slot, pos, layer = 'environment', extra = {}) => {
@@ -64,7 +89,7 @@ export function generateLayout(
     const prefab = place(slot, [0, 0, z]);
     if (!prefab) return;
     const z0 = z;
-    z += pieceLength(manifest.prefabs[prefab]);
+    z += slotLength(manifest, slot, manifest.prefabs[prefab]);
     addRun('left', slot, z0, z);
     addRun('right', slot, z0, z);
   };
@@ -90,9 +115,14 @@ export function generateLayout(
     }
   }
   function station() {
+    const start = z;
     placeRun('boundary_station_start');
     for (let i = randInt(rng, 1, 3); i > 0; i--) placeRun('boundary_station_mid');
     placeRun('boundary_station_end');
+    // Raised platforms along both outer tracks, the length of the station (90 + n·180 + 90
+    // tiles exactly with the 180-long platform piece)
+    for (let pz = start; pz + SEGMENT <= z; pz += SEGMENT) place('special_station_platform', [0, 0, pz]);
+    if (has('special_station_platform')) platformRanges.push([start, z]);
   }
   function tube() {
     for (let i = randInt(rng, 2, 4); i > 0; i--) placeRun('boundary_tube');
@@ -109,15 +139,14 @@ export function generateLayout(
     const walls = ['special_gate_left', 'special_gate_mid', 'special_gate_right', 'special_gate_sides'].filter(has);
     if (walls.length) place(pick(rng, walls), [0, 0, z], 'wall');
     placeRun('boundary_gate');
-    z = Math.max(z, start + pieceLength(manifest.prefabs[slots.track_gates[0]]));
+    z = Math.max(z, start + slotLength(manifest, 'track_gates', manifest.prefabs[slots.track_gates[0]]));
     noTrackRanges.push([start, z]);
   }
-  // Landmark (Tower Bridge, …). Some themes model it entirely in epic_start and
-  // leave mid/end as disabled placeholders, so only place pieces that have geometry.
+  // Landmark (Tower Bridge, …): start/mid/end are 360 each. Some themes model the
+  // whole landmark in epic_start and keep mid/end as empty placeholders, which still
+  // reserve their length.
   function epic() {
-    for (const slot of ['boundary_epic_start', 'boundary_epic_mid', 'boundary_epic_end']) {
-      if (slots[slot]?.some((n) => manifest.prefabs[n]?.bbox)) placeRun(slot);
-    }
+    for (const slot of ['boundary_epic_start', 'boundary_epic_mid', 'boundary_epic_end']) placeRun(slot);
   }
 
   // Random sections, but every run of 4+ sections shows the theme's landmark and a gate
@@ -239,7 +268,9 @@ export function generateLayout(
       let oz = SEGMENT + randInt(rng, 0, 8) * 11.25;
       while (oz < length - SEGMENT) {
         // Keep gate stretches clear: nothing may start in or run into the wall
-        const blocked = (from, to) => noTrackRanges.some(([a, b]) => from < b && to > a - 30);
+        const blocked = (from, to) =>
+          noTrackRanges.some(([a, b]) => from < b && to > a - 30) ||
+          (x !== 0 && platformRanges.some(([a, b]) => from < b && to > a - 10));
         if (blocked(oz, oz + 30)) {
           oz += 90;
           continue;

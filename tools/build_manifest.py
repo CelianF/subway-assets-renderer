@@ -471,10 +471,32 @@ def main():
     guid_index = build_guid_index(project)
     log(f"  {len(guid_index)} assets")
 
+    # Assets by file name. Newer exports sort assets into per-type folders (Material/,
+    # GameObject/, …); older games ship bundles with real project paths
+    # (Art/Themes/<City>/…), so never assume a folder. Per-type folders win on clashes.
+    by_name = {}
+    for path in sorted(guid_index.values(), key=lambda p: len(p.parts), reverse=True):
+        by_name[path.name] = path
+    for folder in ("Material", "GameObject", "MonoBehaviour"):
+        for path in (project / folder).glob("*"):
+            if not path.name.endswith(".meta"):
+                by_name[path.name] = path
+    find = lambda name: by_name.get(name)
+
+    # Primary-content glbs by name: PrefabHierarchyObject/ and Mesh/ first, then anywhere
+    # (prefabs from bundles with project paths land under Files/Assets/Art/…)
+    glb_by_name = {}
+    for path in sorted((root / "Files").rglob("*.glb"), key=lambda p: len(p.parts), reverse=True):
+        glb_by_name.setdefault(path.name, path)
+    prefab_glbs = dict(glb_by_name)
+    prefab_glbs.update({p.name: p for p in glb_dir.glob("*.glb")})
+    mesh_glbs = dict(glb_by_name)
+    mesh_glbs.update({p.name: p for p in mesh_dir.glob("*.glb")})
+
     # Themes
     theme_cache = {}
     themes = {}
-    for path in sorted((project / "MonoBehaviour").glob("*_Theme.asset")):
+    for path in sorted(p for n, p in by_name.items() if n.endswith("_Theme.asset")):
         if path.stem.startswith("_"):
             continue  # abstract parent themes (e.g. _Common_Theme)
         guid = GUID_RE.search((path.parent / (path.name + ".meta")).read_text()).group(1)
@@ -484,13 +506,13 @@ def main():
     # Boundary transitions (tube entrances/exits, …) per theme
     boundaries = {}
     for theme in themes:
-        path = project / "MonoBehaviour" / f"{theme}_Boundaries.asset"
-        if path.exists():
+        path = find(f"{theme}_Boundaries.asset")
+        if path:
             boundaries[theme] = parse_boundaries(path, guid_index)
     log(f"Transitions: {sum(len(b['transitions']) for b in boundaries.values())} in {len(boundaries)} themes")
 
     chunks = {}
-    for path in sorted((project / "GameObject").glob("Chase_Chunk_*.prefab")):
+    for path in sorted(p for n, p in by_name.items() if n.startswith("Chase_Chunk_") and n.endswith(".prefab")):
         chunk = parse_chunk(path, guid_index)
         if chunk["placements"]:
             chunks[path.stem.removeprefix("Chase_Chunk_")] = chunk
@@ -498,10 +520,20 @@ def main():
 
     theme_configs = {}
     for theme in themes:
-        path = project / f"{theme}_Config.asset"
-        if path.exists():
+        path = find(f"{theme}_Config.asset")
+        if path:
             theme_configs[theme] = parse_theme_config(path, guid_index)
     log(f"Theme configs: {len(theme_configs)}")
+
+    # Slot types declare their length in cells (BoundaryType.CellDepth); bounding boxes
+    # are unreliable because decoration overhangs and placeholders are empty
+    slot_depths = {}
+    for slots in themes.values():
+        for slot in slots:
+            path = next((p for p in guid_index.values() if p.name == f"{slot}.asset"), None)
+            depth = re.search(r"CellDepth: (\d+)", path.read_text(errors="ignore")) if path else None
+            if depth:
+                slot_depths[slot] = int(depth.group(1))
 
     # Prefabs referenced by any theme
     out_glb = args.out / "glb"
@@ -516,10 +548,8 @@ def main():
             for name in names:
                 if name in prefabs:
                     continue
-                src = glb_dir / f"{name}.glb"
-                if not src.exists():
-                    src = glb_dir.parent / f"{name}.glb"  # some prefabs export at the Assets root
-                if not src.exists():
+                src = prefab_glbs.get(f"{name}.glb")
+                if not src:
                     missing.append(name)
                     prefabs[name] = {"glb": None}
                     continue
@@ -531,8 +561,8 @@ def main():
 
     # Random variant groups (only one child is active in game)
     for name, info in prefabs.items():
-        prefab_path = project / "GameObject" / f"{name}.prefab"
-        if prefab_path.exists() and info.get("glb"):
+        prefab_path = find(f"{name}.prefab")
+        if prefab_path and info.get("glb"):
             randomizers = parse_randomizers(prefab_path, guid_index)
             if randomizers:
                 info["randomizers"] = randomizers
@@ -544,14 +574,14 @@ def main():
     out_mesh = args.out / "mesh"
     out_mesh.mkdir(parents=True, exist_ok=True)
     for name, info in prefabs.items():
-        prefab_path = project / "GameObject" / f"{name}.prefab"
-        if not prefab_path.exists():
+        prefab_path = find(f"{name}.prefab")
+        if not prefab_path:
             continue
         configs = parse_track_configs(prefab_path, guid_index)
         if not configs:
             continue
         for cfg in configs.values():
-            src = mesh_dir / f"{cfg['mesh']}.glb" if cfg["mesh"] else None
+            src = mesh_glbs.get(f"{cfg['mesh']}.glb") if cfg["mesh"] else None
             if src and src.exists():
                 copy_if_newer(src, out_mesh / src.name)
                 cfg["glb"] = f"mesh/{src.name}"
@@ -563,9 +593,7 @@ def main():
 
     # Materials used by those prefabs
     used_mats = {m for p in prefabs.values() for m in p.get("materials", [])}
-    # Materials live both in Material/ and loose at the Assets root; Material/ wins on name clashes
-    mat_files = {p.stem: p for p in project.glob("*.mat")}
-    mat_files.update({p.stem: p for p in (project / "Material").glob("*.mat")})
+    mat_files = {Path(n).stem: p for n, p in by_name.items() if n.endswith(".mat")}
     materials = {}
     for name in sorted(used_mats):
         if name in mat_files:
@@ -597,6 +625,7 @@ def main():
         },
         "boundaries": boundaries,
         "themeConfigs": theme_configs,
+        "slotDepths": slot_depths,
         "chunks": chunks,
         "prefabs": prefabs,
         "materials": materials,

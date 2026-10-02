@@ -340,7 +340,8 @@ export class MaterialLibrary {
     if (on('_HasFogMultiplier', 'FOG_MULTIPLIER_ENABLED')) defines.FOG_MULTIPLIER = '';
     const refTex = this.tex(def, '_RefCube');
     if (on('_HasReflections', 'REFLECTIONS_ENABLED') && refTex) defines.REFLECTIONS = '';
-    if (/fountain/i.test(main?.url ?? '')) defines.MASK_TEXTURE = '';
+    // Only the shared foam texture is a channel-packed mask; themed fountain textures are color
+    if (/_Common_FountainTexture/i.test(main?.url ?? '')) defines.MASK_TEXTURE = '';
     const altTex = this.tex(def, '_AlternateTex');
     if (on('_HasAlternateColors', 'ALTERNATE_COLORS_ENABLED') && altTex) defines.ALTERNATE = '';
     const maskTex = def.shader === 'SYBO/Bend/Common/ScreenMask' ? this.tex(def, '_MaskTex') : null;

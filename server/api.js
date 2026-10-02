@@ -127,7 +127,7 @@ async function runJob(job, apkPath, sourceName) {
       job.envs.push(id);
     }
     await rm(dir, { recursive: true, force: true });
-    if (!job.envs.length) throw new Error('No map found in this package (unsupported game version?)');
+    if (!job.envs.length) throw new Error('No map found in this package: this game version is not supported.');
     setStage('done');
     job.status = 'done';
   } catch (e) {
@@ -206,7 +206,7 @@ export async function handle(req, res) {
         req.resume();
         return sendJson(res, 400, { error: `Unsupported file type "${ext}". Use an .apk, .xapk or .zip.` }), true;
       }
-      const job = { id: randomUUID(), status: 'running', stage: 'upload', label: STAGES.upload, log: [], envs: [], error: null };
+      const job = { id: randomUUID(), source: sourceName, status: 'running', stage: 'upload', label: STAGES.upload, log: [], envs: [], error: null };
       jobs.set(job.id, job);
       const dir = path.join(JOBS, job.id);
       await mkdir(dir, { recursive: true });
@@ -220,6 +220,11 @@ export async function handle(req, res) {
       });
       runJob(job, apkPath, sourceName); // runs in the background; poll /api/jobs/:id
       sendJson(res, 202, { jobId: job.id });
+      return true;
+    }
+    // GET /api/jobs  (running jobs, so a reloaded home page can resume showing progress)
+    if (parts[1] === 'jobs' && parts.length === 2 && req.method === 'GET') {
+      sendJson(res, 200, [...jobs.values()].filter((j) => j.status === 'running').map((j) => ({ id: j.id, source: j.source, stage: j.stage })));
       return true;
     }
     // GET /api/jobs/:id
