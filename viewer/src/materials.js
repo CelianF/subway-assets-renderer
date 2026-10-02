@@ -405,7 +405,11 @@ export class MaterialLibrary {
     const main = def.textures._MainTex;
     const keywords = new Set(def.keywords);
     const on = (flag, keyword) => !!f[flag] || keywords.has(keyword);
-    const fadeMode = f.FADE_MODE ?? 0;
+    // Shaders without a FADE_MODE property (e.g. Specials/Water) fade by their blend mode:
+    // additive must fade to black and multiply to white, or the fog color gets added/multiplied in
+    const src = f._SrcMode ?? 1;
+    const dst = f._DstMode ?? 0;
+    const fadeMode = f.FADE_MODE ?? (src === 1 && dst === 1 ? 2 : src === 2 ? 3 : src === 5 && dst === 10 ? 1 : 0);
 
     const defines = { FADE_MODE: fadeMode };
     if (on('_HasTint', 'TINT_ENABLED') || fadeMode === 1) defines.TINT = '';
