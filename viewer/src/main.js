@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import GUI from 'lil-gui';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
-import { MaterialLibrary, setBendDegrees, globals, setFog, createSky } from './materials.js';
-import { generateLayout, mulberry32 } from './layout.js';
+import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts } from './materials.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS } from './layout.js';
+import { createSettings } from './settings.js';
+import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
 
 const params = new URLSearchParams(location.search);
@@ -49,7 +50,7 @@ function applyCamera(name) {
     state.fov = camera.fov = p.fov;
     camera.updateProjectionMatrix();
   }
-  gui.controllersRecursive().forEach((c) => c.updateDisplay());
+  settings?.refresh();
   orbit.target.set(...p.target);
   if (orbit.enabled) orbit.update();
 }
@@ -201,7 +202,7 @@ function applyRandomizers(obj, randomizers, seed) {
  * London-style signals only carry the red light, so green swaps in the green light
  * mesh on the lower lamp of the housing.
  */
-async function applySignalColor(obj, seed) {
+async function applySignalColor(obj, seed, color = null) {
   const rng = mulberry32(seed);
   let red = null;
   let green = null;
@@ -209,7 +210,12 @@ async function applySignalColor(obj, seed) {
     if (o.name.startsWith('_Common_LightSignal_Light_Red')) red ??= o;
     if (o.name.startsWith('_Common_LightSignal_Light_Green')) green ??= o;
   });
-  const wantGreen = rng() < 0.5;
+  const wantGreen = color ? color === 'green' : rng() < 0.5;
+  if (color === 'off') {
+    red?.removeFromParent();
+    green?.removeFromParent();
+    return;
+  }
   if (red && green) {
     (wantGreen ? red : green).removeFromParent();
   } else if (red && wantGreen && manifest.prefabs._Common_LightSignal_Light_Green?.glb) {
@@ -232,7 +238,9 @@ function applyMaterial(mesh, mat) {
 }
 
 /** Instantiates a prefab (or one of its runtime track configs) with manifest materials. */
-async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null) {
+async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null, signalColor = null, cutMode = null) {
+  // Rails hide inside studio "no tracks" zones; fill ground only shows inside them
+  const cut = layer === 'track' ? (cutMode === 'inside' ? 2 : 1) : 0;
   const prefab = manifest.prefabs[name];
   // Runtime track meshes; old games leave the table empty and model the rails in the prefab
   const config = trackType && prefab.trackConfigs?.[trackType]?.glb ? prefab.trackConfigs[trackType] : null;
@@ -240,7 +248,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
     const obj = (await loadGlb(config.glb)).clone();
     let i = 0;
     obj.traverse((o) => {
-      if (o.isMesh) applyMaterial(o, materials.get(config.materials[i++] ?? config.materials[0], o.material));
+      if (o.isMesh) applyMaterial(o, materials.get(config.materials[i++] ?? config.materials[0], o.material, cut));
     });
     return obj;
   }
@@ -252,11 +260,11 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   obj.traverse((o) => {
     if (!o.isMesh) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
-    const out = mats.map((m) => materials.get(m.name, m));
+    const out = mats.map((m) => materials.get(m.name, m, cut));
     if (out.length === 1) applyMaterial(o, out[0]);
     else o.material = out;
   });
-  if (signalSeed != null) await applySignalColor(obj, signalSeed);
+  if (signalSeed != null) await applySignalColor(obj, signalSeed, signalColor);
   return obj;
 }
 
@@ -275,6 +283,8 @@ const state = {
   fogScale: Number(params.get('fogScale') ?? 1),
   glass: 1,
   skyline: true,
+  skylineOpacity: 1,
+  skylineDistance: 1,
   obstacleMode: params.get('obstacleMode') ?? 'random',
   inspect: params.get('prefab')?.split(',') ?? null, // prefab names shown alone, or null for the run
   altColors: Number(params.get('altColors') ?? 0),
@@ -284,7 +294,25 @@ const state = {
   bend: Number(params.get('bend') ?? 0),
   bendVertical: Number(params.get('bendV') ?? 0),
   fov: 55,
+  gen: structuredClone(DEFAULT_GEN),
+  studio: loadStudio(),
 };
+
+// Studio placements are kept per environment in this browser
+function loadStudio() {
+  try {
+    return JSON.parse(localStorage.getItem(`studio:${ENV_ID}`) ?? '[]');
+  } catch {
+    return [];
+  }
+}
+function saveStudio() {
+  try {
+    localStorage.setItem(`studio:${ENV_ID}`, JSON.stringify(state.studio));
+  } catch {
+    // storage full or blocked: placements still live for this session
+  }
+}
 
 const layers = {
   environment: new THREE.Group(),
@@ -293,24 +321,42 @@ const layers = {
   obstacle: new THREE.Group(),
   wall: new THREE.Group(), // gate walls, open on one lane
   signal: new THREE.Group(),
+  effect: new THREE.Group(), // ThemeConfig effects (Floor Is Lava's lava ground)
 };
 Object.values(layers).forEach((g) => scene.add(g));
 let buildId = 0;
 
-async function rebuild() {
+// Rebuilt on studio edits; rails too, since "no tracks" zones cut them
+const DYNAMIC_LAYERS = new Set(['train', 'obstacle', 'signal', 'wall', 'track']);
+let runLength = 0;
+
+/** Current layout for the given mode (studio placements or generated obstacles). */
+function currentLayout(mode = state.obstacleMode) {
+  return generateLayout(manifest, state.theme, { ...state, obstacleMode: mode, trainTheme: trainTheme() });
+}
+
+/**
+ * Builds the run. `dynamicOnly` re-creates only trains/obstacles/signals/walls: the
+ * environment is deterministic for a seed, so studio edits don't reload the city.
+ */
+async function rebuild({ dynamicOnly = false } = {}) {
   const id = ++buildId;
   // Inspection: only the given pieces, side by side along X
   const only = state.inspect;
-  const { items, length } = only
-    ? { items: inspectLayout(only), length: 0 }
-    : generateLayout(manifest, state.theme, { ...state, trainTheme: trainTheme() });
+  const layout = only ? { items: inspectLayout(only), length: 0 } : currentLayout();
+  const { length } = layout;
+  const items = dynamicOnly ? layout.items.filter((i) => DYNAMIC_LAYERS.has(i.layer)) : layout.items;
+  setTrackCuts(state.obstacleMode === 'studio' && !only ? state.studio.filter((it) => it.type === 'noTracks') : []);
   applyThemeLook();
-  status.textContent = `Loading ${state.theme}…`;
+  if (!dynamicOnly) status.textContent = `Loading ${state.theme}…`;
   const objs = await Promise.all(
     items.map(async (it) => {
       try {
-        const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed, it.signalSeed);
-        if (obj) obj.position.set(...it.pos);
+        const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed, it.signalSeed, it.signalColor, it.cut);
+        if (obj) {
+          obj.position.set(...it.pos);
+          if (it.scale) obj.scale.setScalar(it.scale);
+        }
         return [it, obj];
       } catch (e) {
         console.warn('Failed to load', it.prefab, e);
@@ -319,8 +365,9 @@ async function rebuild() {
     }),
   );
   if (id !== buildId) return; // superseded by a newer rebuild
-  if (window.__viewer) window.__viewer.items = items;
-  Object.values(layers).forEach((g) => g.clear());
+  if (window.__viewer) window.__viewer.items = layout.items;
+  runLength = length;
+  for (const [name, g] of Object.entries(layers)) if (!dynamicOnly || DYNAMIC_LAYERS.has(name)) g.clear();
   for (const [it, obj] of objs) {
     if (!obj) continue;
     layers[it.layer].add(obj);
@@ -328,13 +375,14 @@ async function rebuild() {
       registerPiece(obj, { openBacks: it.layer === 'environment', whole: it.layer === 'train', group: it.group });
     }
   }
-  if (!only) await addThemeEffects(length, id);
+  if (!only && !dynamicOnly) await addThemeEffects(length, id);
   updateVisibility();
   applyBend();
   const missing = objs.filter(([, o]) => !o).length;
   status.textContent = only
     ? `Inspecting ${only.length} piece${only.length > 1 ? 's' : ''}`
-    : `${state.theme} · seed ${state.seed} · ${items.length} pieces · ${Math.round(length)} units${missing ? ` · ${missing} without geometry` : ''}`;
+    : `${state.theme} · seed ${state.seed} · ${layout.items.length} pieces · ${Math.round(length)} units${missing ? ` · ${missing} without geometry` : ''}`;
+  studio?.relayout();
   ui?.themeChanged(state.theme);
   ui?.setInspecting(only);
   if (only) frameInspection(items);
@@ -358,7 +406,7 @@ async function addThemeEffects(length, id) {
     for (let z = -effect.segmentSize; z < length + effect.segmentSize; z += effect.segmentSize) {
       const copy = segment.clone();
       copy.position.set(0, segment.position.y, z);
-      layers.track.add(copy);
+      layers.effect.add(copy);
     }
   }
 }
@@ -399,7 +447,7 @@ function frameInspection(items) {
   camera.position.copy(center).add(new THREE.Vector3(0.7 * side, 0.45, -0.7).normalize().multiplyScalar(radius * 2.2));
   orbit.target.copy(center);
   orbit.update();
-  gui.controllersRecursive().forEach((c) => c.updateDisplay());
+  settings?.refresh();
 }
 
 const CUTAWAY_LAYERS = ['environment', 'train', 'obstacle', 'wall', 'signal'];
@@ -407,6 +455,7 @@ const CUTAWAY_LAYERS = ['environment', 'train', 'obstacle', 'wall', 'signal'];
 // ---------------------------------------------------------------- theme look
 
 const skylineGroup = new THREE.Group();
+const skylineUniforms = { uOpacity: { value: 1 } };
 scene.add(skylineGroup);
 let skylineTheme = null;
 
@@ -414,14 +463,16 @@ let skylineTheme = null;
 function applyThemeLook() {
   const cfg = manifest.themeConfigs?.[state.theme] ?? {};
   // No fog/skyline while inspecting: the camera frames pieces from far away
-  setFog(cfg.fog, state.fog && !state.inspect, state.fogScale);
+  // (nor in the studio's top view, 600 units above the run)
+  setFog(cfg.fog, state.fog && !state.inspect && !studio?.active, state.fogScale);
   sky.setColors(cfg.sky);
   if (skylineTheme !== state.theme) {
     skylineTheme = state.theme;
     skylineGroup.clear();
     if (cfg.background) loadSkyline(cfg.background);
   }
-  skylineGroup.visible = state.skyline && !state.inspect;
+  skylineGroup.visible = state.skyline && state.skylineOpacity > 0 && !state.inspect;
+  skylineUniforms.uOpacity.value = state.skylineOpacity;
   globals.uAltRatio.value = state.altColors;
 }
 
@@ -440,11 +491,15 @@ async function loadSkyline(bg) {
       uB: { value: new THREE.Vector3(...(bg.gradientB ?? [1, 1, 1])) },
       uTint: { value: new THREE.Vector3(...(bg.tint ?? [1, 1, 1])) },
       uRange: { value: new THREE.Vector2(Math.max(lo[1], 0), hi[1]) },
+      ...skylineUniforms,
+      ...globals, // fog color: a faded skyline melts into the haze
     },
     vertexShader: `varying float vY; void main() { vY = position.y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-    fragmentShader: `uniform vec3 uA; uniform vec3 uB; uniform vec3 uTint; uniform vec2 uRange; varying float vY;
+    fragmentShader: `uniform vec3 uA; uniform vec3 uB; uniform vec3 uTint; uniform vec2 uRange; uniform float uOpacity; varying float vY;
       void main() { float t = clamp((vY - uRange.x) / max(uRange.y - uRange.x, 1.0), 0.0, 1.0);
-        gl_FragColor = vec4(mix(uB, uA, t) * mix(vec3(1.0), uTint, 0.35), 1.0); }`,
+        gl_FragColor = vec4(mix(uB, uA, t) * mix(vec3(1.0), uTint, 0.35), uOpacity); }`,
+    transparent: true,
+    depthWrite: false,
     side: THREE.DoubleSide,
   });
   obj.traverse((o) => {
@@ -459,7 +514,7 @@ async function loadSkyline(bg) {
 }
 
 function updateSkyline() {
-  for (const obj of skylineGroup.children) obj.position.set(0, 0, camera.position.z + obj.userData.distance);
+  for (const obj of skylineGroup.children) obj.position.set(0, 0, camera.position.z + obj.userData.distance * state.skylineDistance);
 }
 
 /** Hides the geometry islands (buildings, train cars, …) the camera is inside. */
@@ -468,7 +523,9 @@ function updateCutaway() {
 }
 
 function applyBend() {
-  setBendDegrees(state.bend, state.bendVertical);
+  // The studio's top view needs the run straight
+  if (studio?.active) setBendDegrees(0, 0);
+  else setBendDegrees(state.bend, state.bendVertical);
   // Bent geometry can appear outside its unbent bounds: skip frustum culling while bending
   const culled = state.bend === 0 && state.bendVertical === 0;
   Object.values(layers).forEach((g) => g.traverse((o) => o.isMesh && (o.frustumCulled = culled))); // not the sky/skyline
@@ -569,51 +626,217 @@ function themeThumbnail() {
 
 // ---------------------------------------------------------------- UI
 
-const gui = new GUI({ title: 'Environment' });
-gui.add(state, 'seed', 1, 9999, 1).onFinishChange(rebuild);
-gui.add(state, 'sections', 1, 40, 1).onFinishChange(rebuild);
-gui.add({ shuffle: () => ((state.seed = Math.floor(Math.random() * 9999) + 1), gui.controllersRecursive().forEach((c) => c.updateDisplay()), rebuild()) }, 'shuffle');
-gui.add(state, 'trains').onChange(updateVisibility);
-const trainOptions = { 'this map': 'same' };
-for (const e of envList) if (e.id !== ENV_ID) trainOptions[`${e.theme} (v${e.gameVersion})`] = e.id;
-gui.add(state, 'trainEnv', trainOptions).name('trains from').onChange(async (id) => {
-  if (id !== 'same') await mergeEnvironment(id);
+const trainOptions = () => {
+  const o = { 'This map': 'same' };
+  for (const e of envList) if (e.id !== ENV_ID) o[`${e.theme} (v${e.gameVersion})`] = e.id;
+  return o;
+};
+const shuffle = () => {
+  state.seed = Math.floor(Math.random() * 9999) + 1;
   rebuild();
+  settings.refresh();
+};
+const regen = () => rebuild();
+const catalog = () => studioCatalog(manifest, state.theme, trainTheme());
+const toggles = (obj, entries, onChange = regen) => entries.filter(([, , show = true]) => show).map(([key, label]) => ({ type: 'toggle', label, obj, key, onChange }));
+const hasSlot = (slot) => Object.values(manifest.themes[state.theme]).some((c) => c[slot]?.length);
+const isAuto = () => state.obstacleMode !== 'studio';
+
+const settings = createSettings(
+  document.getElementById('ui'),
+  [
+    {
+      tab: 'Generation',
+      groups: [
+        {
+          title: 'Run',
+          controls: [
+            {
+              type: 'select',
+              label: 'Obstacles',
+              obj: state,
+              key: 'obstacleMode',
+              options: () => ({
+                'Auto (random)': 'random',
+                ...(Object.keys(manifest.chunks ?? {}).length ? { "Game's chase chunks": 'chunks' } : {}),
+                'Studio (hand-placed)': 'studio',
+              }),
+              onChange: () => (regen(), settings.refresh()),
+            },
+            { type: 'button', label: '✏️ Open studio', primary: true, action: () => enterStudio() },
+            { type: 'slider', label: 'Seed', obj: state, key: 'seed', min: 1, max: 9999, step: 1, lazy: true, onChange: regen },
+            { type: 'button', label: '🎲 Shuffle', action: shuffle },
+            { type: 'slider', label: 'Sections', obj: state, key: 'sections', min: 1, max: 40, step: 1, lazy: true, onChange: regen },
+            { type: 'select', label: 'Trains from', obj: state, key: 'trainEnv', options: trainOptions, onChange: async (id) => (id !== 'same' && (await mergeEnvironment(id)), regen()) },
+          ],
+        },
+        {
+          title: 'Sections',
+          controls: toggles(state.gen.sections, [
+            ['station', 'Stations', hasSlot('boundary_station_mid')],
+            ['tube', 'Tubes', hasSlot('boundary_tube')],
+            ['pillars', 'Pillar halls', hasSlot('boundary_pillars_mid')],
+            ['gate', 'Gates', hasSlot('boundary_gate')],
+            ['epic', 'Landmark', hasSlot('boundary_epic_start')],
+          ]).concat([{ type: 'toggle', label: 'Event decorations', obj: state.gen, key: 'decorations', onChange: regen }]),
+        },
+        {
+          title: 'Trains (auto)',
+          visible: isAuto,
+          controls: [
+            ...toggles(state.gen.trains, [
+              ['static', 'Parked trains'],
+              ['moving', 'Moving trains'],
+              ['falling', 'Lava trains', hasSlot('train_falling_1')],
+              ['ramps', 'Ramps'],
+              ['start', 'Start train'],
+            ]),
+            { type: 'slider', label: 'Train share', hint: 'trains vs obstacles', obj: state.gen, key: 'trainShare', min: 0, max: 1, step: 0.05, lazy: true, onChange: regen },
+          ],
+        },
+        {
+          title: 'Obstacles (auto)',
+          visible: isAuto,
+          controls: [
+            ...toggles(state.gen.obstacles, [
+              ['jump', 'Jump barriers'],
+              ['roll', 'Roll barriers'],
+              ['standard', 'Barriers'],
+              ['bush', 'Bushes', hasSlot('obstacle_bush')],
+              ['dumpster', 'Dumpsters', hasSlot('obstacle_dumpster')],
+              ['powerBox', 'Power boxes', hasSlot('obstacle_powerBox')],
+              ['pillar', 'Middle pillars', hasSlot('obstacle_pillar')],
+            ]),
+            { type: 'toggle', label: 'Signal lights', obj: state.gen, key: 'signals', onChange: regen },
+            { type: 'slider', label: 'Density', obj: state.gen, key: 'density', min: 0.25, max: 3, step: 0.05, lazy: true, onChange: regen },
+            { type: 'button', label: 'Reset generation options', action: () => (Object.assign(state.gen, structuredClone(DEFAULT_GEN)), regen(), settings.refresh()) },
+          ],
+        },
+      ],
+    },
+    {
+      tab: 'Layers',
+      groups: [
+        {
+          title: 'Show',
+          controls: toggles(state, [
+            ['trains', 'Trains'],
+            ['obstacles', 'Barriers & props'],
+            ['walls', 'Gate walls'],
+            ['signals', 'Signal lights'],
+          ], updateVisibility),
+        },
+      ],
+    },
+    {
+      tab: 'Rendering',
+      groups: [
+        {
+          title: 'Atmosphere',
+          controls: [
+            { type: 'toggle', label: 'Fog', obj: state, key: 'fog', onChange: applyThemeLook },
+            { type: 'slider', label: 'Fog distance ×', obj: state, key: 'fogScale', min: 0.25, max: 6, step: 0.05, onChange: applyThemeLook },
+            { type: 'toggle', label: 'Skyline', obj: state, key: 'skyline', onChange: applyThemeLook },
+            { type: 'slider', label: 'Skyline opacity', obj: state, key: 'skylineOpacity', min: 0, max: 1, step: 0.01, onChange: applyThemeLook },
+            { type: 'slider', label: 'Skyline distance ×', obj: state, key: 'skylineDistance', min: 0.3, max: 3, step: 0.05, onChange: applyThemeLook },
+          ],
+        },
+        {
+          title: 'Materials',
+          controls: [
+            { type: 'slider', label: 'Glass opacity', obj: state, key: 'glass', min: 0, max: 1, step: 0.01, onChange: (v) => materials.setGlassOpacity(v) },
+            { type: 'slider', label: 'Alternate colors', hint: 'New York', obj: state, key: 'altColors', min: 0, max: 1, step: 0.01, onChange: (v) => (globals.uAltRatio.value = v) },
+          ],
+        },
+        {
+          title: 'Bend',
+          controls: [
+            { type: 'slider', label: 'Bend° (− left / + right)', obj: state, key: 'bend', min: -45, max: 45, step: 0.5, onChange: applyBend },
+            { type: 'slider', label: 'Vertical° (+ down)', obj: state, key: 'bendVertical', min: -30, max: 30, step: 0.5, onChange: applyBend },
+            { type: 'button', label: 'Straight', action: () => ((state.bend = state.bendVertical = 0), applyBend(), settings.refresh()) },
+          ],
+        },
+      ],
+    },
+    {
+      tab: 'Camera',
+      groups: [
+        {
+          controls: [
+            { type: 'select', label: 'Preset', obj: state, key: 'camera', options: Object.fromEntries(Object.keys(CAMERA_PRESETS).map((k) => [k, k])), onChange: applyCamera },
+            { type: 'select', label: 'Mode', obj: state, key: 'controls', options: { Fly: 'fly', Orbit: 'orbit' }, onChange: setControlMode },
+            { type: 'toggle', label: 'Hide piece around camera', obj: state, key: 'cutaway' },
+            { type: 'slider', label: 'Fly speed', obj: fly, key: 'speed', min: 5, max: 3000, step: 1 },
+            { type: 'slider', label: 'Field of view', obj: state, key: 'fov', min: 20, max: 110, step: 1, onChange: (v) => ((camera.fov = v), camera.updateProjectionMatrix()) },
+            { type: 'note', label: 'Drag: look · WASD: move · Space/Shift: up/down · Alt: fast · Wheel: speed' },
+          ],
+        },
+      ],
+    },
+    {
+      tab: 'Screenshot',
+      groups: [
+        {
+          controls: [
+            { type: 'select', label: 'Resolution', obj: screenshot, key: 'resolution', options: Object.fromEntries(Object.keys(RESOLUTIONS).map((k) => [k, k])) },
+            { type: 'toggle', label: 'Transparent background', obj: screenshot, key: 'transparent' },
+            { type: 'button', label: '📷 Save screenshot (P)', primary: true, action: () => (settings.close(), ui.takeShot()) },
+          ],
+        },
+      ],
+    },
+  ],
+  { title: 'Settings' },
+);
+fly.onSpeedChange = () => settings.refresh();
+
+// ---------------------------------------------------------------- studio
+
+const studio = createStudio({
+  scene,
+  renderer,
+  canvas,
+  root: document.getElementById('ui'),
+  getCatalog: catalog,
+  getLength: () => runLength,
+  getList: () => state.studio,
+  setList: (list) => {
+    state.studio = list;
+    saveStudio();
+    rebuild({ dynamicOnly: true });
+  },
+  fromRun: () => itemsToStudio(currentLayout('random').items),
+  // Skin of a train placed with "Any" before skins were fixed at placement
+  actualVariant: (it) => {
+    const shown = window.__viewer?.items?.find((i) => i.group === `studio${it.lane}@${it.z0}` && i.slot.startsWith('train_') && i.slot !== 'train_ramp');
+    return shown ? Object.keys(TRAIN_VARIANTS).find((v) => TRAIN_VARIANTS[v].test(shown.prefab)) ?? null : null;
+  },
+  onExit: () => exitStudio(),
 });
-gui.add(state, 'obstacles').name('barriers').onChange(updateVisibility);
-gui.add(state, 'walls').name('walls (gates)').onChange(updateVisibility);
-gui.add(state, 'obstacleMode', { 'random': 'random', "game's chase chunks": 'chunks' }).name('obstacle layout').onChange(rebuild);
-gui.add(state, 'signals').name('signal lights').onChange(updateVisibility);
 
-const lookFolder = gui.addFolder('Rendering');
-lookFolder.add(state, 'fog').onChange(applyThemeLook);
-lookFolder.add(state, 'fogScale', 0.25, 6, 0.05).name('fog distance ×').onChange(applyThemeLook);
-lookFolder.add(state, 'skyline').onChange(applyThemeLook);
-lookFolder.add(state, 'glass', 0, 1, 0.01).name('glass opacity').onChange((v) => materials.setGlassOpacity(v));
-lookFolder.add(state, 'altColors', 0, 1, 0.01).name('alternate colors (NY)').onChange((v) => (globals.uAltRatio.value = v));
+function enterStudio() {
+  settings.close();
+  if (state.obstacleMode !== 'studio') {
+    // Start from the run on screen when nothing was placed yet
+    if (!state.studio.length) {
+      state.studio = itemsToStudio(currentLayout().items);
+      saveStudio();
+    }
+    state.obstacleMode = 'studio';
+  }
+  fly.enabled = orbit.enabled = false;
+  document.body.classList.add('studio');
+  rebuild().then(() => (studio.enter(), applyThemeLook(), applyBend()));
+}
 
-const bendFolder = gui.addFolder('Bend');
-const onBend = applyBend;
-bendFolder.add(state, 'bend', -45, 45, 0.5).name('bend° (− left / + right)').onChange(onBend);
-bendFolder.add(state, 'bendVertical', -30, 30, 0.5).name('vertical° (+ down)').onChange(onBend);
-bendFolder.add({ reset: () => ((state.bend = state.bendVertical = 0), bendFolder.controllers.forEach((c) => c.updateDisplay()), onBend()) }, 'reset').name('straight');
-
-const camFolder = gui.addFolder('Camera');
-camFolder.add(state, 'camera', Object.keys(CAMERA_PRESETS)).name('preset').onChange(applyCamera);
-camFolder.add(state, 'cutaway').name('hide piece around camera');
-camFolder.add(state, 'controls', ['fly', 'orbit']).name('mode').onChange(setControlMode);
-const speedCtrl = camFolder.add(fly, 'speed', 5, 3000, 1).name('fly speed');
-fly.onSpeedChange = () => speedCtrl.updateDisplay();
-camFolder.add(state, 'fov', 20, 110, 1).onChange((v) => ((camera.fov = v), camera.updateProjectionMatrix()));
-camFolder
-  .add({ help: 'Drag: look · WASD: move · Space: up · Shift: down · Alt: fast · Wheel: speed' }, 'help')
-  .name('fly keys')
-  .disable();
-
-const shotFolder = gui.addFolder('Screenshot');
-shotFolder.add(screenshot, 'resolution', Object.keys(RESOLUTIONS));
-shotFolder.add(screenshot, 'transparent').name('transparent bg');
-shotFolder.add({ take: () => ui.takeShot() }, 'take').name('📷 Save screenshot (P)');
+function exitStudio() {
+  studio.exit();
+  applyThemeLook();
+  applyBend();
+  document.body.classList.remove('studio');
+  setControlMode(state.controls);
+  settings.refresh();
+}
 
 const ui = createUI(manifest, {
   getState: () => state,
@@ -630,6 +853,8 @@ const ui = createUI(manifest, {
     rebuild();
   },
   screenshot: screenshotBlob,
+  openSettings: () => settings.open(),
+  openStudio: () => enterStudio(),
   thumbnail: themeThumbnail,
   saveThumbnail: async (dataUrl) => {
     const blob = await (await fetch(dataUrl)).blob();
@@ -637,14 +862,24 @@ const ui = createUI(manifest, {
     envInfo.thumbnail = true;
   },
 });
-if (params.has('shot')) {
-  gui.hide();
-  document.getElementById('ui').classList.add('hidden');
-}
+if (params.has('shot')) document.getElementById('ui').classList.add('hidden');
+
+// Tab hides / shows the whole interface; M or the toolbar opens the settings menu
+addEventListener('keydown', (e) => {
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+  if (e.code === 'Tab') {
+    e.preventDefault();
+    document.body.classList.toggle('ui-hidden');
+  } else if (e.code === 'KeyM' && !studio.active) {
+    settings.toggle();
+  } else if (e.code === 'Escape' && settings.isOpen()) {
+    settings.close();
+  }
+});
 
 applyCamera(state.camera);
 setControlMode(state.controls);
-window.__viewer = { renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE };
+window.__viewer = { renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, settings, enterStudio, exitStudio };
 await rebuild();
 
 const clock = new THREE.Clock();
@@ -654,5 +889,5 @@ renderer.setAnimationLoop(() => {
   fly.update();
   updateSkyline();
   updateCutaway();
-  renderer.render(scene, camera);
+  renderer.render(scene, studio.active ? studio.camera : camera);
 });

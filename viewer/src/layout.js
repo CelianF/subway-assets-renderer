@@ -54,32 +54,105 @@ function slotLength(manifest, slot, prefab) {
   return Math.max(SEGMENT / 2, Math.floor((maxZ + OVERHANG) / (SEGMENT / 2)) * (SEGMENT / 2));
 }
 
+export const TRAIN_KINDS = ['static', 'moving', 'falling'];
+/** Length of a train of `cars` wagons: 70 for the first, 60 per extra wagon. */
+export const trainLength = (cars) => 70 + 60 * (cars - 1);
+const RAMP_LENGTH = 76; // ramp wagon in front of a train (origin 36 behind its start)
+
+/** Generation filters ("advanced generation"); everything on by default. */
+export const DEFAULT_GEN = {
+  sections: { station: true, tube: true, pillars: true, gate: true, epic: true },
+  trains: { static: true, moving: true, falling: true, ramps: true, start: true },
+  obstacles: { jump: true, roll: true, standard: true, bush: true, dumpster: true, powerBox: true, pillar: true },
+  signals: true,
+  decorations: true,
+  density: 1, // obstacles per distance (gaps shrink as it grows)
+  trainShare: 0.55, // chance a spot gets a train rather than an obstacle
+};
+const OBSTACLE_SLOTS = {
+  jump: 'obstacle_barrier_jump',
+  roll: 'obstacle_barrier_roll',
+  standard: 'obstacle_barrier_standard',
+  bush: 'obstacle_bush',
+  dumpster: 'obstacle_dumpster',
+  powerBox: 'obstacle_powerBox',
+  pillar: 'obstacle_pillar',
+};
+
+/** Wagon count for a span: the longest available train that fits, else the shortest. */
+export function fitTrain(options, span) {
+  if (!options.length) return 0;
+  const fitting = options.filter((n) => trainLength(n) <= span + 6);
+  return fitting.length ? fitting[fitting.length - 1] : options[0];
+}
+export { RAMP_LENGTH };
+
+const hashString = (str) => [...str].reduce((h, c) => (Math.imul(h, 31) + c.charCodeAt(0)) | 0, 7) >>> 0;
+
+/** Slots of a theme (optionally with another theme's trains). */
+function themeSlots(manifest, themeName, trainTheme) {
+  const slots = Object.assign({}, ...Object.values(manifest.themes[themeName]));
+  if (trainTheme && trainTheme !== themeName && manifest.themes[trainTheme]) {
+    Object.assign(slots, manifest.themes[trainTheme].train);
+  }
+  return slots;
+}
+
+// Train skins share a slot: <Theme>_Train_Static_3_Cargo / _Standard / _Subway
+export const TRAIN_VARIANTS = { cargo: /_Cargo$/i, passenger: /_Standard$/i, subway: /_Subway$/i };
+
+/** What the studio can place for this theme: obstacle tools and train kinds with their wagon counts. */
+export function studioCatalog(manifest, themeName, trainTheme = null) {
+  const slots = themeSlots(manifest, themeName, trainTheme);
+  const has = (slot) => slots[slot]?.some((n) => manifest.prefabs[n]?.bbox);
+  const trains = {};
+  for (const kind of TRAIN_KINDS) {
+    const cars = [1, 2, 3, 5].filter((n) => has(`train_${kind}_${n}`));
+    if (cars.length) trains[kind] = cars;
+  }
+  const variantsOf = (kind) =>
+    Object.keys(TRAIN_VARIANTS).filter((v) => [1, 2, 3, 5].some((n) => slots[`train_${kind}_${n}`]?.some((name) => TRAIN_VARIANTS[v].test(name))));
+  return {
+    trains,
+    variants: Object.fromEntries(Object.keys(trains).map((k) => [k, variantsOf(k)])),
+    ramp: has('train_ramp'),
+    startTrain: has('prop_train_start'),
+    // Pillars come with pillar halls: not a free-placement tool
+    obstacles: Object.fromEntries(Object.entries(OBSTACLE_SLOTS).filter(([k, slot]) => k !== 'pillar' && has(slot))),
+    signal: has('obstacle_lightSignal'),
+  };
+}
+
 /**
+ * @param studio  list of hand-placed items for obstacleMode 'studio':
+ *   { type: 'train', lane, z0, z1, kind, variant, ramp } | { type: 'obstacle', key, lane, z }
+ *   | { type: 'signal', x, z, color } | { type: 'noTracks', lane, z0, z1 }   (lane = track x: 20 | 0 | -20)
  * @returns {{items: Array<{prefab, slot, layer, pos:[x,y,z], trackType?}>, length: number}}
  */
 export function generateLayout(
   manifest,
   themeName,
-  { seed = 1, sections = 12, obstacles = true, trains = true, signals = true, trainTheme = null, obstacleMode = 'random' } = {},
+  { seed = 1, sections = 12, trainTheme = null, obstacleMode = 'random', gen = DEFAULT_GEN, studio = [] } = {},
 ) {
-  const theme = manifest.themes[themeName];
-  const slots = Object.assign({}, ...Object.values(theme));
+  gen = { ...DEFAULT_GEN, ...gen };
   // Trains (and ramps) can come from another theme
-  if (trainTheme && trainTheme !== themeName && manifest.themes[trainTheme]) {
-    Object.assign(slots, manifest.themes[trainTheme].train);
-  }
+  const slots = themeSlots(manifest, themeName, trainTheme);
   const has = (slot) => slots[slot]?.length > 0;
   const rng = mulberry32(seed);
   const items = [];
   const noTrackRanges = []; // [z0, z1) where the regular rails are replaced
   const platformRanges = []; // [z0, z1) where platforms cover the two outer tracks
+  const pillarRanges = []; // [z0, z1) where pillars stand in the middle lane
+  const laneBlocks = []; // { x, z0, z1 }: single-lane stretches already taken (start train)
   let z = 0;
 
-  const place = (slot, pos, layer = 'environment', extra = {}) => {
+  let placeRng = rng; // studio items use their own stable generator
+  const place = (slot, pos, layer = 'environment', extra = {}, nameFilter = null) => {
     if (!has(slot)) return null;
-    const prefab = pick(rng, slots[slot]);
+    const named = nameFilter ? slots[slot].filter((n) => nameFilter.test(n)) : [];
+    const prefab = pick(placeRng, named.length ? named : slots[slot]);
     // Per-instance seed for the prefab's random variant groups
-    items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(rng() * 2 ** 31), ...extra });
+    items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(placeRng() * 2 ** 31), ...extra });
     return prefab;
   };
   // Boundary runs per side of the track, for the theme's transition pieces
@@ -101,16 +174,21 @@ export function generateLayout(
     { name: 'pillars', weight: 1, ok: () => has('boundary_pillars_mid'), build: pillars },
     { name: 'gate', weight: 0.5, ok: () => has('boundary_gate') && has('track_gates'), build: gate },
     { name: 'epic', weight: 0.4, ok: () => has('boundary_epic_start'), build: epic },
-  ].filter((s) => s.ok());
+  ].filter((s) => s.ok() && (s.name === 'buildings' || gen.sections[s.name] !== false));
 
   function buildings() {
     const n = randInt(rng, 2, 5);
     for (let i = 0; i < n; i++) {
       const height = pick(rng, ['low', 'medium', 'high']);
+      // Ad slots replace a right-hand building now and then (in exports without an
+      // active campaign they point at regular buildings)
+      const sponsored = ['boundary_sponsored_right_front', 'boundary_sponsored_right_back'].filter(has);
+      const right = sponsored.length && rng() < 0.15 ? pick(rng, sponsored) : `boundary_${height}_right`;
       place(`boundary_${height}_left`, [0, 0, z]);
-      place(`boundary_${height}_right`, [0, 0, z]);
+      place(right, [0, 0, z]);
       addRun('left', `boundary_${height}_left`, z, z + SEGMENT);
-      addRun('right', `boundary_${height}_right`, z, z + SEGMENT);
+      addRun('right', right, z, z + SEGMENT);
+      decorate(z);
       z += SEGMENT;
     }
   }
@@ -125,12 +203,52 @@ export function generateLayout(
     if (has('special_station_platform')) platformRanges.push([start, z]);
   }
   function tube() {
+    const start = z;
     for (let i = randInt(rng, 2, 4); i > 0; i--) placeRun('boundary_tube');
+    // Old games list the tube entrance/exit as event decorations instead of transitions
+    const transitions = manifest.boundaries?.[themeName]?.transitions ?? [];
+    if (!transitions.some((t) => t.slot === 'boundary_tube')) {
+      for (const slot of eventSlots) {
+        const name = slots[slot][0];
+        if (/tube_start/i.test(name)) items.push({ prefab: name, slot, layer: 'environment', pos: [0, 0, start], variantSeed: 1 });
+        if (/tube_end/i.test(name)) items.push({ prefab: name, slot, layer: 'environment', pos: [0, 0, z], variantSeed: 1 });
+      }
+    }
+  }
+
+  // Event / extra decorations (decoration_event_*, decoration_extra_*): the game places
+  // them from stripped code, so they are scattered plausibly by footprint here.
+  const eventSlots = Object.keys(slots).filter((s) => /^decoration_(event|extra)_/.test(s) && has(s));
+  const decoSlots = eventSlots.filter((s) => !/tube_(start|end)/i.test(slots[s][0]));
+  function decorate(segZ) {
+    if (!gen.decorations || !decoSlots.length || rng() > 0.35) return;
+    const slot = pick(rng, decoSlots);
+    const prefab = manifest.prefabs[pick(rng, slots[slot])];
+    const bb = prefab?.bbox;
+    if (!bb) return;
+    const name = slots[slot][0];
+    const fullWidth = bb[0][0] < -60 && bb[1][0] > 60; // frames the tracks (terracotta army)
+    if (fullWidth) {
+      place(slot, [0, 0, segZ], 'environment');
+      return;
+    }
+    const side = rng() < 0.5 ? 1 : -1;
+    const halfWidth = (bb[1][0] - bb[0][0]) / 2;
+    const x = side * (36 + halfWidth); // on the street beside the tracks
+    const floating = bb[0][1] < -4 && bb[1][1] - bb[0][1] < 40; // creatures modeled around their center
+    const y = floating ? 30 + rng() * 25 : 0;
+    place(slot, [x, y, segZ + 30 + rng() * 120], 'environment');
   }
   function pillars() {
+    const start = z;
     placeRun('boundary_pillars_start');
     for (let i = randInt(rng, 1, 3); i > 0; i--) placeRun('boundary_pillars_mid');
     placeRun('boundary_pillars_end');
+    // Like the game's Pillars chunk: a pillar in the middle lane every 180, mid-segment
+    if (has('obstacle_pillar') && gen.obstacles.pillar && obstacleMode !== 'studio') {
+      for (let pz = start + SEGMENT / 2; pz < z; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], 'obstacle');
+      pillarRanges.push([start, z]);
+    }
   }
   function gate() {
     const start = z;
@@ -216,12 +334,58 @@ export function generateLayout(
       const ends = !shadowedAt(tz + SEGMENT);
       trackType = starts && ends ? 'TrackShadowStartEnd' : starts ? 'TrackShadowStart' : ends ? 'TrackShadowEnd' : 'TrackShadow';
     }
-    for (const x of LANES) place('track_track', [x, 0, tz], 'track', { trackType });
+    for (const x of LANES) {
+      // Under station platforms the outer tracks are covered: plain ground, no rails
+      const covered = x !== 0 && platformRanges.some(([a, b]) => tz >= a && tz < b) && has('track_ground');
+      if (covered) place('track_ground', [x, 0, tz], 'track', { trackType: 'GroundNormal' });
+      else placeTrack(x, tz, trackType);
+    }
+  }
+
+  /**
+   * One 180-long rail piece. Studio "no tracks" zones are cut out by the track shader
+   * (exact to the pixel, nothing squeezed); a plain-ground piece fills them, drawn only
+   * inside the zone.
+   */
+  function placeTrack(x, tz, trackType) {
+    place('track_track', [x, 0, tz], 'track', { trackType });
+    const cut = obstacleMode === 'studio' && studio.some((it) => it.type === 'noTracks' && it.lane === x && it.z0 < tz + SEGMENT && it.z1 > tz);
+    if (cut && has('track_ground')) place('track_ground', [x, 0, tz], 'track', { trackType: 'GroundNormal', cut: 'inside' });
   }
 
   // Older game versions ship no chase chunks: fall back to random obstacles
-  if (obstacleMode === 'chunks' && Object.keys(manifest.chunks ?? {}).length) placeChunks();
-  else if (obstacles || trains || signals) placeObstacles();
+  if (obstacleMode === 'studio') placeStudio();
+  else if (obstacleMode === 'chunks' && Object.keys(manifest.chunks ?? {}).length) placeChunks();
+  else placeObstacles();
+
+  function placeStudio() {
+    for (const it of studio) {
+      placeRng = mulberry32(hashString(JSON.stringify(it)) ^ seed);
+      if (it.type === 'train') {
+        const cars = studioCars(it);
+        if (!cars) continue;
+        const group = `studio${it.lane}@${it.z0}`;
+        let tz = it.z0;
+        if (it.ramp && has('train_ramp')) {
+          place('train_ramp', [it.lane, 0, tz + 36], 'train', { group });
+          tz += RAMP_LENGTH;
+        }
+        place(`train_${it.kind}_${cars}`, [it.lane, 0, tz], 'train', { group }, TRAIN_VARIANTS[it.variant] ?? null);
+      } else if (it.type === 'startTrain') {
+        place('prop_train_start', [it.lane, 0, it.z], 'train', { group: `start@${it.z}` });
+      } else if (it.type === 'signal') {
+        place('obstacle_lightSignal', [it.x, 0, it.z], 'signal', { signalSeed: Math.floor(placeRng() * 2 ** 31), signalColor: it.color });
+      } else if (it.type === 'obstacle') {
+        if (it.key === 'powerBox') powerBoxCluster(it.lane, it.z);
+        else place(OBSTACLE_SLOTS[it.key], [it.lane, 0, it.z], 'obstacle');
+      }
+    }
+    placeRng = rng;
+  }
+
+  function studioCars(it) {
+    return fitTrain([1, 2, 3, 5].filter((n) => has(`train_${it.kind}_${n}`)), it.z1 - it.z0 - (it.ramp && has('train_ramp') ? RAMP_LENGTH : 0));
+  }
 
   // The game's chase chunks (ChunkAssetPlacer layouts) laid back to back. Their random
   // groups keep one option and MirrorRandomizer flips subtrees left/right.
@@ -253,33 +417,48 @@ export function generateLayout(
         if (seen.has(key)) continue; // a chase entity and its themed child share a spot
         seen.add(key);
         const layer = pl.slot.startsWith('train_') ? 'train' : 'obstacle';
-        if ((layer === 'train' && !trains) || (layer === 'obstacle' && !obstacles)) continue;
         // Trains in one lane of a chunk hide together in the cutaway
-        place(pl.slot, [x, y, pz + cz], layer, layer === 'train' ? { group: `chunk${cz}x${x}` } : {});
+        const extra = layer === 'train' ? { group: `chunk${cz}x${x}` } : {};
+        if (pl.scale) extra.scale = pl.scale;
+        place(pl.slot, [x, y, pz + cz], layer, extra);
       }
       cz += chunk.length;
     }
   }
 
   function placeObstacles() {
-    const trainSlots = ['train_static_1', 'train_static_2', 'train_static_3', 'train_static_5', 'train_moving_3', 'train_moving_5'].filter(has);
-    const blockerSlots = ['obstacle_barrier_jump', 'obstacle_barrier_roll', 'obstacle_barrier_standard'].filter(has);
+    // Run opening, like the game's Intro_Train chunk: the parked start train on the left track
+    if (gen.trains.start && has('prop_train_start')) {
+      place('prop_train_start', [20, 0, 150], 'train', { group: 'start' });
+      laneBlocks.push({ x: 20, z0: 100, z1: 270 });
+    }
+    // Event themes (Floor Is Lava, Plant Invasion) add "falling" lava cargo trains
+    const kindSlots = (kind) => [1, 2, 3, 5].map((n) => `train_${kind}_${n}`).filter(has);
+    const trainSlots = [...(gen.trains.static ? kindSlots('static') : []), ...(gen.trains.moving ? kindSlots('moving') : [])];
+    const fallingSlots = gen.trains.falling ? kindSlots('falling') : [];
+    const enabled = (keys) => keys.filter((k) => gen.obstacles[k]).map((k) => OBSTACLE_SLOTS[k]).filter(has);
+    const blockerSlots = enabled(['jump', 'roll', 'standard']);
+    const props = enabled(['bush', 'dumpster', 'powerBox']);
+    const obstacleSlots = blockerSlots.length ? blockerSlots : props;
     for (const x of LANES) {
       let oz = SEGMENT + randInt(rng, 0, 8) * 11.25;
       while (oz < length - SEGMENT) {
         // Keep gate stretches clear: nothing may start in or run into the wall
         const blocked = (from, to) =>
           noTrackRanges.some(([a, b]) => from < b && to > a - 30) ||
+          (x === 0 && pillarRanges.some(([a, b]) => from < b && to > a - 10)) ||
+          laneBlocks.some((l) => l.x === x && from < l.z1 && to > l.z0) ||
           (x !== 0 && platformRanges.some(([a, b]) => from < b && to > a - 10));
         if (blocked(oz, oz + 30)) {
           oz += 90;
           continue;
         }
-        if (trains && trainSlots.length && rng() < 0.55) {
-          const slot = pick(rng, trainSlots);
-          const cars = Number(slot.split('_').pop());
+        const anyTrain = trainSlots.length || fallingSlots.length;
+        if (anyTrain && (rng() < gen.trainShare || !obstacleSlots.length)) {
+          const slot = fallingSlots.length && (rng() < 0.15 || !trainSlots.length) ? pick(rng, fallingSlots) : pick(rng, trainSlots);
+          const cars = Number(slot.split('_').pop()); // train_<kind>_<cars>
           // Some static trains get a ramp wagon in front (spans -36..40 around its origin)
-          const ramp = slot.startsWith('train_static') && has('train_ramp') && rng() < 0.35 ? 76 : 0;
+          const ramp = slot.startsWith('train_static') && gen.trains.ramps && has('train_ramp') && rng() < 0.35 ? RAMP_LENGTH : 0;
           const trainLength = 70 + 60 * (cars - 1);
           if (blocked(oz, oz + ramp + trainLength)) {
             oz += 90;
@@ -290,19 +469,54 @@ export function generateLayout(
           place(slot, [x, 0, oz + ramp], 'train', { group });
           // Signal light at the track edge before some trains (outer edge for side lanes)
           // Signal light between two tracks (the game's LightSignal sits at x = ±10)
-          if (signals && has('obstacle_lightSignal') && rng() < 0.5) {
+          if (gen.signals && has('obstacle_lightSignal') && rng() < 0.5) {
             const sx = x === 0 ? (rng() < 0.5 ? -10 : 10) : Math.sign(x) * 10;
             place('obstacle_lightSignal', [sx, 0, oz - 15], 'signal', { signalSeed: Math.floor(rng() * 2 ** 31) });
           }
           oz += ramp + trainLength;
-        } else if (obstacles && blockerSlots.length) {
-          place(pick(rng, blockerSlots), [x, 0, oz], 'obstacle');
+        } else if (obstacleSlots.length) {
+          // Mostly barriers, sometimes the theme's props (bush, dumpster, power box)
+          const slot = props.length && (rng() < 0.25 || !blockerSlots.length) ? pick(rng, props) : pick(rng, blockerSlots);
+          if (slot === 'obstacle_powerBox') powerBoxCluster(x, oz);
+          else place(slot, [x, 0, oz], 'obstacle');
           oz += 22.5;
         }
-        oz += randInt(rng, 6, 20) * 11.25;
+        oz += (randInt(rng, 6, 20) * 11.25) / Math.max(0.2, gen.density);
       }
     }
   }
 
+  /** The game's power box carries two shrunken bushes as children (Pumpkin chunk). */
+  function powerBoxCluster(x, pz) {
+    place('obstacle_powerBox', [x, 0, pz], 'obstacle');
+    if (!has('obstacle_bush')) return;
+    place('obstacle_bush', [x + 4.97, 0.06, pz + 2.48], 'obstacle', { scale: 0.672 });
+    place('obstacle_bush', [x - 4.64, 0.34, pz + 1.93], 'obstacle', { scale: 0.54 });
+  }
+
   return { items, length };
+}
+
+/** Converts generated obstacle items into an editable studio list ("start from this run"). */
+export function itemsToStudio(items) {
+  const out = [];
+  const ramps = new Map(items.filter((i) => i.slot === 'train_ramp').map((i) => [i.group, i]));
+  for (const it of items) {
+    const [x, , z] = it.pos;
+    const m = it.slot.match(/^train_(static|moving|falling)_(\d)$/);
+    if (m) {
+      const ramp = ramps.get(it.group);
+      const z0 = ramp ? ramp.pos[2] - 36 : z;
+      const variant = Object.keys(TRAIN_VARIANTS).find((v) => TRAIN_VARIANTS[v].test(it.prefab)) ?? 'auto';
+      out.push({ type: 'train', lane: x, z0, z1: z + trainLength(Number(m[2])), kind: m[1], variant, ramp: !!ramp });
+    } else if (it.slot === 'prop_train_start') {
+      out.push({ type: 'startTrain', lane: x, z });
+    } else if (it.slot === 'obstacle_lightSignal') {
+      out.push({ type: 'signal', x, z, color: mulberry32(it.signalSeed)() < 0.5 ? 'green' : 'red' });
+    } else if (it.layer === 'obstacle' && !it.scale) {
+      const key = Object.entries(OBSTACLE_SLOTS).find(([, slot]) => slot === it.slot)?.[0];
+      if (key) out.push({ type: 'obstacle', key, lane: x, z });
+    }
+  }
+  return out;
 }

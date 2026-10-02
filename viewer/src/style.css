@@ -272,23 +272,268 @@ button:hover {
   border-radius: 8px;
 }
 
-/* lil-gui docked right, matching the panels */
-.lil-gui.autoPlace {
-  top: 10px;
-  right: 10px;
+/* ---------------------------------------------------------------- settings menu */
+
+body.ui-hidden #ui,
+body.ui-hidden #status {
+  display: none;
 }
-.lil-gui.root {
-  --background-color: var(--panel-bg);
-  --title-background-color: rgba(0, 0, 0, 0.35);
-  --widget-color: rgba(255, 255, 255, 0.1);
-  --focus-color: rgba(255, 255, 255, 0.2);
-  --number-color: var(--accent);
-  --font-size: 12px;
-  border-radius: var(--radius);
+
+.menu-overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 20;
+}
+.menu-panel {
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(80vh, 760px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
   border: 1px solid var(--panel-border);
-  backdrop-filter: blur(8px);
-  max-height: calc(100vh - 70px);
+  border-radius: 14px;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+.menu-panel header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--panel-border);
+  font-size: 15px;
+}
+.menu-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--panel-border);
+  overflow-x: auto;
+}
+.menu-tabs button {
+  border: 0;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 14px;
+}
+.menu-tabs button.active {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.menu-body {
   overflow-y: auto;
+  padding: 6px 16px 16px;
+}
+.menu-group h3 {
+  margin: 16px 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.menu-page {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  column-gap: 24px;
+}
+.ctl {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+}
+.ctl.clickable {
+  cursor: pointer;
+}
+.ctl-label {
+  flex: 1;
+}
+.ctl-label small {
+  margin-left: 6px;
+  color: var(--muted);
+}
+.ctl input[type='range'] {
+  width: 130px;
+  accent-color: var(--accent);
+}
+.ctl-value {
+  width: 64px;
+  text-align: right;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 3px 6px;
+}
+.ctl-value:focus {
+  outline: 1px solid var(--accent);
+}
+.ctl select {
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  padding: 4px 8px;
+  max-width: 200px;
+}
+.ctl select option {
+  background: #1b2029;
+}
+.ctl-button button {
+  width: 100%;
+  margin: 2px 0;
+}
+button.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+  font-weight: 600;
+}
+button.danger {
+  color: #ff7b7b;
+}
+.ctl .note {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.switch {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  flex: none;
+}
+.switch input {
+  opacity: 0;
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  cursor: pointer;
+}
+.switch i {
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.18);
+  transition: background 0.15s;
+  pointer-events: none;
+}
+.switch i::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+.switch input:checked + i {
+  background: var(--accent);
+}
+.switch input:checked + i::after {
+  transform: translateX(14px);
+}
+
+/* ---------------------------------------------------------------- studio */
+
+body.studio #status,
+body.studio .toolbar,
+body.studio .browser,
+body.studio .gallery {
+  display: none !important;
+}
+body.studio #view {
+  cursor: crosshair;
+}
+.studio-palette {
+  position: fixed;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  width: min(980px, calc(100vw - 24px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.studio-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  backdrop-filter: blur(12px);
+}
+.studio-sep {
+  flex: 1;
+}
+.studio-status {
+  font-size: 12px;
+}
+.studio-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.studio-row .tool.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+}
+.studio-label {
+  width: 72px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.studio-row select {
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  padding: 4px 8px;
+}
+.studio-row select option {
+  background: #1b2029;
+}
+.studio-row .cars {
+  min-width: 56px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.studio-row button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.studio-info {
+  color: var(--muted);
+  margin-left: 8px;
+}
+.studio-hint {
+  flex: 1;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+.studio-row .check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
 }
 
 @media (max-width: 700px) {

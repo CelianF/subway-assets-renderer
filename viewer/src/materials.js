@@ -36,6 +36,8 @@ export function setBendDegrees(horizontal, vertical = 0) {
   bend.value.set(k(horizontal), k(vertical));
 }
 
+const MAX_CUTS = 32;
+
 export const globals = {
   uTime: { value: 0 },
   uFogColor: { value: new THREE.Color(0.63, 0.69, 0.74) },
@@ -44,7 +46,17 @@ export const globals = {
   uBend: bend,
   uResolution: { value: new THREE.Vector2(1920, 1080) }, // render target size (screen-space masks)
   uAltRatio: { value: 0 }, // _AlternateColorRatio (New York "Play2Plant" variant textures)
+  // Studio "no tracks" zones: (track x, z0, z1); rails hide inside, fill ground shows only inside
+  uCutCount: { value: 0 },
+  uCuts: { value: Array.from({ length: MAX_CUTS }, () => new THREE.Vector3()) },
 };
+
+/** Sets the "no tracks" zones the track materials cut out. */
+export function setTrackCuts(zones) {
+  const list = zones.slice(0, MAX_CUTS);
+  list.forEach((z, i) => globals.uCuts.value[i].set(z.lane, z.z0, z.z1));
+  globals.uCutCount.value = list.length;
+}
 
 /** Applies a theme's fog (ThemeConfig); `scale` stretches the distances for free roaming. */
 export function setFog({ color, start, end } = {}, enabled = true, scale = 1) {
@@ -77,9 +89,11 @@ varying vec2 vUv;
 varying float vDepth;
 varying vec3 vNormalV;
 varying vec3 vViewDir;
+varying vec3 vWorld;
 #ifdef USE_COLOR
 varying vec3 vColor;
 #endif
+#include <clipping_planes_pars_vertex>
 
 void main() {
   // Unity applies tiling/offset (and scrolls) with V pointing up; glTF UVs have V
@@ -99,6 +113,7 @@ void main() {
 #ifdef LAVA
   p.y += (texture2D(uDisplaceTex, uv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5) * uMeshDisplace;
 #endif
+  vWorld = (modelMatrix * vec4(p, 1.0)).xyz;
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   float depth = max(-mv.z, 0.0);
   mv.xy += vec2(uBend.x, -uBend.y) * depth * depth;
@@ -109,7 +124,36 @@ void main() {
   vColor = color.rgb; // vec3 or vec4 (RGBA vertex colors) depending on the mesh
 #endif
   gl_Position = projectionMatrix * mv;
+  vec4 mvPosition = mv;
+#include <clipping_planes_vertex>
 }
+`;
+
+// Track cut-outs (studio "no tracks" zones): TRACK_CUT 1 hides inside, 2 shows only inside
+const CUT_GLSL = /* glsl */ `
+#include <clipping_planes_pars_fragment>
+#ifdef TRACK_CUT
+uniform int uCutCount;
+uniform vec3 uCuts[${32}];
+varying vec3 vWorld;
+bool inCut() {
+  for (int i = 0; i < ${32}; i++) {
+    if (i >= uCutCount) break;
+    if (abs(vWorld.x - uCuts[i].x) < 10.0 && vWorld.z >= uCuts[i].y && vWorld.z < uCuts[i].z) return true;
+  }
+  return false;
+}
+#endif
+`;
+const CUT_MAIN = /* glsl */ `
+#include <clipping_planes_fragment>
+#ifdef TRACK_CUT
+#if TRACK_CUT == 1
+  if (inCut()) discard;
+#else
+  if (!inCut()) discard;
+#endif
+#endif
 `;
 
 const FOG_GLSL = /* glsl */ `
@@ -144,8 +188,10 @@ varying vec3 vViewDir;
 varying vec3 vColor;
 #endif
 ${FOG_GLSL}
+${CUT_GLSL}
 
 void main() {
+${CUT_MAIN}
   vec4 c = texture2D(uMap, vUv);
 #ifdef ALTERNATE
   c = mix(c, texture2D(uAltTex, vUv), uAltRatio);
@@ -202,8 +248,10 @@ uniform float uAlphaKill;
 varying vec2 vUv;
 varying float vDepth;
 ${FOG_GLSL}
+${CUT_GLSL}
 
 void main() {
+${CUT_MAIN}
   vec4 m = texture2D(uMap, vUv);
   if (max(m.r, m.g) < uAlphaKill) discard;
   vec3 c = mix(uMainColor.rgb, uFoamColor.rgb, m.r) + vec3(m.r * 0.6); // foam fill is bright
@@ -224,8 +272,10 @@ uniform float uTime;
 varying vec2 vUv;
 varying float vDepth;
 ${FOG_GLSL}
+${CUT_GLSL}
 
 void main() {
+${CUT_MAIN}
   float d = texture2D(uDisplaceTex, vUv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5;
   vec3 t = texture2D(uMap, vUv + d * uDisplaceStrength).rgb;
   vec3 c = t.r * uColorR + t.g * uColorG + t.b * uColorB;
@@ -333,15 +383,18 @@ export class MaterialLibrary {
     return loadTexture(t.url.startsWith('/') ? t.url : `${this.baseUrl}/${t.url}`); // merged envs use absolute paths
   }
 
-  get(name, fallback) {
-    if (this.cache.has(name)) return this.cache.get(name);
+  /** @param cut 0: normal; 1: hidden inside "no tracks" zones (rails); 2: only inside them (fill ground) */
+  get(name, fallback, cut = 0) {
+    const key = cut ? `${name}|cut${cut}` : name;
+    if (this.cache.has(key)) return this.cache.get(key);
     const def = this.defs[name];
     let mat;
     if (!def) mat = this.fromFallback(name, fallback);
     else if (def.shader === 'SYBO/Bend/Specials/Fountain') mat = this.fountain(name, def);
     else if (def.shader === 'SYBO/Bend/Specials/NoFloorLava') mat = this.lava(name, def);
     else mat = this.combined(name, translateLegacy(def)); // incl. VertexWave, ScreenMask and pre-3.0 Bend/* shaders
-    this.cache.set(name, mat);
+    if (cut) mat.defines.TRACK_CUT = cut;
+    this.cache.set(key, mat);
     return mat;
   }
 
@@ -375,6 +428,7 @@ export class MaterialLibrary {
     const mat = new THREE.ShaderMaterial({
       name,
       defines,
+      clipping: true,
       vertexShader: COMBINED_VERTEX,
       fragmentShader: COMBINED_FRAGMENT,
       vertexColors: on('_HasVertexColors', 'VERTEX_COLORS_ENABLED'),
@@ -414,6 +468,7 @@ export class MaterialLibrary {
     const mat = new THREE.ShaderMaterial({
       name,
       defines: { SCROLL: '' },
+      clipping: true,
       vertexShader: COMBINED_VERTEX,
       fragmentShader: FOUNTAIN_FRAGMENT,
       uniforms: {
@@ -438,6 +493,7 @@ export class MaterialLibrary {
     const mat = new THREE.ShaderMaterial({
       name,
       defines: { SCROLL: '', LAVA: '' },
+      clipping: true,
       vertexShader: COMBINED_VERTEX,
       fragmentShader: LAVA_FRAGMENT,
       uniforms: {
@@ -489,6 +545,7 @@ export class MaterialLibrary {
     return new THREE.ShaderMaterial({
       name,
       defines: { FADE_MODE: 0, TINT: '' },
+      clipping: true,
       vertexShader: COMBINED_VERTEX,
       fragmentShader: COMBINED_FRAGMENT,
       uniforms: {

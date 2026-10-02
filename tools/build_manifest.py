@@ -181,8 +181,10 @@ def parse_chunk(prefab: Path, guid_index) -> dict:
         go = re.search(r"m_GameObject: \{fileID: (\d+)", doc)
         if kind == "4":
             pos = re.search(r"m_LocalPosition: \{x: ([-\d.e]+), y: ([-\d.e]+), z: ([-\d.e]+)\}", doc)
+            scale = re.search(r"m_LocalScale: \{x: ([-\d.e]+)", doc)
             father = re.search(r"m_Father: \{fileID: (\d+)", doc)
-            transforms[fid] = ([float(pos.group(i)) for i in (1, 2, 3)], father.group(1) if father else "0")
+            transforms[fid] = ([float(pos.group(i)) for i in (1, 2, 3)], father.group(1) if father else "0",
+                               float(scale.group(1)) if scale else 1.0)
             if go:
                 go_transform[go.group(1)] = fid
         elif kind == "114" and go:
@@ -195,11 +197,25 @@ def parse_chunk(prefab: Path, guid_index) -> dict:
     owner = {tid: go for go, tid in go_transform.items()}
 
     def world(tid):
-        x = [0.0, 0.0, 0.0]
+        # Uniform scales only (all chunk props are): child offsets scale with their parents
+        x, chain = [0.0, 0.0, 0.0], []
         while tid in transforms:
-            p, tid = transforms[tid][0], transforms[tid][1]
-            x = [x[i] + p[i] for i in range(3)]
-        return x
+            chain.append(transforms[tid])
+            tid = transforms[tid][1]
+        acc = [0.0, 0.0, 0.0]
+        for i in range(len(chain)):
+            parent_scale = 1.0
+            for _, _, s in chain[i + 1:]:
+                parent_scale *= s
+            acc = [acc[k] + chain[i][0][k] * parent_scale for k in range(3)]
+        return acc
+
+    def world_scale(tid):
+        s = 1.0
+        while tid in transforms:
+            s *= transforms[tid][2]
+            tid = transforms[tid][1]
+        return s
 
     def ancestors(tid):
         chain = []
@@ -216,6 +232,9 @@ def parse_chunk(prefab: Path, guid_index) -> dict:
         tid = go_transform.get(go)
         x, y, z = world(tid)
         entry = {"slot": slot, "pos": [-x, y, z]}  # Unity -> glTF: mirror X
+        scale = world_scale(tid)
+        if abs(scale - 1) > 1e-3:
+            entry["scale"] = round(scale, 4)
         chain = ancestors(tid)
         for i, t in enumerate(chain):
             scripts = scripts_on_go.get(owner.get(t), {})

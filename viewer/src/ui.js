@@ -1,5 +1,5 @@
 // Viewer chrome around the canvas: theme bar, piece browser, screenshot gallery, help.
-// The detailed settings stay in the lil-gui panel (docked right).
+// The detailed settings live in the central menu (settings.js).
 
 const CATEGORY_LABELS = {
   boundary: 'Buildings & structures',
@@ -174,6 +174,8 @@ export function createUI(manifest, actions) {
           ['Space / Shift', 'Up / down'],
           ['Alt', 'Move faster'],
           ['Mouse wheel', 'Change fly speed'],
+          ['M', 'Settings menu'],
+          ['Tab', 'Hide / show the interface'],
           ['P', 'Screenshot'],
           ['B', 'Piece browser'],
           ['G', 'Screenshot gallery'],
@@ -196,6 +198,8 @@ export function createUI(manifest, actions) {
   const toolbar = el(
     'div',
     { class: 'toolbar' },
+    el('button', { title: 'Settings (M)', onclick: () => actions.openSettings() }, '⚙️ Menu'),
+    el('button', { title: 'Place trains and obstacles yourself', onclick: () => actions.openStudio() }, '✏️ Studio'),
     el('button', { title: 'Piece browser (B)', onclick: () => toggleBrowser() }, '🧱 Pieces'),
     el('button', { title: 'Screenshot (P)', onclick: takeShot }, '📷 Shot'),
     el(
