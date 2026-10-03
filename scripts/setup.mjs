@@ -1,7 +1,8 @@
 // One-time setup (macOS / Windows / Linux): builds the headless AssetRipper CLI and
-// installs the viewer. Usage: npm run setup [-- --self-contained]
+// installs the viewer. Usage: npm run setup [-- --self-contained [--arch x64|arm64]]
 //   default            dist/ripper/ripper.dll  (portable, needs the .NET 10 runtime)
-//   --self-contained   dist/ripper-native/      (this OS only, no .NET needed to run)
+//   --self-contained   dist/ripper-<arch>/      (this OS only, no .NET needed to run;
+//                      also what the desktop app bundles)
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -10,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const IS_WIN = process.platform === 'win32';
 const selfContained = process.argv.includes('--self-contained');
+const archFlag = process.argv.indexOf('--arch');
+const arch = archFlag > 0 ? process.argv[archFlag + 1] : process.arch;
 
 function findDotnet() {
   const local = path.join(ROOT, '.tools', 'dotnet', IS_WIN ? 'dotnet.exe' : 'dotnet');
@@ -32,8 +35,8 @@ if (!existsSync(path.join(ROOT, 'third_party', 'AssetRipper', 'Source'))) {
 const dotnet = findDotnet();
 const project = path.join(ROOT, 'tools', 'ripper', 'Ripper.csproj');
 if (selfContained) {
-  const rid = `${IS_WIN ? 'win' : process.platform === 'darwin' ? 'osx' : 'linux'}-${process.arch === 'arm64' ? 'arm64' : 'x64'}`;
-  run(dotnet, ['publish', project, '-c', 'Release', '-r', rid, '--self-contained', 'true', '-o', path.join(ROOT, 'dist', 'ripper-native')]);
+  const rid = `${IS_WIN ? 'win' : process.platform === 'darwin' ? 'osx' : 'linux'}-${arch}`;
+  run(dotnet, ['publish', project, '-c', 'Release', '-r', rid, '--self-contained', 'true', '-o', path.join(ROOT, 'dist', `ripper-${arch}`)]);
 } else {
   run(dotnet, ['publish', project, '-c', 'Release', '-o', path.join(ROOT, 'dist', 'ripper')]);
 }

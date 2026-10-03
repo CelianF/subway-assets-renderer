@@ -4,9 +4,17 @@ Environment viewer for Subway Surfers maps. Upload an APK, and each map it conta
 
 No game assets are included in this repo. Everything is extracted locally from your own game package.
 
-## Setup
+## Download
 
-Requirements: Node 20+, Python 3, and the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) to build the extractor. Works on macOS and Windows.
+Get the app for your OS from the [Releases](https://github.com/CelianF/subway-assets-renderer/releases) page. Nothing else to install.
+
+- **macOS** (`.dmg`, `arm64` for Apple Silicon, `x64` for Intel): the app is not notarized yet, so after copying it to Applications run `xattr -cr "/Applications/Subway Assets Renderer.app"` once, or allow it in System Settings → Privacy & Security.
+- **Windows** (`.exe`): the installer is not signed. When SmartScreen warns, click *More info* → *Run anyway*.
+- **Linux** (`.AppImage`): `chmod +x Subway-Assets-Renderer-*.AppImage`, then run it.
+
+## Development setup
+
+Requirements: Node 20+ and the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) to build the extractor. Works on macOS, Windows and Linux.
 
 ```sh
 git clone --recursive https://github.com/CelianF/subway-assets-renderer
@@ -15,7 +23,17 @@ npm run setup        # builds the extractor + installs the viewer
 npm run dev          # http://localhost:5173
 ```
 
-`npm run setup -- --self-contained` builds an extractor for the current OS that runs without the .NET runtime.
+`npm run setup -- --self-contained` builds an extractor for the current OS that runs without the .NET runtime (`dist/ripper-<arch>/`, add `--arch x64|arm64` to pick the architecture).
+
+### Desktop app
+
+```sh
+npm run setup -- --self-contained   # the app bundles the self-contained extractor
+npm run app                          # run it with Electron
+npm run dist                         # package it for this OS into release/
+```
+
+The app keeps its maps in a "Subway Assets Renderer" folder: `~/Library/Application Support/` on macOS, `%LOCALAPPDATA%` on Windows, `~/.config/` on Linux.
 
 ## Using it
 
@@ -31,13 +49,13 @@ npm run dev          # http://localhost:5173
 
 ```
 APK ──tools/ripper (headless AssetRipper)──▶ Unity project + glb export   (temporary, ~2 GB)
-    ──tools/build_manifest.py --split──────▶ workspace/envs/<Map>_<version>/  (manifest.json, glb/, mesh/, tex/)
+    ──tools/build_manifest.mjs --split─────▶ workspace/envs/<Map>_<version>/  (manifest.json, glb/, mesh/, tex/)
     ──viewer (Vite + three.js)──────────────▶ browser
 ```
 
-- `tools/ripper/`: a small .NET CLI on top of the AssetRipper libraries (pinned as the `third_party/AssetRipper` submodule). The default build is framework-dependent, so a single build runs on macOS and Windows. CI (`.github/workflows/ripper.yml`) also produces self-contained builds for macOS arm64/x64 and Windows x64.
-- `server/api.js`: upload, extraction jobs, environment list and delete. It is mounted on the Vite dev server, and `server/index.js` serves the production build (`npm start`).
-- `tools/build_manifest.py`: can also be run by hand on an AssetRipper export (`python3 tools/build_manifest.py <export> --split --out <dir>`).
+- `tools/ripper/`: a small .NET CLI on top of the AssetRipper libraries (pinned as the `third_party/AssetRipper` submodule). The default build is framework-dependent, so a single build runs on macOS, Windows and Linux. CI (`.github/workflows/ripper.yml`) also produces self-contained builds for macOS arm64/x64 and Windows x64.
+- `server/api.js`: upload, extraction jobs, environment list and delete. It is mounted on the Vite dev server, `server/index.js` serves the production build (`npm start`), and `app/main.mjs` runs that server inside the desktop app.
+- `tools/build_manifest.mjs`: runs in a worker thread of the server, and can also be run by hand on an AssetRipper export (`node tools/build_manifest.mjs <export> --split --out <dir>`).
 
 ## How the game's data maps to the viewer
 

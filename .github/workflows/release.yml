@@ -1,0 +1,84 @@
+name: Release
+
+# Pushing a v* tag builds the desktop app for macOS, Windows and Linux and attaches
+# the installers to a draft GitHub release (the tag must match package.json's version:
+# use `npm version <x.y.z>`). A manual run only uploads them as workflow artifacts.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            archs: arm64 x64
+            target: --mac --arm64 --x64
+          - os: windows-latest
+            archs: x64
+            target: --win --x64
+          - os: ubuntu-latest
+            archs: x64
+            target: --linux --x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Self-contained extractor (dist/ripper-<arch>) + viewer dependencies
+        shell: bash
+        run: for arch in ${{ matrix.archs }}; do node scripts/setup.mjs --self-contained --arch $arch; done
+      - run: npm run build --prefix viewer
+
+      - name: Package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing + notarization, used once these secrets exist
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          extra=()
+          if [ "$RUNNER_OS" = macOS ]; then
+            if [ -z "$CSC_LINK" ]; then
+              # No Developer ID yet: ad-hoc signature (needed to run on Apple Silicon at all)
+              unset CSC_LINK CSC_KEY_PASSWORD
+              extra+=(-c.mac.identity=-)
+            fi
+            if [ -n "$APPLE_API_KEY_CONTENT" ]; then
+              export APPLE_API_KEY="$RUNNER_TEMP/apple_api_key.p8"
+              printf '%s' "$APPLE_API_KEY_CONTENT" > "$APPLE_API_KEY"
+            else
+              unset APPLE_API_KEY_ID APPLE_API_ISSUER
+            fi
+          fi
+          publish=never
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then publish=always; fi
+          npx electron-builder ${{ matrix.target }} --publish $publish "${extra[@]}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ runner.os }}
+          path: |
+            release/*.dmg
+            release/*.exe
+            release/*.AppImage
+          if-no-files-found: error

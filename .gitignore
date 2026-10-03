@@ -4,6 +4,7 @@
 *.glb
 *.png
 !docs/**/*.png
+!app/icon.png
 
 # Python
 __pycache__/
@@ -20,6 +21,7 @@ dist/
 /.tools/
 /workspace/
 /dist/
+/release/
 
 # .NET build output
 bin/

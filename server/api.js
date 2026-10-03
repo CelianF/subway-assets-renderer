@@ -1,12 +1,15 @@
 // Local backend: APK upload -> headless AssetRipper -> manifest builder -> one
 // environment per map under workspace/envs/<id>/. No dependencies (node:* only),
-// mounted by the Vite dev server and by server/index.js in production.
+// mounted by the Vite dev server, by server/index.js and by the desktop app.
+//   SUBWAY_WORKSPACE  data folder (default: workspace/ in the repo)
+//   SUBWAY_RIPPER     ripper executable (default: dist/ripper-<arch>/ or dist/ripper/ripper.dll)
 import { spawn } from 'node:child_process';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import { readZip, writeZip } from './zip.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -31,15 +34,22 @@ const PACKAGE_EXTENSIONS = new Set(['.apk', '.xapk', '.zip']);
 
 /** .NET runtime + ripper: self-contained build if present, else `dotnet ripper.dll`. */
 function ripperCommand() {
-  const selfContained = path.join(ROOT, 'dist', 'ripper-native', IS_WIN ? 'ripper.exe' : 'ripper');
+  if (process.env.SUBWAY_RIPPER) return [process.env.SUBWAY_RIPPER, []];
+  const selfContained = path.join(ROOT, 'dist', `ripper-${process.arch}`, IS_WIN ? 'ripper.exe' : 'ripper');
   if (existsSync(selfContained)) return [selfContained, []];
   const dll = path.join(ROOT, 'dist', 'ripper', 'ripper.dll');
   const localDotnet = path.join(ROOT, '.tools', 'dotnet', IS_WIN ? 'dotnet.exe' : 'dotnet');
   return [existsSync(localDotnet) ? localDotnet : 'dotnet', [dll]];
 }
 
-function pythonCommand() {
-  return process.env.PYTHON ?? (IS_WIN ? 'python' : 'python3');
+/** tools/build_manifest.mjs in a worker thread, so the server keeps answering meanwhile. */
+function buildManifest(options, onLine) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('../tools/build_manifest.mjs', import.meta.url), { workerData: options });
+    worker.on('message', onLine);
+    worker.on('error', reject);
+    worker.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`manifest builder exited with ${code}`))));
+  });
 }
 
 function run(cmd, args, onLine) {
@@ -243,7 +253,7 @@ async function runJob(job, apkPath, sourceName) {
     await rm(apkPath, { force: true });
 
     setStage('build');
-    await run(pythonCommand(), ['tools/build_manifest.py', exportDir, '--split', '--out', splitDir, '--source-name', sourceName], log);
+    await buildManifest({ exportDir, out: splitDir, split: true, sourceName }, log);
     await rm(exportDir, { recursive: true, force: true }); // ~2 GB of intermediate files
 
     const maps = [];

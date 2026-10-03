@@ -1,10 +1,65 @@
 {
   "name": "subway-assets-renderer",
+  "productName": "Subway Assets Renderer",
+  "version": "0.1.0",
+  "description": "Environment viewer for Subway Surfers maps",
+  "author": "CelianF",
   "private": true,
   "type": "module",
+  "main": "app/main.mjs",
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "dev": "npm run dev --prefix viewer",
-    "start": "npm run build --prefix viewer && node server/index.js"
+    "start": "npm run build --prefix viewer && node server/index.js",
+    "app": "npm run build --prefix viewer && electron .",
+    "dist": "npm run build --prefix viewer && electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "io.github.celianf.subway-assets-renderer",
+    "directories": {
+      "output": "release"
+    },
+    "asar": false,
+    "files": [
+      "package.json",
+      "app/**",
+      "server/**",
+      "tools/build_manifest.mjs",
+      "viewer/dist/**"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/ripper-${arch}",
+        "to": "ripper"
+      }
+    ],
+    "artifactName": "Subway-Assets-Renderer-${version}-${os}-${arch}.${ext}",
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.graphics-design",
+      "hardenedRuntime": true,
+      "entitlements": "app/entitlements.mac.plist",
+      "entitlementsInherit": "app/entitlements.mac.plist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Graphics"
+    },
+    "icon": "app/icon.png",
+    "publish": {
+      "provider": "github",
+      "releaseType": "draft"
+    }
   }
 }
