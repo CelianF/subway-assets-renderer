@@ -11,6 +11,7 @@ import { copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSyn
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMainThread, parentPort, workerData } from 'node:worker_threads';
+import { createHash } from 'node:crypto';
 
 const GUID_RE = /guid: ([0-9a-f]{32})/;
 const GUID_RE_G = /guid: ([0-9a-f]{32})/g;
@@ -418,11 +419,16 @@ function parseLegacyTheme(file, guidIndex) {
   const slots = {};
   const cars = {}; // generic car name ("standard_front") -> themed prefab
   const shortPieces = {}; // "track_shadow_short_start" -> themed prefab
+  const roles = {}; // themed prefab -> generic role ("high_01_left"): themed names vary
+  const themedOf = {}; // generic prefab ("event_3_gen") -> the city's own
   const block = text.split('\n  _prefabMappingsGeneric:')[1] ?? '';
-  for (const [, g1, g2] of block.matchAll(/GenericPrefab: \{fileID: \d+, guid: (\w+)[^\n]*\n\s*ThemePrefab: \{fileID: \d+, guid: (\w+)/g)) {
+  // Key case varies (1.70: genericPrefab/themePrefab, 1.118: GenericPrefab/ThemePrefab)
+  for (const [, g1, g2] of block.matchAll(/GenericPrefab: \{fileID: \d+, guid: (\w+)[^\n]*\n\s*ThemePrefab: \{fileID: \d+, guid: (\w+)/gi)) {
     const generic = prefabName(g1)?.replace(/_gen$/, '');
     const themed = prefabName(g2);
     if (!generic || !themed) continue;
+    roles[themed] ??= generic;
+    themedOf[`${generic}_gen`] ??= themed;
     const car = generic.match(/^train_(cargo|standard|sub)(?:_\d+)?(_front)?$/);
     if (car) {
       cars[car[1] + (car[2] ?? '')] = themed;
@@ -460,6 +466,7 @@ function parseLegacyTheme(file, guidIndex) {
     if (!start || !end) continue;
     const prefab = `${name}_${kind}_shadow_start_end`;
     composites[prefab] = [{ prefab: start, pos: [0, 0, 0] }, { prefab: end, pos: [0, 0, 90] }];
+    roles[prefab] = `${kind}_shadow_start_end`;
     (slots[`track_${kind === 'track' ? 'track' : 'ground'}`] ??= []).push(prefab);
   }
 
@@ -488,9 +495,23 @@ function parseLegacyTheme(file, guidIndex) {
       offset: number('z', (layer.match(/_offsetFromLayerDefault: \{[^}]*\}/)?.[0] ?? '').replace(/[{},]/g, '\n')) ?? 0,
     };
   });
+  // Before the layered skyline (1.55): background silhouettes and monuments in one color,
+  // the sky gradient under _fogGradient*, and fog distances fixed in the shaders
+  if (!layers.length) {
+    const refs = (key) => [...new Set([...(text.split(`\n  ${key}:`)[1]?.split(/\n {2}\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => prefabName(g)).filter(Boolean))];
+    const tint = color('_fogSilhouetteColor');
+    const fill = refs('_backgroundPrefabs');
+    const singles = refs('_monumentPrefabs');
+    if (fill.length) layers.push({ name: 'Back', fill, singles: [], tint, index: 1, offset: 0 });
+    if (singles.length) layers.push({ name: 'Front', fill: [], singles, tint, index: 2, offset: 0 });
+  }
   const config = {
-    fog: { color: color('_fogColor'), start: number('_fogStartDistance'), end: number('_fogEndDistance') },
-    sky: { top: color('GradientTopColor')?.slice(0, 3) ?? null, bottom: color('GradientBottomColor')?.slice(0, 3) ?? null, power: 1 },
+    fog: { color: color('_fogColor'), start: number('_fogStartDistance') ?? 428, end: number('_fogEndDistance') ?? 784 },
+    sky: {
+      top: (color('GradientTopColor') ?? color('_fogGradientTop'))?.slice(0, 3) ?? null,
+      bottom: (color('GradientBottomColor') ?? color('_fogGradientBottom'))?.slice(0, 3) ?? null,
+      power: 1,
+    },
   };
   if (layers.length) {
     config.skylineLayers = {
@@ -500,7 +521,7 @@ function parseLegacyTheme(file, guidIndex) {
       layers,
     };
   }
-  return { name, slots, composites, transitions, config, trackInfos: { ...LEGACY_TRACK_INFOS } };
+  return { name, slots, composites, roles, themedOf, transitions, config, trackInfos: { ...LEGACY_TRACK_INFOS } };
 }
 
 const TRACK_TYPES = {
@@ -651,10 +672,493 @@ function parseEffectPlayers(file) {
       return m ? num(m[1]) : fallback;
     };
     if (children.length > 1) {
-      out[names.get(go)] = { children, duration: field('_duration', 1), loop: field('_doLoop', 1) !== 0, randomStart: field('_doRandomizeStartingIndex', 0) !== 0 };
+      out[names.get(go)] = {
+        children,
+        duration: field('_duration', 1),
+        maxDuration: field('_maxDuration', 0),
+        loop: field('_doLoop', 1) !== 0,
+        randomStart: field('_doRandomizeStartingIndex', 0) !== 0,
+      };
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------- classic (≤ 1.43)
+//
+// The first games have no themes at all: the level is a library of hand-built chunks in
+// the main scene (Level/Chunks/<difficulty>/<chunk>), each a complete stretch of run with
+// its ground, trains and obstacles. Scripts pick variants at runtime (Randomizer: one
+// child; RandomizerHold: the road's look, held over 3000 units; Mirror: flip left/right;
+// RandomizeOffset: a random lane). Each chunk is cut out of the scene glb into its own
+// glb, those behaviors stored as glTF node extras for the viewer.
+
+/** Reads a glb into { json, bin }. */
+function readGlb(file) {
+  const data = readFileSync(file);
+  const jsonLen = data.readUInt32LE(12);
+  const json = JSON.parse(data.toString('utf8', 20, 20 + jsonLen));
+  const binStart = 20 + jsonLen + 8;
+  if (data.length < binStart) return { json, bin: Buffer.alloc(0) }; // no binary chunk
+  return { json, bin: data.subarray(binStart, binStart + data.readUInt32LE(20 + jsonLen)) };
+}
+
+/** A glb of one node's subtree (root reset to the origin), with node extras and renames; no textures. */
+function glbSubset({ json, bin }, rootIdx, extras, rename = new Map(), skip = new Set(), geometryFor = () => null) {
+  const nodes = [];
+  const nodeMap = new Map();
+  const meshMap = new Map();
+  const matMap = new Map();
+  const accMap = new Map();
+  const meshes = [];
+  const materials = [];
+  const accessors = [];
+  const bufferViews = [];
+  const chunks = [];
+  let offset = 0;
+  const byContent = new Map(); // identical data (the scene repeats meshes per instance) stored once
+  const addAccessor = (ai) => {
+    if (accMap.has(ai)) return accMap.get(ai);
+    const a = json.accessors[ai];
+    const bv = json.bufferViews[a.bufferView];
+    const size = { 5126: 4, 5125: 4, 5123: 2, 5122: 2, 5121: 1, 5120: 1 }[a.componentType];
+    const n = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 }[a.type];
+    const elem = size * n;
+    const stride = bv.byteStride ?? elem;
+    const start = (bv.byteOffset ?? 0) + (a.byteOffset ?? 0);
+    // De-interleaved: only this accessor's bytes (position/normal/uv share one view)
+    const length = a.count * elem;
+    const bytes = Buffer.alloc(length);
+    if (stride === elem) bin.copy(bytes, 0, start, start + length);
+    else for (let i = 0; i < a.count; i++) bin.copy(bytes, i * elem, start + i * stride, start + i * stride + elem);
+    const key = `${a.componentType}:${a.type}:${a.count}:${a.normalized ? 1 : 0}:${createHash('sha1').update(bytes).digest('hex')}`;
+    if (byContent.has(key)) {
+      accMap.set(ai, byContent.get(key));
+      return byContent.get(key);
+    }
+    const pad = (4 - (offset % 4)) % 4;
+    if (pad) chunks.push(Buffer.alloc(pad));
+    offset += pad;
+    bufferViews.push({ buffer: 0, byteOffset: offset, byteLength: length, ...(bv.target ? { target: bv.target } : {}) });
+    chunks.push(bytes);
+    offset += length;
+    const { bufferView, byteOffset, ...rest } = a;
+    accessors.push({ ...rest, bufferView: bufferViews.length - 1 });
+    accMap.set(ai, accessors.length - 1);
+    byContent.set(key, accessors.length - 1);
+    return accessors.length - 1;
+  };
+  const addMaterial = (mi) => {
+    if (mi == null) return undefined;
+    if (!matMap.has(mi)) {
+      materials.push({ name: json.materials[mi].name ?? `material_${mi}` });
+      matMap.set(mi, materials.length - 1);
+    }
+    return matMap.get(mi);
+  };
+  // New accessor from a typed array (geometry rebuilt from the mesh assets)
+  const addArray = (data, type, target) => {
+    const bytes = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+    const key = `new:${type}:${createHash('sha1').update(bytes).digest('hex')}`;
+    if (byContent.has(key)) return byContent.get(key);
+    const pad = (4 - (offset % 4)) % 4;
+    if (pad) chunks.push(Buffer.alloc(pad));
+    offset += pad;
+    bufferViews.push({ buffer: 0, byteOffset: offset, byteLength: bytes.length, target });
+    chunks.push(Buffer.from(bytes));
+    offset += bytes.length;
+    const n = { SCALAR: 1, VEC2: 2, VEC3: 3 }[type];
+    const acc = { bufferView: bufferViews.length - 1, componentType: data instanceof Uint32Array ? 5125 : 5126, count: data.length / n, type };
+    if (type === 'VEC3') {
+      acc.min = [0, 1, 2].map((c) => Math.min(...data.filter((_, i) => i % 3 === c)));
+      acc.max = [0, 1, 2].map((c) => Math.max(...data.filter((_, i) => i % 3 === c)));
+    }
+    accessors.push(acc);
+    byContent.set(key, accessors.length - 1);
+    return accessors.length - 1;
+  };
+  const readPositions = (ai) => {
+    const a = json.accessors[ai];
+    const bv = json.bufferViews[a.bufferView];
+    const stride = bv.byteStride ?? 12;
+    const start = (bv.byteOffset ?? 0) + (a.byteOffset ?? 0);
+    const out = new Float32Array(a.count * 3);
+    for (let i = 0; i < a.count; i++) for (let c = 0; c < 3; c++) out[i * 3 + c] = bin.readFloatLE(start + i * stride + c * 4);
+    return out;
+  };
+  const addMesh = (mi) => {
+    if (meshMap.has(mi)) return meshMap.get(mi);
+    const m = json.meshes[mi];
+    meshes.push({
+      name: m.name,
+      primitives: m.primitives.map((p, pi) => {
+        const material = p.material != null ? { material: addMaterial(p.material) } : {};
+        // Primitives without UVs (Unity 3.5 exports): rebuilt whole from the mesh asset (the
+        // classic shaders are unlit, so the dropped normals aren't missed)
+        const geo = p.attributes.TEXCOORD_0 == null && (p.mode ?? 4) === 4 ? geometryFor(mi, pi, readPositions(p.attributes.POSITION)) : null;
+        if (geo) {
+          return {
+            attributes: { POSITION: addArray(geo.positions, 'VEC3', 34962), TEXCOORD_0: addArray(geo.uvs, 'VEC2', 34962) },
+            indices: addArray(geo.indices, 'SCALAR', 34963),
+            ...material,
+          };
+        }
+        return {
+          attributes: Object.fromEntries(Object.entries(p.attributes).map(([k, v]) => [k, addAccessor(v)])),
+          ...(p.indices != null ? { indices: addAccessor(p.indices) } : {}),
+          ...material,
+          ...(p.mode != null ? { mode: p.mode } : {}),
+        };
+      }),
+    });
+    meshMap.set(mi, meshes.length - 1);
+    return meshes.length - 1;
+  };
+  const addNode = (ni, isRoot) => {
+    const n = json.nodes[ni];
+    const out = { name: rename.get(ni) ?? n.name };
+    nodes.push(out);
+    nodeMap.set(ni, nodes.length - 1);
+    if (!isRoot) for (const k of ['translation', 'rotation', 'scale']) if (n[k]) out[k] = n[k];
+    if (n.mesh != null) out.mesh = addMesh(n.mesh);
+    if (extras.has(ni)) out.extras = extras.get(ni);
+    const kids = (n.children ?? []).filter((c) => !skip.has(c));
+    if (kids.length) out.children = kids.map((c) => addNode(c, false));
+    return nodeMap.get(ni);
+  };
+  addNode(rootIdx, true);
+  const binOut = Buffer.concat(chunks);
+  const gltf = { asset: { version: '2.0', generator: 'subway-assets-renderer classic chunk' }, scene: 0, scenes: [{ nodes: [0] }], nodes, meshes, materials, accessors, bufferViews, buffers: [{ byteLength: binOut.length }] };
+  const jsonBuf = Buffer.from(JSON.stringify(gltf));
+  const jsonPad = Buffer.alloc((4 - (jsonBuf.length % 4)) % 4, 0x20);
+  const binPad = Buffer.alloc((4 - (binOut.length % 4)) % 4);
+  const header = Buffer.alloc(12);
+  header.writeUInt32LE(0x46546c67, 0);
+  header.writeUInt32LE(2, 4);
+  const jsonHead = Buffer.alloc(8);
+  jsonHead.writeUInt32LE(jsonBuf.length + jsonPad.length, 0);
+  jsonHead.writeUInt32LE(0x4e4f534a, 4);
+  const binHead = Buffer.alloc(8);
+  binHead.writeUInt32LE(binOut.length + binPad.length, 0);
+  binHead.writeUInt32LE(0x004e4942, 4);
+  const total = 12 + 8 + jsonBuf.length + jsonPad.length + 8 + binOut.length + binPad.length;
+  header.writeUInt32LE(total, 8);
+  return Buffer.concat([header, jsonHead, jsonBuf, jsonPad, binHead, binOut, binPad]);
+}
+
+// Coins and pickups (with their glows: hide the whole coin, "coin moving" in 1.10)
+const CHANNEL_SIZES_35 = [12, 12, 4, 8, 8, 16]; // vertex, normal, color, uv0, uv1, tangent
+
+/**
+ * A Unity 3.5 mesh asset's vertices (positions, UVs) and per-submesh triangles. Submeshes
+ * are mostly triangle strips there (topology 2); Unity's strips alternate winding and use
+ * repeated indices as joins.
+ */
+function meshAsset(file) {
+  const text = read(file);
+  const count = Number(text.match(/\n {4}m_VertexCount: (\d+)/)?.[1] ?? 0);
+  const hex = text.match(/_typelessdata: ([0-9a-f]+)/)?.[1];
+  if (!count || !hex) return null;
+  const data = Buffer.from(hex, 'hex');
+  const streams = [...text.matchAll(/m_Streams\[\d\]:\n\s+channelMask: (\d+)\n\s+offset: (\d+)\n\s+stride: (\d+)/g)].map(([, mask, off, stride]) => ({ mask: Number(mask), offset: Number(off), stride: Number(stride) }));
+  const locate = (channel) => {
+    for (const st of streams) {
+      if (!(st.mask & (1 << channel))) continue;
+      let at = 0;
+      for (let c = 0; c < channel; c++) if (st.mask & (1 << c)) at += CHANNEL_SIZES_35[c];
+      return { base: st.offset + at, stride: st.stride };
+    }
+    return null;
+  };
+  const pos = locate(0);
+  const uv = locate(3);
+  if (!pos || !uv) return null;
+  const positions = new Float32Array(count * 3);
+  const uvs = new Float32Array(count * 2);
+  for (let i = 0; i < count; i++) {
+    for (let c = 0; c < 3; c++) positions[i * 3 + c] = data.readFloatLE(pos.base + i * pos.stride + c * 4);
+    uvs[i * 2] = data.readFloatLE(uv.base + i * uv.stride);
+    uvs[i * 2 + 1] = 1 - data.readFloatLE(uv.base + i * uv.stride + 4); // glTF V points down
+  }
+  const indexBuffer = Buffer.from(text.match(/\n {2}m_IndexBuffer: ([0-9a-f]*)/)?.[1] ?? '', 'hex');
+  const submeshes = [...text.matchAll(/- firstByte: (\d+)\n\s+indexCount: (\d+)\n\s+isTriStrip: (\d+)/g)].map(([, first, n, topology]) => {
+    const idx = [];
+    for (let i = 0; i < Number(n); i++) idx.push(indexBuffer.readUInt16LE(Number(first) + i * 2));
+    if (topology === '0') return idx;
+    const tris = [];
+    for (let i = 0; i + 2 < idx.length; i++) {
+      const [a, b, c] = [idx[i], idx[i + 1], idx[i + 2]];
+      if (a === b || b === c || a === c) continue;
+      if (i % 2) tris.push(b, a, c);
+      else tris.push(a, b, c);
+    }
+    return tris;
+  });
+  return { positions, uvs, submeshes };
+}
+
+/**
+ * A glb primitive rebuilt from its submesh in the mesh asset: the glb export welded seam
+ * vertices (no UVs to tell them apart), so the asset's own vertices replace them. X is
+ * mirrored like the export does, which flips the winding. Null when the submesh doesn't hold the primitive's vertices.
+ */
+function submeshGeometry(asset, sub, positions) {
+  const tris = asset.submeshes[sub];
+  if (!tris?.length) return null;
+  const key = (x, y, z) => `${Math.round(x * 1000)},${Math.round(y * 1000)},${Math.round(z * 1000)}`;
+  const remap = new Map();
+  const used = [];
+  const indices = new Uint32Array(tris.length);
+  tris.forEach((v, i) => {
+    if (v * 3 >= asset.positions.length) return;
+    if (!remap.has(v)) remap.set(v, used.push(v) - 1);
+    indices[i - (i % 3) + [0, 2, 1][i % 3]] = remap.get(v); // mirrored, so the winding flips
+  });
+  const keys = new Set(used.map((v) => key(asset.positions[v * 3], asset.positions[v * 3 + 1], asset.positions[v * 3 + 2])));
+  let found = 0;
+  for (let i = 0; i < positions.length / 3; i++) if (keys.has(key(-positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]))) found++;
+  if (found < (positions.length / 3) * 0.9) return null;
+  const outPos = new Float32Array(used.length * 3);
+  const outUV = new Float32Array(used.length * 2);
+  used.forEach((v, i) => {
+    outPos[i * 3] = -asset.positions[v * 3];
+    outPos[i * 3 + 1] = asset.positions[v * 3 + 1];
+    outPos[i * 3 + 2] = asset.positions[v * 3 + 2];
+    outUV[i * 2] = asset.uvs[v * 2];
+    outUV[i * 2 + 1] = asset.uvs[v * 2 + 1];
+  });
+  return { positions: outPos, uvs: outUV, indices };
+}
+
+const CLASSIC_HIDE = /^(coins?( moving)?|random_coins|randomPickup|SpawnPoint|MissionTrigger|easterEgg)$/i;
+
+/** Finds the classic level (Level/Chunks) in a scene export; returns chunk glbs to write. */
+function parseClassic(root, project, guidIndex, log) {
+  const sceneDir = path.join(root, 'Files', 'Assets', 'SceneHierarchyObject');
+  for (const glbFile of listDir(sceneDir).filter((p) => p.endsWith('.glb'))) {
+    const glb = readGlb(glbFile);
+    const { json } = glb;
+    const level = json.nodes.findIndex((n) => n.name === 'Level' && n.children?.some((c) => json.nodes[c].name === 'Chunks'));
+    if (level < 0) continue;
+    const sceneFile = path.join(project, 'Scenes', `${stem(glbFile)}.unity`);
+    if (!existsSync(sceneFile)) continue;
+    log(`Classic level in ${path.basename(sceneFile)}`);
+
+    // Scene objects: names, components, transform tree
+    const scripts = new Map();
+    for (const [g, p] of guidIndex) if (p.endsWith('.cs')) scripts.set(g, stem(p));
+    const docs = yamlDocs(read(sceneFile));
+    const goName = new Map();
+    const goComps = new Map(); // go -> [{ script, doc }]
+    const goTransform = new Map();
+    const transformGo = new Map();
+    const transformChildren = new Map();
+    const goMeshAsset = new Map(); // go -> mesh asset file (MeshFilter)
+    for (const { doc, kind, fid } of docs) {
+      if (kind === '1') goName.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+      else if (kind === '4' || kind === '224') {
+        const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+        goTransform.set(go, fid);
+        transformGo.set(fid, go);
+        const kids = doc.split('m_Children:')[1]?.split(/\n {2}m_Father/)[0] ?? '';
+        transformChildren.set(fid, [...kids.matchAll(/fileID: (\d+)/g)].map(([, id]) => id));
+      } else if (kind === '33') {
+        const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+        const g = doc.match(/m_Mesh: \{fileID: \d+, guid: (\w+)/)?.[1];
+        if (go && g && guidIndex.has(g)) goMeshAsset.set(go, guidIndex.get(g));
+      } else if (kind === '114') {
+        const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+        const script = scripts.get(doc.match(/m_Script: .*guid: (\w+)/)?.[1]) ?? '';
+        if (!goComps.has(go)) goComps.set(go, []);
+        goComps.get(go).push({ script, doc });
+      }
+    }
+    // Pair scene objects with glb nodes: same child order, checked by name
+    const nodeOfGo = new Map();
+    const pair = (ni, go) => {
+      nodeOfGo.set(go, ni);
+      const kidsT = transformChildren.get(goTransform.get(go)) ?? [];
+      const kidsN = json.nodes[ni].children ?? [];
+      kidsT.forEach((t, k) => {
+        const cgo = transformGo.get(t);
+        const name = goName.get(cgo);
+        const ci = json.nodes[kidsN[k]]?.name === name ? kidsN[k] : kidsN.find((c) => json.nodes[c].name === name && ![...nodeOfGo.values()].includes(c));
+        if (ci != null) pair(ci, cgo);
+      });
+    };
+    const levelGo = [...goName].find(([go, n]) => n === 'Level' && (transformChildren.get(goTransform.get(go)) ?? []).some((t) => goName.get(transformGo.get(t)) === 'Chunks'))?.[0];
+    if (!levelGo) continue;
+    pair(level, levelGo);
+
+    // Node behaviors as extras
+    const extras = new Map();
+    const field = (doc, key) => doc.match(new RegExp(`\\n {2}${key}: ([^\\n]+)`))?.[1].trim();
+    for (const [go, ni] of nodeOfGo) {
+      const out = {};
+      const name = goName.get(go);
+      for (const { script, doc } of goComps.get(go) ?? []) {
+        if (script === 'Randomizer') out.pick = 'random';
+        else if (script === 'RandomizerHold') {
+          const kidsT = transformChildren.get(goTransform.get(go)) ?? [];
+          const order = [...(doc.split('\n  children:')[1] ?? '').matchAll(/fileID: (\d+)/g)].map(([, id]) => kidsT.indexOf(goTransform.get(id)));
+          out.pick = 'hold';
+          out.hold = order;
+        } else if (script === 'Mirror') out.mirror = true;
+        else if (script === 'RandomizeOffset') {
+          const lanes = [];
+          if (field(doc, '  left') !== '0') lanes.push(-20);
+          if (field(doc, '  mid') !== '0') lanes.push(0);
+          if (field(doc, '  right') !== '0') lanes.push(20);
+          if (lanes.length) out.lanes = lanes;
+        } else if (script === 'MovingTrain') out.moving = Number(field(doc, 'speed') ?? 1);
+        else if (script === 'CoinPlaceholder' || script === 'Coin') out.hide = true;
+      }
+      if (CLASSIC_HIDE.test(name)) out.hide = true;
+      if (/^trains?_|^random_trainType$|^train_ramp$/i.test(name)) out.layer = 'train';
+      else if (/^blocker$|^lightSignal$|^powerbox/i.test(name)) out.layer = 'obstacle';
+      if (Object.keys(out).length) extras.set(ni, out);
+    }
+
+    // Local bounds of a subtree (its root at the origin)
+    const subtreeBbox = (ni) => {
+      const lo = [Infinity, Infinity, Infinity];
+      const hi = [-Infinity, -Infinity, -Infinity];
+      const visit = (i, parentXf, isRoot) => {
+        const node = json.nodes[i];
+        const t = isRoot ? [0, 0, 0] : node.translation ?? [0, 0, 0];
+        const r = isRoot ? [0, 0, 0, 1] : node.rotation ?? [0, 0, 0, 1];
+        const sc = isRoot ? [1, 1, 1] : node.scale ?? [1, 1, 1];
+        const xf = (p) => {
+          const q = qrot(r, [0, 1, 2].map((k) => p[k] * sc[k]));
+          return parentXf([0, 1, 2].map((k) => q[k] + t[k]));
+        };
+        if (node.mesh != null && !extras.get(i)?.hide) {
+          for (const prim of json.meshes[node.mesh].primitives) {
+            const acc = json.accessors[prim.attributes.POSITION];
+            for (let corner = 0; corner < 8; corner++) {
+              const p = xf([0, 1, 2].map((k) => ((corner >> k) & 1 ? acc.max : acc.min)[k]));
+              for (let k = 0; k < 3; k++) {
+                lo[k] = Math.min(lo[k], p[k]);
+                hi[k] = Math.max(hi[k], p[k]);
+              }
+            }
+          }
+        }
+        for (const c of node.children ?? []) visit(c, xf, false);
+      };
+      visit(ni, (p) => p, true);
+      return lo[0] === Infinity ? null : [lo.map((v) => round(v, 3)), hi.map((v) => round(v, 3))];
+    };
+
+    // Chunks: the ones a normal run can use (no tutorial, jetpack or turbo-start sets)
+    const chunks = [];
+    const rename = new Map();
+    const skip = new Set();
+    for (const [go, ni] of nodeOfGo) {
+      const tc = (goComps.get(go) ?? []).find((c) => c.script === 'TrackChunk');
+      if (!tc) continue;
+      const num = (key, fallback) => {
+        const v = field(tc.doc, key);
+        return v != null && /^-?[\d.e+-]+$/.test(v) ? Number(v) : fallback;
+      };
+      const group = json.nodes.find((n) => n.children?.includes(ni))?.name ?? '';
+      const chunk = {
+        group,
+        zSize: num('zSize', 40),
+        probability: num('probability', 1),
+        zMin: num('zMinimum', 0),
+        zMax: num('zMaximumActive', 0) ? num('zMaximum', Infinity) : null,
+      };
+      if (num('isTutorial', 0) === 1 || num('TurboHeadstart', 0) !== 0 || chunk.probability <= 0) {
+        skip.add(ni);
+        continue;
+      }
+      const name = `Classic_${group}_${goName.get(go)}`.replace(/[^A-Za-z0-9_-]+/g, '_');
+      let unique = name;
+      for (let k = 2; chunks.some((c) => c.name === unique); k++) unique = `${name}_${k}`;
+      rename.set(ni, unique);
+      chunks.push({ name: unique, chunk, bbox: subtreeBbox(ni) });
+    }
+    // The intro (start train, inspector's bag): overlaps the first chunk, which leaves the
+    // ground to it
+    const introNode = json.nodes.findIndex((n) => n.name === 'Intro_environment');
+    if (introNode >= 0) {
+      rename.set(introNode, 'Classic_Intro');
+      chunks.push({ name: 'Classic_Intro', chunk: { intro: true, zSize: 0, probability: 0, zMin: 0, zMax: 0 }, bbox: subtreeBbox(introNode) });
+    }
+    // One glb for the chunk library (and intro): chunks share their road and building meshes
+    const library = level;
+    const chunksNode = json.nodes[level].children.find((c) => json.nodes[c].name === 'Chunks');
+    const introParent = json.nodes.findIndex((n) => n.children?.includes(introNode));
+    for (const c of json.nodes[level].children) if (c !== chunksNode && c !== introParent) skip.add(c);
+    const kept = new Set(chunks.filter((c) => !c.chunk.intro).map((c) => [...rename].find(([, n]) => n === c.name)[0]));
+    const hasKept = (i) => kept.has(i) || (json.nodes[i].children ?? []).some(hasKept);
+    for (const c of json.nodes[chunksNode].children ?? []) if (!hasKept(c)) skip.add(c); // empty groups
+    // Fog from the scene's RenderSettings
+    const rs = docs.find((d) => d.kind === '104')?.doc ?? '';
+    const color = rs.match(/m_FogColor: \{r: ([\d.e-]+), g: ([\d.e-]+), b: ([\d.e-]+), a: ([\d.e-]+)\}/);
+    const config = {
+      fog: {
+        color: color ? color.slice(1, 5).map(Number) : null,
+        start: Number(rs.match(/m_LinearFogStart: ([\d.e-]+)/)?.[1] ?? 428),
+        end: Number(rs.match(/m_LinearFogEnd: ([\d.e-]+)/)?.[1] ?? 784),
+      },
+    };
+    // ThemeAssets (the scene's skin): fog and sky colors, skyline silhouettes, as in 1.55
+    const themeGo = [...goName].find(([, n]) => n === 'ThemeAssets')?.[0];
+    const skin = (goComps.get(themeGo) ?? []).map((c) => c.doc).find((d) => /\n {2}assets:/.test(d))?.split(/\n {2}- theme: /)[1];
+    if (skin) {
+      const rgba = (key) => {
+        const m = skin.match(new RegExp(`\\n {4}${key}: \\{r: ([\\d.e-]+), g: ([\\d.e-]+), b: ([\\d.e-]+), a: ([\\d.e-]+)\\}`));
+        return m ? m.slice(1, 5).map(Number) : null;
+      };
+      const refs = (key) => [...new Set([...(skin.split(`\n    ${key}:`)[1]?.split(/\n {4}\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => guidIndex.get(g)).filter((p) => p?.endsWith('.prefab')).map((p) => stem(p)))];
+      config.fog.color = rgba('fogColor') ?? config.fog.color;
+      config.sky = { top: rgba('fogGradientTop')?.slice(0, 3) ?? null, bottom: rgba('fogGradientBottom')?.slice(0, 3) ?? null, power: 1 };
+      const tint = rgba('fogSilhouetteColor');
+      const layers = [];
+      const fill = refs('backgroundPrefabs');
+      const singles = refs('monumentPrefabs');
+      if (fill.length) layers.push({ name: 'Back', fill, singles: [], tint, index: 1, offset: 0 });
+      if (singles.length) layers.push({ name: 'Front', fill: [], singles, tint, index: 2, offset: 0 });
+      if (layers.length) config.skylineLayers = { distance: 1000, spacing: 5, limits: [-350, 750], layers };
+    }
+    // The scene is the same for every World Tour city; the city of the build shows in the
+    // Facebook share icon Globals.cs points at ("fblogo_vancouver.png")
+    // (Globals.cs, or SocialManager.cs in 1.10: any script that names it)
+    const scriptDir = path.join(project, 'Scripts', 'Assembly-CSharp');
+    let city = null;
+    for (const f of listDir(scriptDir).filter((p) => p.endsWith('.cs'))) {
+      city = read(f).match(/fblogo_([a-z]+)\.png/i)?.[1] ?? null;
+      if (city) break;
+    }
+    const MULTI_WORD = { losangeles: 'LosAngeles', newyork: 'NewYork', sanfrancisco: 'SanFrancisco', buenosaires: 'BuenosAires', hongkong: 'HongKong', stpetersburg: 'StPetersburg', riodejaneiro: 'RioDeJaneiro', mexicocity: 'MexicoCity' };
+    const name = city ? MULTI_WORD[city.toLowerCase()] ?? city[0].toUpperCase() + city.slice(1).toLowerCase() : 'Classic';
+    log(`  ${chunks.filter((c) => !c.chunk.intro).length} chunks${introNode >= 0 ? ' + intro' : ''}, city: ${name}`);
+    // Meshes the glb export left without UVs (Unity 3.5 builds): rebuilt from the assets
+    const assetOfMesh = new Map();
+    for (const [go, ni] of nodeOfGo) {
+      const mesh = json.nodes[ni].mesh;
+      if (mesh != null && goMeshAsset.has(go) && !assetOfMesh.has(mesh)) assetOfMesh.set(mesh, goMeshAsset.get(go));
+    }
+    const assetCache = new Map();
+    let rebuilt = 0;
+    let failed = 0;
+    const geometryFor = (mi, pi, positions) => {
+      const file = assetOfMesh.get(mi);
+      if (!file || !existsSync(file)) return null;
+      if (!assetCache.has(file)) assetCache.set(file, meshAsset(file));
+      const asset = assetCache.get(file);
+      const geo = asset ? submeshGeometry(asset, pi, positions) : null;
+      if (geo) rebuilt++;
+      else failed++;
+      return geo;
+    };
+    const libraryGlb = glbSubset(glb, library, extras, rename, skip, geometryFor);
+    if (rebuilt || failed) log(`  Primitives rebuilt from mesh assets (UVs): ${rebuilt}${failed ? `, ${failed} left without` : ''}`);
+    return { name, chunks, config, library: libraryGlb };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------- particles
@@ -920,6 +1424,76 @@ function glbStats(file) {
   };
 }
 
+/**
+ * Whether a glb has a surface inside the runner's corridor (|x| < 25, 2 < y < 30, any z):
+ * tells walls and cards that would block the tracks from arches that span them.
+ */
+function blocksCorridor(file) {
+  const data = readFileSync(file);
+  const jsonLen = data.readUInt32LE(12);
+  const gltf = JSON.parse(data.toString('utf8', 20, 20 + jsonLen));
+  const bin = data.subarray(20 + jsonLen + 8);
+  const read = (ai) => {
+    const a = gltf.accessors[ai];
+    const bv = gltf.bufferViews[a.bufferView];
+    const C = { 5126: Float32Array, 5123: Uint16Array, 5125: Uint32Array, 5121: Uint8Array }[a.componentType];
+    const n = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 }[a.type];
+    const stride = bv.byteStride ? bv.byteStride / C.BYTES_PER_ELEMENT : n;
+    const start = bin.byteOffset + (bv.byteOffset ?? 0) + (a.byteOffset ?? 0);
+    const raw = new C(bin.buffer.slice(start, start + ((a.count - 1) * stride + n) * C.BYTES_PER_ELEMENT));
+    return { raw, stride, count: a.count };
+  };
+  // Exact: clip the triangle by the corridor's four planes; anything left intersects
+  const PLANES = [[0, 1, -25], [0, -1, 25], [1, 1, 2], [1, -1, 30]]; // axis, sign, bound: sign*(p[axis]-bound) > 0
+  const crosses = (tri) => {
+    let poly = tri;
+    for (const [axis, sign, bound] of PLANES) {
+      const d = (p) => sign * (p[axis] - bound);
+      const out = [];
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i];
+        const b = poly[(i + 1) % poly.length];
+        const da = d(a);
+        const db = d(b);
+        if (da > 0) out.push(a);
+        if (da > 0 !== db > 0) {
+          const t = da / (da - db);
+          out.push([0, 1, 2].map((c) => a[c] + (b[c] - a[c]) * t));
+        }
+      }
+      poly = out;
+      if (!poly.length) return false;
+    }
+    return true;
+  };
+  let hit = false;
+  const visit = (i, parentXf) => {
+    if (hit) return;
+    const node = gltf.nodes[i];
+    const t = node.translation ?? [0, 0, 0];
+    const r = node.rotation ?? [0, 0, 0, 1];
+    const sc = node.scale ?? [1, 1, 1];
+    const xf = (p) => {
+      const q = qrot(r, [0, 1, 2].map((k) => p[k] * sc[k]));
+      return parentXf([0, 1, 2].map((k) => q[k] + t[k]));
+    };
+    if ('mesh' in node) {
+      for (const prim of gltf.meshes[node.mesh].primitives) {
+        const pos = read(prim.attributes.POSITION);
+        const P = (v) => xf([pos.raw[v * pos.stride], pos.raw[v * pos.stride + 1], pos.raw[v * pos.stride + 2]]);
+        const idx = prim.indices != null ? read(prim.indices) : null;
+        const tris = idx ? idx.count : pos.count;
+        for (let k = 0; k + 2 < tris && !hit; k += 3) {
+          if (crosses([0, 1, 2].map((j) => P(idx ? idx.raw[k + j] : k + j)))) hit = true;
+        }
+      }
+    }
+    for (const c of node.children ?? []) visit(c, xf);
+  };
+  for (const root of gltf.scenes[gltf.scene ?? 0].nodes) visit(root, (p) => p);
+  return hit;
+}
+
 // ---------------------------------------------------------------- materials
 
 function shaderName(refLine, guidIndex) {
@@ -944,8 +1518,30 @@ function parseMaterial(file, guidIndex, exportRoot) {
   const mat = { shader: null, keywords: [], renderQueue: -1, textures: {}, floats: {}, colors: {} };
   let section = null;
   let texName = null;
+  let pairName = null; // Unity 5 "- first: / name: _MainTex / second: …", Unity 4 "data: / first: / name: …"
   for (const line of lines(read(file))) {
     const s = line.trim();
+    if (section && s.startsWith('name:') && pairName === '') {
+      pairName = s.slice(5).trim();
+      continue;
+    }
+    if (section && s === 'data:') continue;
+    if (section && (s === '- first:' || s === 'first:')) {
+      pairName = '';
+      continue;
+    }
+    if (section && pairName && s.startsWith('second:')) {
+      const value = s.slice(7).trim();
+      if (section === 'm_TexEnvs') texName = pairName;
+      else if (section === 'm_Floats' && value) {
+        try {
+          mat.floats[pairName] = num(value);
+        } catch {
+          // not a float
+        }
+      } else if (section === 'm_Colors' && value) mat.colors[pairName] = (value.match(NUMBERS_RE) ?? []).map(num);
+      continue;
+    }
     if (s.startsWith('m_Shader:')) {
       mat.shader = shaderName(s, guidIndex);
     } else if (s.startsWith('m_CustomRenderQueue:')) {
@@ -1065,7 +1661,10 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       themes[theme.name] = theme.slots;
     }
   }
-  log(`Themes: ${Object.keys(themes).join(', ')}${Object.keys(legacy).length ? ' (1.x format)' : ''}`);
+  // ≤ 1.43: no themes either, the level is a scene of hand-built chunks
+  const classic = !Object.keys(themes).length ? parseClassic(root, project, guidIndex, log) : null;
+  if (classic) themes[classic.name] = { classic_chunk: classic.chunks.map((c) => c.name) };
+  log(`Themes: ${Object.keys(themes).join(', ')}${Object.keys(legacy).length ? ' (1.x format)' : ''}${classic ? ' (classic chunks)' : ''}`);
 
   // Boundary transitions (tube entrances/exits, …) per theme
   const boundaries = {};
@@ -1109,6 +1708,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     if (effects.length) themeConfigs[theme].effects = effects;
   }
   for (const [theme, info] of Object.entries(legacy)) themeConfigs[theme] ??= info.config;
+  if (classic) themeConfigs[classic.name] ??= classic.config;
   log(`Theme configs: ${Object.keys(themeConfigs).length}`);
 
   // Slot types declare their length in cells (BoundaryType.CellDepth); bounding boxes
@@ -1139,8 +1739,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const composites = new Map(Object.values(legacy).flatMap((t) => Object.entries(t.composites)));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.skylineLayers?.layers ?? []).flatMap((l) => [...l.fill, ...l.singles])));
   transitionPrefabs.push([...composites.values()].flatMap((parts) => parts.map((p) => p.prefab)));
+  const classicNames = new Set(classic?.chunks.map((c) => c.name) ?? []);
   const nameLists = [...Object.values(themes).flatMap((slots) => Object.values(slots)), ...transitionPrefabs];
   // 1.x placeholder contents (and theirs, recursively)
+  // Placeholders can name generic prefabs ("event_3_gen"): the game swaps in the city's own
+  const themedOf = Object.assign({}, ...Object.values(legacy).map((t) => t.themedOf));
   const placeholderTargets = [];
   {
     const seen = new Set();
@@ -1152,7 +1755,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       const file = find(`${name}.prefab`);
       if (!file) continue;
       for (const entry of Object.values(parsePlaceholders(file, guidIndex))) {
-        for (const { name: target } of entry.prefabs) {
+        for (const { name } of entry.prefabs) {
+          const target = themedOf[name] ?? name;
           placeholderTargets.push(target);
           queue.push(target);
         }
@@ -1162,7 +1766,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   nameLists.push(placeholderTargets);
   for (const names of nameLists) {
     for (const name of names) {
-      if (name in prefabs || composites.has(name)) continue;
+      if (name in prefabs || composites.has(name) || classicNames.has(name)) continue;
       const src = prefabGlbs.get(`${name}.glb`);
       if (!src) {
         missing.push(name);
@@ -1175,6 +1779,19 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       prefabs[name] = { glb: `glb/${path.basename(src)}`, ...stats };
       prefabGlbSrc.set(name, src);
     }
+  }
+
+  // Classic chunks: one library glb, each chunk a node of it, with its selection settings
+  if (classic) {
+    const file = path.join(outGlb, 'Classic_chunks.glb');
+    writeFileSync(file, classic.library);
+    const { materials } = glbStats(file);
+    for (const c of classic.chunks) prefabs[c.name] = { glb: 'glb/Classic_chunks.glb', node: c.name, meshes: 1, materials, bbox: c.bbox, chunk: c.chunk };
+  }
+
+  // 1.x: the generic role of each themed prefab (name rules in the viewer use it)
+  for (const t of Object.values(legacy)) {
+    for (const [name, role] of Object.entries(t.roles)) if (prefabs[name] && role !== name) prefabs[name].role = role;
   }
 
   // Composites: their parts placed side by side
@@ -1232,7 +1849,9 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     const complete = Object.entries(animations).filter(([, a]) => a.frames.every(Boolean));
     if (complete.length) info.meshAnimations = Object.fromEntries(complete);
     const placeholders = parsePlaceholders(prefabPath, guidIndex);
-    for (const entry of Object.values(placeholders)) entry.prefabs = entry.prefabs.filter((p) => prefabs[p.name]?.glb);
+    for (const entry of Object.values(placeholders)) {
+      entry.prefabs = entry.prefabs.map((p) => ({ ...p, name: themedOf[p.name] ?? p.name })).filter((p) => prefabs[p.name]?.glb);
+    }
     const filled = Object.entries(placeholders).filter(([, e]) => e.prefabs.length);
     if (filled.length) info.placeholders = Object.fromEntries(filled);
     const effects = parseEffectPlayers(prefabPath);
@@ -1283,9 +1902,17 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       if (decorations.has(base) && prefabs[base]) prefabs[base].embedded = true;
     }
     // 1.x: spawned into another piece's placeholder (tube sides, props on a beach)
+    // (decorations themselves are checked below)
     for (const entry of Object.values(info.placeholders ?? {})) {
       for (const { name: target } of entry.prefabs) if (decorations.has(target)) prefabs[target].embedded = true;
     }
+  }
+
+  // Decorations with a wall or card across the runner's corridor (Washington's giant
+  // event pieces, Arabia's flat cards): never centered over the tracks
+  for (const name of decorations) {
+    const info = prefabs[name];
+    if (info?.glb && info.bbox && blocksCorridor(path.join(out, info.glb))) info.blocksTracks = true;
   }
 
   // Materials used by those prefabs
@@ -1313,7 +1940,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   }
 
   const settings = path.join(root, 'ExportedProject', 'ProjectSettings', 'ProjectSettings.asset');
-  const version = existsSync(settings) ? read(settings).match(/bundleVersion: (.+)/) : null;
+  const bundleVersion = existsSync(settings) ? read(settings).match(/bundleVersion: (.+)/)?.[1].trim() : null;
+  // Old exports (1.44) have no bundleVersion: download sites put it in the file name
+  // ("com.kiloo.subwaysurf_1.44.0-70_…apk", "Subway+Surfers_3.69.2_APKPure.apk")
+  const nameVersion = (sourceName ?? '').match(/(?:^|[_+\s-])(\d+\.\d+(?:\.\d+)?)(?=[-_+\s(]|\.(?:apk|xapk|zip)$|$)/i)?.[1] ?? null;
+  const version = bundleVersion || nameVersion ? [null, bundleVersion || nameVersion] : null;
   const categories = ['boundary', 'track', 'special', 'obstacle', 'train', 'prop', 'other'];
   const manifest = {
     source: { name: sourceName || path.basename(root), gameVersion: version ? version[1].trim() : null },

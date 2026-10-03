@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
-import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setReversedDepth } from './materials.js';
+import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setReversedDepth, texturesReady } from './materials.js';
 import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
@@ -336,7 +336,7 @@ function applyMaterial(mesh, mat) {
 }
 
 /** Instantiates a prefab (or one of its runtime track configs) with manifest materials. */
-async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null, signalColor = null, cutMode = null) {
+async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null, signalColor = null, cutMode = null, worldZ = 0) {
   // Rails hide inside studio "no tracks" zones; fill ground only shows inside them
   const cut = layer === 'track' ? (cutMode === 'inside' ? 2 : 1) : 0;
   const prefab = manifest.prefabs[name];
@@ -362,6 +362,8 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
     });
     return group;
   }
+  // ≤ 1.43: a chunk of the classic level library
+  if (prefab?.chunk && prefab.node) return instantiateChunk(prefab, layer, variantSeed, worldZ);
   // Particle-only prefabs (glows, steam) have no geometry of their own
   if (!prefab?.glb || (!prefab.bbox && !prefab.particles)) return null;
   const cutaway = layer === 'environment' ? 'floor' : layer === 'track' ? null : 'all';
@@ -390,6 +392,83 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   return obj;
 }
 
+// RandomizerHold.cs: the road's look follows this sequence, a step every 3000 units
+const HOLD_INDICES = [0, 1, 2, 3, 0, 4, 5, 1, 0, 2, 4, 1, 3, 2, 0, 5, 1, 0, 3, 1, 3];
+
+/**
+ * A classic chunk cloned out of the level library, its variants picked like the game's
+ * scripts: Randomizer (one child), RandomizerHold (the road's look, by distance), Mirror
+ * (children flipped left/right), RandomizeOffset (a random allowed lane). Coins and
+ * pickups are left out; trains and obstacles follow the layer toggles.
+ */
+async function instantiateChunk(prefab, layer, seed, worldZ) {
+  const library = await loadGlb(prefab.glb, { cutaway: 'floor' });
+  const source = library.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(prefab.node));
+  if (!source) return null;
+  const obj = source.clone();
+  obj.position.set(0, 0, 0);
+  obj.updateMatrixWorld(true); // distances along the chunk, for RandomizerHold
+  const rng = mulberry32(seed);
+  const holdStart = state.seed % HOLD_INDICES.length;
+  const nodes = [];
+  obj.traverse((o) => nodes.push(o));
+  for (const o of nodes) {
+    const x = o.userData;
+    if (!o.parent && o !== obj) continue; // removed with an ancestor
+    if (x.hide || (x.layer === 'train' && !state.trains) || (x.layer === 'obstacle' && !state.obstacles)) {
+      o.removeFromParent();
+      continue;
+    }
+    if (x.pick === 'random' && o.children.length) {
+      const keep = o.children[Math.floor(rng() * o.children.length)];
+      for (const c of [...o.children]) if (c !== keep) c.removeFromParent();
+    } else if (x.pick === 'hold' && x.hold?.length) {
+      const z = worldZ + new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).z;
+      const slot = HOLD_INDICES[(holdStart + Math.floor(z / 3000) + holdStart) % HOLD_INDICES.length];
+      const keep = o.children[x.hold[slot]];
+      for (const c of [...o.children]) if (c !== keep) c.removeFromParent();
+    }
+    if (x.mirror && rng() < 0.5) for (const c of o.children) c.position.x *= -1;
+    if (x.lanes?.length) o.position.x = x.lanes[Math.floor(rng() * x.lanes.length)];
+  }
+  placeMovingTrains(obj);
+  obj.traverse((o) => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    const out = mats.map((m) => materials.get(m.name, m, 0));
+    if (out.length === 1) applyMaterial(o, out[0]);
+    else o.material = out;
+  });
+  return obj;
+}
+
+/**
+ * MovingTrain.cs: a moving train meets the player at its anchor and runs ahead of it until
+ * then, so two trains sharing a lane never touch in the game even when their anchors are
+ * closer than a train's length. Shown standing still, each one moves forward (into track
+ * its run sweeps anyway) just enough to clear the one before it.
+ */
+function placeMovingTrains(obj) {
+  const lanes = new Map();
+  obj.updateMatrixWorld(true);
+  obj.traverse((o) => {
+    if (!(o.userData.moving > 0) || !o.children.length) return;
+    const box = new THREE.Box3().setFromObject(o.children[0]);
+    if (box.isEmpty()) return;
+    const lane = Math.round(new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).x);
+    if (!lanes.has(lane)) lanes.set(lane, []);
+    lanes.get(lane).push({ train: o.children[0], min: box.min.z, max: box.max.z });
+  });
+  for (const trains of lanes.values()) {
+    let end = -Infinity;
+    for (const t of trains.sort((a, b) => a.min - b.min)) {
+      const shift = Math.max(0, end + 1 - t.min);
+      t.train.position.z += shift;
+      end = t.max + shift;
+    }
+  }
+}
+
 /**
  * 1.x placeholders: empty nodes the game fills with one prefab from a weighted list (tube
  * sides, beach props, fountains, the signal's red or green light). Spawned pieces can
@@ -405,9 +484,14 @@ async function fillPlaceholders(obj, placeholders, { layer, seed, cutMode, signa
     const { prefabs, probability, all } = table[key];
     if (rng() >= probability) return;
     let picks = all ? prefabs : [weightedPick(rng, prefabs)];
-    // Signal lights: the run's red/green choice, not a random one
-    const red = prefabs.find((p) => /red/i.test(p.name));
-    const green = prefabs.find((p) => /green/i.test(p.name));
+    // Signal lights: the run's red/green choice, not a random one. Named lamps, or (1.44
+    // "extra_lights_place": event_3/event_5) two lamps where red is the upper one
+    let red = prefabs.find((p) => /red/i.test(p.name));
+    let green = prefabs.find((p) => /green/i.test(p.name));
+    if ((!red || !green) && /light/i.test(key) && prefabs.length === 2) {
+      const top = (p) => manifest.prefabs[p.name]?.bbox?.[1][1] ?? 0;
+      [green, red] = [...prefabs].sort((a, b) => top(a) - top(b));
+    }
     if (signalSeed != null && red && green) {
       if (signalColor === 'off') return;
       const wantGreen = signalColor ? signalColor === 'green' : mulberry32(signalSeed)() < 0.5;
@@ -439,8 +523,15 @@ function applyEffectPlayers(obj, players, seed) {
     node.traverse((o) => o !== node && byName.set(THREE.PropertyBinding.sanitizeNodeName(o.name), o));
     const frames = fx.children.map((n) => byName.get(THREE.PropertyBinding.sanitizeNodeName(n))).filter(Boolean);
     if (frames.length < 2) return;
-    const duration = Math.max(fx.duration, 1e-3);
-    meshAnimations.add({ root: obj, nodes: frames, duration, offset: rng() * duration, delay: 0, loop: fx.loop });
+    // As EffectPlayer.cs: a cycle lasts a random time in [duration, maxDuration], split
+    // evenly between frames; a frame changes on the first update after its wait runs out
+    // and the wait restarts from there, so at the game's 60 fps each frame lasts whole
+    // updates, at least two (Mexico's fire: 24 frames in 0.32 s plays in 0.8 s)
+    const cycle = fx.maxDuration > fx.duration ? fx.duration + rng() * (fx.maxDuration - fx.duration) : fx.duration;
+    const tick = 1 / 60;
+    const perFrame = (Math.ceil(Math.max(cycle / frames.length, 0) / tick - 1e-6) + 1) * tick;
+    const duration = perFrame * frames.length;
+    meshAnimations.add({ root: obj, nodes: frames, duration, offset: fx.randomStart ? rng() * duration : 0, delay: 0, loop: fx.loop });
   });
 }
 
@@ -529,7 +620,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
   const objs = await Promise.all(
     items.map(async (it) => {
       try {
-        const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed, it.signalSeed, it.signalColor, it.cut);
+        const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed, it.signalSeed, it.signalColor, it.cut, it.pos[2]);
         if (obj) {
           obj.position.set(...it.pos);
           if (it.scale) obj.scale.setScalar(it.scale);
@@ -563,7 +654,8 @@ async function rebuild({ dynamicOnly = false } = {}) {
   ui?.themeChanged(state.theme);
   ui?.setInspecting(only);
   if (only) frameInspection(items);
-  else ui?.themeLoaded(state.theme);
+  // The home page preview: once textures are in, or it comes out black
+  else texturesReady().then(() => id === buildId && ui?.themeLoaded(state.theme));
   window.__ready = true;
 }
 
@@ -757,7 +849,8 @@ function applyBend() {
   else setBendDegrees(state.bend, state.bendVertical);
   // Bent geometry can appear outside its unbent bounds: skip frustum culling while bending
   const culled = state.bend === 0 && state.bendVertical === 0;
-  Object.values(layers).forEach((g) => g.traverse((o) => o.isMesh && (o.frustumCulled = culled))); // not the sky/skyline
+  // (particles never: their bounds are the emitter's quad, not where the particles fly)
+  Object.values(layers).forEach((g) => g.traverse((o) => o.isMesh && !o.userData.particles && (o.frustumCulled = culled))); // not the sky/skyline
 }
 
 function updateVisibility() {
@@ -901,6 +994,20 @@ const generation = createSettings(
             ['gate', 'Gates', hasSlot('boundary_gate')],
             ['epic', 'Landmark', hasSlot('boundary_epic_start')],
           ]),
+        },
+        {
+          title: 'Pillars',
+          visible: () => hasSlot('boundary_pillars_mid') && hasSlot('obstacle_pillar'),
+          controls: [
+            {
+              type: 'toggle',
+              label: 'Fix pillars',
+              title: 'Pillar halls always keep their middle-lane pillars, even with pillar obstacles off or in the studio',
+              obj: state.gen,
+              key: 'fixPillars',
+              onChange: regen,
+            },
+          ],
         },
         {
           title: 'Building pieces',

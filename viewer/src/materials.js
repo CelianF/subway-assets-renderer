@@ -390,9 +390,20 @@ const textureCache = new Map();
 const WHITE = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
 WHITE.needsUpdate = true;
 
+const pendingTextures = new Set();
+
+/** Resolves once every texture requested so far has loaded (or failed). */
+export function texturesReady() {
+  return Promise.all([...pendingTextures]);
+}
+
 function loadTexture(url) {
   if (!textureCache.has(url)) {
-    const tex = textureLoader.load(url);
+    let done;
+    const pending = new Promise((resolve) => (done = resolve));
+    pendingTextures.add(pending);
+    const settle = () => (pendingTextures.delete(pending), done());
+    const tex = textureLoader.load(url, settle, undefined, settle);
     tex.flipY = false; // glTF UV convention
     tex.colorSpace = THREE.NoColorSpace; // gamma workflow: sample raw sRGB values
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -412,7 +423,7 @@ const LEGACY_SHADERS = [
   [/Additive/i, { FADE_MODE: 2, _SrcMode: 1, _DstMode: 1, _ZWrite: 0, _HasTint: 1 }],
   [/Multiply/i, { FADE_MODE: 3, _SrcMode: 2, _DstMode: 0, _ZWrite: 0 }],
   [/Transparent|Alpha/i, { FADE_MODE: 1, _SrcMode: 5, _DstMode: 10, _ZWrite: 0, _HasTint: 1 }],
-  [/UVScroll/i, { _HasScroll: 1, _HasTint: 1 }],
+  [/UV ?(\w+ )?Scroll/i, { _HasScroll: 1, _HasTint: 1 }], // UVScroll, 1.x "UV Lava Scroll"
   [/Reflection/i, { _HasReflections: 1, _HasTint: 1 }],
   [/Diffuse|MatCap/i, { _HasTint: 1 }],
   // VertexWaveGradient (2.x tulips): grey petals gradient-mapped from _Color to _Color2

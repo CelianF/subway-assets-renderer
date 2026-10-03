@@ -77,6 +77,7 @@ export const DEFAULT_GEN = {
   obstacles: { jump: true, roll: true, standard: true, bush: true, dumpster: true, powerBox: true, pillar: true },
   signals: true,
   decorations: true,
+  fixPillars: true, // pillar halls always keep their pillars (studio, obstacles off)
   pieces: {}, // building piece key ("low_01", "high_03"…) -> false to leave it out
   density: 1, // obstacles per distance (gaps shrink as it grows)
   trainShare: 0.55, // chance a spot gets a train rather than an obstacle
@@ -91,6 +92,39 @@ const OBSTACLE_SLOTS = {
   pillar: 'obstacle_pillar',
 };
 
+/**
+ * ≤ 1.43: hand-built chunks laid end to end, as Track/TrackChunkCollection do: the chunks
+ * whose [zMinimum, zMaximum) window holds the current distance and that aren't still in use,
+ * picked by probability. About 720 units per section.
+ */
+function classicLayout(manifest, names, seed, sections) {
+  const rng = mulberry32(seed);
+  const all = names.map((name) => ({ name, ...manifest.prefabs[name]?.chunk }));
+  const chunks = all.filter((c) => c.zSize > 0 && !c.intro);
+  const target = Math.max(sections, 1) * 720;
+  const items = [];
+  // The run starts in the intro scene, laid over the first chunk
+  const intro = all.find((c) => c.intro);
+  if (intro) items.push({ prefab: intro.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, 0], variantSeed: Math.floor(rng() * 2 ** 31) });
+  let z = 0;
+  const laid = [];
+  while (z < target) {
+    let pool = chunks.filter((c) => c.zMin <= z && z < (c.zMax ?? Infinity));
+    if (!pool.length) pool = chunks.filter((c) => c.zMin <= z); // past every window: anything allowed so far
+    if (!pool.length) break;
+    // Track.cs never lays a chunk that is still in use: one laid less than 2000 units behind
+    // the player, who runs 700 behind the end of the track
+    const inUse = new Set(laid.filter((l) => l.end >= z - 2700).map((l) => l.name));
+    if (pool.some((c) => !inUse.has(c.name))) pool = pool.filter((c) => !inUse.has(c.name));
+    let r = rng() * pool.reduce((n, c) => n + c.probability, 0);
+    const chunk = pool.find((c) => (r -= c.probability) < 0) ?? pool[0];
+    items.push({ prefab: chunk.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(rng() * 2 ** 31) });
+    z += chunk.zSize;
+    laid.push({ name: chunk.name, end: z });
+  }
+  return { items, length: z };
+}
+
 /** Wagon count for a span: the longest available train that fits, else the shortest. */
 export function fitTrain(options, span) {
   if (!options.length) return 0;
@@ -100,7 +134,9 @@ export function fitTrain(options, span) {
 export { RAMP_LENGTH };
 
 /** Building piece key shared by a left/right pair: "London_low_01_left" -> "low_01". */
-export const buildingPieceKey = (name) => name.match(/_((?:low|med|medium|high)_\d+)_(?:left|right)$/i)?.[1]?.toLowerCase() ?? null;
+export const buildingPieceKey = (name) => name.match(/(?:^|_)((?:low|med|medium|high)_\d+)_(?:left|right)$/i)?.[1]?.toLowerCase() ?? null;
+/** Name to apply name rules to: 1.x pieces carry their generic role ("high_01_left_hawaiihd_2017" -> "high_01_left"). */
+const roleOf = (manifest, name) => manifest.prefabs[name]?.role ?? name;
 
 /** Building pieces of a theme, grouped by height, for the "map sections" picker. */
 export function buildingPieces(manifest, themeName) {
@@ -109,7 +145,7 @@ export function buildingPieces(manifest, themeName) {
   for (const height of ['low', 'medium', 'high']) {
     for (const side of ['left', 'right']) {
       for (const name of slots[`boundary_${height}_${side}`] ?? []) {
-        const key = buildingPieceKey(name);
+        const key = buildingPieceKey(roleOf(manifest, name));
         if (!key) continue;
         (out[key] ??= { key, height, prefabs: [] }).prefabs.push(name);
       }
@@ -168,6 +204,7 @@ export function generateLayout(
   gen = { ...DEFAULT_GEN, ...gen };
   // Trains (and ramps) can come from another theme
   const slots = themeSlots(manifest, themeName, trainTheme);
+  if (slots.classic_chunk?.length) return classicLayout(manifest, slots.classic_chunk, seed, sections);
   const has = (slot) => slots[slot]?.length > 0;
   const rng = mulberry32(seed);
   const items = [];
@@ -180,7 +217,7 @@ export function generateLayout(
   let placeRng = rng; // studio items use their own stable generator
   const place = (slot, pos, layer = 'environment', extra = {}, nameFilter = null) => {
     if (!has(slot)) return null;
-    const named = nameFilter ? slots[slot].filter((n) => nameFilter.test(n)) : [];
+    const named = nameFilter ? slots[slot].filter((n) => nameFilter.test(roleOf(manifest, n))) : [];
     const prefab = pick(placeRng, named.length ? named : slots[slot]);
     // Per-instance seed for the prefab's random variant groups
     items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(placeRng() * 2 ** 31), ...extra });
@@ -213,7 +250,7 @@ export function generateLayout(
   function buildings() {
     const n = randInt(rng, 2, 5);
     // Heights that still have an allowed piece on both sides ("map sections" picker)
-    const allowed = (slot) => (slots[slot] ?? []).filter((nm) => gen.pieces[buildingPieceKey(nm)] !== false);
+    const allowed = (slot) => (slots[slot] ?? []).filter((nm) => gen.pieces[buildingPieceKey(roleOf(manifest, nm))] !== false);
     let heights = ['low', 'medium', 'high'].filter((h) => allowed(`boundary_${h}_left`).length && allowed(`boundary_${h}_right`).length);
     const usePieces = heights.length > 0;
     if (!usePieces) heights = ['low', 'medium', 'high'];
@@ -235,7 +272,7 @@ export function generateLayout(
   /** Places a building slot using only the pieces left on in the picker. */
   function placeAllowed(slot, restrict) {
     if (!restrict) return place(slot, [0, 0, z]);
-    const names = slots[slot].filter((nm) => gen.pieces[buildingPieceKey(nm)] !== false);
+    const names = slots[slot].filter((nm) => gen.pieces[buildingPieceKey(roleOf(manifest, nm))] !== false);
     const prefab = pick(placeRng, names);
     items.push({ prefab, slot, layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(placeRng() * 2 ** 31) });
     return prefab;
@@ -289,7 +326,15 @@ export function generateLayout(
     if (!bb) return;
     const name = slots[slot][0];
     const fullWidth = bb[0][0] < -60 && bb[1][0] > 60; // frames the tracks (terracotta army)
-    if (fullWidth) {
+    // Modeled in place beside the tracks (the whole model on one side of its origin, like
+    // Venice's wall panels): placed where it was modeled, not shifted again
+    const inPlace = bb[0][0] > 0 || bb[1][0] < 0;
+    // Never on the tracks: the game puts such pieces only where the outer tracks are covered
+    // (rules the export doesn't keep), so a low piece reaching into |x| < 30 is left out
+    if (inPlace && !fullWidth && bb[0][1] < 15 && bb[0][0] < 30 && bb[1][0] > -30) return;
+    // Wide pieces span the tracks only if they leave the corridor open (arches, bunting)
+    if (fullWidth && prefab.blocksTracks) return;
+    if (fullWidth || inPlace) {
       place(slot, [0, 0, segZ], 'environment');
       return;
     }
@@ -305,9 +350,13 @@ export function generateLayout(
     placeRun('boundary_pillars_start');
     for (let i = randInt(rng, 1, 3); i > 0; i--) placeRun('boundary_pillars_mid');
     placeRun('boundary_pillars_end');
-    // Like the game's Pillars chunk: a pillar in the middle lane every 180, mid-segment
-    if (has('obstacle_pillar') && gen.obstacles.pillar && obstacleMode !== 'studio') {
-      for (let pz = start + SEGMENT / 2; pz < z; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], 'obstacle');
+    // Like the game's Pillars chunk: a pillar in the middle lane every 180, mid-segment.
+    // "Fix pillars" keeps them as part of the hall (they hold its roof), whatever the
+    // obstacle settings or studio edits; otherwise they come and go with the obstacles
+    const asObstacles = gen.obstacles.pillar && obstacleMode !== 'studio';
+    if (has('obstacle_pillar') && (gen.fixPillars || asObstacles)) {
+      const layer = gen.fixPillars ? 'environment' : 'obstacle';
+      for (let pz = start + SEGMENT / 2; pz < z; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], layer);
       pillarRanges.push([start, z]);
     }
   }

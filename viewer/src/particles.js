@@ -391,6 +391,7 @@ class Emitter {
       this.object = new THREE.Mesh(geo, this.material);
     }
     this.object.frustumCulled = false;
+    this.object.userData.particles = true;
     this.object.renderOrder = 3000;
     this.object.name = `${node.name}_particles`;
     node.add(this.object);
