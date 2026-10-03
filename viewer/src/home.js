@@ -37,7 +37,7 @@ async function loadEnvs() {
           'div',
           { class: 'env-info' },
           el('h3', {}, prettyTheme(env.theme)),
-          el('p', {}, `v${env.gameVersion}${env.copy ? ` · copy ${env.copy}` : ''}`),
+          el('p', {}, `v${env.gameVersion}`, env.copy ? el('span', { class: 'env-note' }, ` · ${env.note ?? `copy ${env.copy}`}`) : null),
           el(
             'div',
             { class: 'env-actions' },
@@ -76,10 +76,10 @@ function showJob(label, fraction, log = '') {
 async function installPackage(file) {
   $('drop').classList.add('busy');
   $('job').classList.remove('failed');
-  const send = (onConflict) =>
+  const send = (onConflict, note = '') =>
     new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/import?name=${encodeURIComponent(file.name)}${onConflict ? `&onConflict=${onConflict}` : ''}`);
+      xhr.open('POST', `/api/import?name=${encodeURIComponent(file.name)}${onConflict ? `&onConflict=${onConflict}&note=${encodeURIComponent(note)}` : ''}`);
       xhr.upload.onprogress = (e) => e.lengthComputable && showJob(`Installing ${file.name}`, e.loaded / e.total);
       xhr.onload = () => {
         const body = JSON.parse(xhr.responseText || '{}');
@@ -91,11 +91,12 @@ async function installPackage(file) {
   try {
     let env = await send(null);
     if (env.conflicts) {
-      const choices = await askConflicts(env.conflicts);
-      env = await send(choices[env.conflicts[0].id]);
+      const { choices, notes } = await askConflicts(env.conflicts);
+      const id = env.conflicts[0].id;
+      env = await send(choices[id], notes[id]);
     }
     if (env.skipped) showJob(`Kept the existing ${prettyTheme(env.theme)} (v${env.gameVersion})`, 1);
-    else showJob(`Installed ${prettyTheme(env.theme)} (v${env.gameVersion})${env.copy ? ` as copy ${env.copy}` : ''}`, 1);
+    else showJob(`Installed ${prettyTheme(env.theme)} (v${env.gameVersion})${env.copy ? ` as "${env.note ?? `copy ${env.copy}`}"` : ''}`, 1);
   } catch (e) {
     showJob(`Install failed: ${e.message}`, null);
     $('job').classList.add('failed');
@@ -110,7 +111,8 @@ const handleFile = (file) => (/\.subwaymap$/i.test(file.name) ? installPackage(f
 
 /**
  * "This map already exists" dialog: one choice per map (ignore / keep both / replace),
- * with buttons to apply a choice to all. Resolves to { envId: policy }.
+ * with buttons to apply a choice to all; "Keep both" asks for a note to tell the copies
+ * apart. Resolves to { choices: { envId: policy }, notes: { envId: text } }.
  */
 let conflictOpen = false;
 function askConflicts(conflicts) {
@@ -118,6 +120,7 @@ function askConflicts(conflicts) {
   conflictOpen = true;
   return new Promise((resolve) => {
     const choices = Object.fromEntries(conflicts.map((c) => [c.id, 'keep']));
+    const notes = {};
     const POLICIES = [
       ['skip', 'Ignore', 'Keep the existing map, drop the new one'],
       ['keep', 'Keep both', 'Save the new one as a copy next to it'],
@@ -128,20 +131,37 @@ function askConflicts(conflicts) {
         el('button', { class: `choice ${policy === 'replace' ? 'danger' : ''}`, 'data-policy': policy, title, onclick: () => set(c.id, policy) }, label),
       );
       const date = c.existingDate ? new Date(c.existingDate).toLocaleDateString() : '';
+      const noteInput = el('input', {
+        class: 'note-input',
+        type: 'text',
+        maxlength: 60,
+        placeholder: 'Note for the new copy (e.g. pride event, older build)',
+        oninput: (e) => (notes[c.id] = e.target.value),
+      });
       return {
         id: c.id,
         buttons,
+        noteInput,
         node: el(
           'div',
           { class: 'conflict-row' },
-          el('div', {}, el('strong', {}, `${prettyTheme(c.theme)} v${c.gameVersion}`), el('small', {}, `Already installed${date ? ` on ${date}` : ''}${c.existingSource ? ` from ${c.existingSource}` : ''}`)),
-          el('div', { class: 'choices' }, ...buttons),
+          el(
+            'div',
+            { class: 'conflict-main' },
+            el('div', {}, el('strong', {}, `${prettyTheme(c.theme)} v${c.gameVersion}`), el('small', {}, `Already installed${date ? ` on ${date}` : ''}${c.existingSource ? ` from ${c.existingSource}` : ''}`)),
+            el('div', { class: 'choices' }, ...buttons),
+          ),
+          noteInput,
         ),
       };
     });
     function set(id, policy) {
       choices[id] = policy;
-      for (const r of rows) if (r.id === id) r.buttons.forEach((b) => b.classList.toggle('active', b.dataset.policy === policy));
+      for (const r of rows) {
+        if (r.id !== id) continue;
+        r.buttons.forEach((b) => b.classList.toggle('active', b.dataset.policy === policy));
+        r.noteInput.classList.toggle('hidden', policy !== 'keep'); // only copies need a note
+      }
     }
     const overlay = el(
       'div',
@@ -165,7 +185,7 @@ function askConflicts(conflicts) {
               onclick: () => {
                 overlay.remove();
                 conflictOpen = false;
-                resolve(choices);
+                resolve({ choices, notes });
               },
             },
             'Continue',
@@ -211,8 +231,8 @@ async function followJob(jobId) {
       const job = await res.json();
       if (job.status === 'conflict') {
         showJob('Some maps already exist', null);
-        const choices = await askConflicts(job.conflicts);
-        await fetch(`/api/jobs/${jobId}/resolve`, { method: 'POST', body: JSON.stringify({ choices }) });
+        const { choices, notes } = await askConflicts(job.conflicts);
+        await fetch(`/api/jobs/${jobId}/resolve`, { method: 'POST', body: JSON.stringify({ choices, notes }) });
         continue;
       }
       const step = Math.max(0, STAGE_ORDER.indexOf(job.stage));

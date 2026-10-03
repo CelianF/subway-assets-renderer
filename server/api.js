@@ -93,7 +93,7 @@ async function readEnv(id) {
  * 'replace' overwrites it, 'keep' installs a numbered copy next to it, 'skip' drops it.
  * @returns the installed env, or null when skipped
  */
-async function placeEnv(srcDir, baseId, policy, fields) {
+async function placeEnv(srcDir, baseId, policy, fields, note = '') {
   await mkdir(ENVS, { recursive: true });
   let id = baseId;
   let copy;
@@ -111,6 +111,10 @@ async function placeEnv(srcDir, baseId, policy, fields) {
   }
   const env = { ...fields, id, ...(copy ? { copy } : {}) };
   if (!copy) delete env.copy;
+  // A short note tells copies apart on the home page ("pride", "before patch"…)
+  const cleanNote = String(note ?? '').trim().slice(0, 60);
+  if (copy && cleanNote) env.note = cleanNote;
+  else if (copy) delete env.note;
   await writeFile(path.join(srcDir, 'env.json'), JSON.stringify(env, null, 1));
   await rename(srcDir, path.join(ENVS, id));
   return env;
@@ -153,7 +157,7 @@ async function exportEnv(id) {
   return { env, zip: writeZip(entries) };
 }
 
-async function importEnv(buf, sourceName, policy = null) {
+async function importEnv(buf, sourceName, policy = null, note = '') {
   const entries = readZip(buf);
   const headerEntry = entries.find((e) => e.name === 'subwaymap.json');
   if (!headerEntry) throw new Error('Not a .subwaymap package (subwaymap.json missing)');
@@ -167,14 +171,14 @@ async function importEnv(buf, sourceName, policy = null) {
   }
   const staging = path.join(JOBS, `import-${randomUUID()}`);
   try {
-    return await installPackage(entries, header, id, staging, sourceName, policy ?? 'replace');
+    return await installPackage(entries, header, id, staging, sourceName, policy ?? 'replace', note);
   } catch (e) {
     await rm(staging, { recursive: true, force: true });
     throw e;
   }
 }
 
-async function installPackage(entries, header, id, staging, sourceName, policy) {
+async function installPackage(entries, header, id, staging, sourceName, policy, note) {
   for (const { name, data } of entries) {
     if (name === 'subwaymap.json') continue;
     const target = path.resolve(staging, name);
@@ -191,7 +195,7 @@ async function installPackage(entries, header, id, staging, sourceName, policy) 
   };
   fields.source ??= sourceName;
   fields.createdAt ??= new Date().toISOString();
-  const env = await placeEnv(staging, id, policy, fields);
+  const env = await placeEnv(staging, id, policy, fields, note);
   return env ?? { skipped: true, theme: header.theme, gameVersion: header.gameVersion };
 }
 
@@ -253,11 +257,12 @@ async function runJob(job, apkPath, sourceName) {
     // Maps already installed (same map, same version): ask what to do, per map
     const conflicts = await findConflicts(maps);
     let choices = {};
+    let notes = {};
     if (conflicts.length) {
       job.status = 'conflict';
       job.conflicts = conflicts;
       job.label = 'Waiting for your choice';
-      choices = await new Promise((resolve) => (job.resolve = resolve));
+      ({ choices, notes } = await new Promise((resolve) => (job.resolve = resolve)));
       job.status = 'running';
       delete job.conflicts;
     }
@@ -271,7 +276,7 @@ async function runJob(job, apkPath, sourceName) {
         source: sourceName,
         createdAt: new Date().toISOString(),
         thumbnail: false,
-      });
+      }, notes?.[m.id]);
       if (env) job.envs.push(env.id);
       else job.skipped = (job.skipped ?? 0) + 1;
     }
@@ -353,7 +358,7 @@ export async function handle(req, res) {
       const name = path.basename(url.searchParams.get('name') ?? 'map.subwaymap');
       await mkdir(JOBS, { recursive: true });
       const policy = CONFLICT_POLICIES.has(url.searchParams.get('onConflict')) ? url.searchParams.get('onConflict') : null;
-      const result = await importEnv(await readBody(req, MAX_PACKAGE), name, policy);
+      const result = await importEnv(await readBody(req, MAX_PACKAGE), name, policy, url.searchParams.get('note') ?? '');
       sendJson(res, result.conflicts ? 409 : 200, result);
       return true;
     }
@@ -401,10 +406,10 @@ export async function handle(req, res) {
     if (parts[1] === 'jobs' && parts[3] === 'resolve' && req.method === 'POST') {
       const job = jobs.get(parts[2]);
       if (!job?.resolve) return sendJson(res, 409, { error: 'Nothing to resolve' }), true;
-      const { choices = {} } = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const { choices = {}, notes = {} } = JSON.parse((await readBody(req)).toString('utf8') || '{}');
       const resolve = job.resolve;
       delete job.resolve;
-      resolve(choices);
+      resolve({ choices, notes });
       sendJson(res, 200, { ok: true });
       return true;
     }

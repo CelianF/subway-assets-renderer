@@ -229,11 +229,30 @@ button.danger {
 }
 .conflict-row {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.conflict-main {
+  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
+}
+.note-input {
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+.note-input:focus {
+  outline: 1px solid var(--accent);
+}
+.env-note {
+  color: var(--accent);
 }
 .conflict-row small {
   display: block;
