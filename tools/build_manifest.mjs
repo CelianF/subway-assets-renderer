@@ -793,9 +793,9 @@ function glbSubset({ json, bin }, rootIdx, extras, rename = new Map(), skip = ne
       name: m.name,
       primitives: m.primitives.map((p, pi) => {
         const material = p.material != null ? { material: addMaterial(p.material) } : {};
-        // Primitives without UVs (Unity 3.5 exports): rebuilt whole from the mesh asset (the
-        // classic shaders are unlit, so the dropped normals aren't missed)
-        const geo = p.attributes.TEXCOORD_0 == null && (p.mode ?? 4) === 4 ? geometryFor(mi, pi, readPositions(p.attributes.POSITION)) : null;
+        // Primitives rebuilt whole from a mesh asset: ones without UVs (Unity 3.5 exports) and
+        // swapped meshes (the classic shaders are unlit, so the dropped normals aren't missed)
+        const geo = (p.mode ?? 4) === 4 ? geometryFor(mi, pi, () => readPositions(p.attributes.POSITION), p.attributes.TEXCOORD_0 != null) : null;
         if (geo) {
           return {
             attributes: { POSITION: addArray(geo.positions, 'VEC3', 34962), TEXCOORD_0: addArray(geo.uvs, 'VEC2', 34962) },
@@ -900,7 +900,8 @@ function meshAsset(file) {
 /**
  * A glb primitive rebuilt from its submesh in the mesh asset: the glb export welded seam
  * vertices (no UVs to tell them apart), so the asset's own vertices replace them. X is
- * mirrored like the export does, which flips the winding. Null when the submesh doesn't hold the primitive's vertices.
+ * mirrored like the export does, which flips the winding. Null when the submesh doesn't hold the
+ * primitive's vertices (unless positions is null: a different mesh, swapped in).
  */
 function submeshGeometry(asset, sub, positions) {
   const tris = asset.submeshes[sub];
@@ -914,10 +915,12 @@ function submeshGeometry(asset, sub, positions) {
     if (!remap.has(v)) remap.set(v, used.push(v) - 1);
     indices[i - (i % 3) + [0, 2, 1][i % 3]] = remap.get(v); // mirrored, so the winding flips
   });
-  const keys = new Set(used.map((v) => key(asset.positions[v * 3], asset.positions[v * 3 + 1], asset.positions[v * 3 + 2])));
-  let found = 0;
-  for (let i = 0; i < positions.length / 3; i++) if (keys.has(key(-positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]))) found++;
-  if (found < (positions.length / 3) * 0.9) return null;
+  if (positions) {
+    const keys = new Set(used.map((v) => key(asset.positions[v * 3], asset.positions[v * 3 + 1], asset.positions[v * 3 + 2])));
+    let found = 0;
+    for (let i = 0; i < positions.length / 3; i++) if (keys.has(key(-positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]))) found++;
+    if (found < (positions.length / 3) * 0.9) return null;
+  }
   const outPos = new Float32Array(used.length * 3);
   const outUV = new Float32Array(used.length * 2);
   used.forEach((v, i) => {
@@ -1104,9 +1107,26 @@ function parseClassic(root, project, guidIndex, log) {
         end: Number(rs.match(/m_LinearFogEnd: ([\d.e-]+)/)?.[1] ?? 784),
       },
     };
-    // ThemeAssets (the scene's skin): fog and sky colors, skyline silhouettes, as in 1.55
+    // ThemeAssets (the scene's skin): fog and sky colors, skyline silhouettes, as in 1.55.
+    // One skin per season; the build shows Globals.UPDATE_DEFAULT_SEASON's (1.4 Halloween,
+    // 1.5 Christmas), which also swaps material textures and, through ThemeShiftMeshes,
+    // "<anything>_X" meshes for "<season>_X"
+    const scriptDir = path.join(project, 'Scripts', 'Assembly-CSharp');
+    const globalsFile = path.join(scriptDir, 'Globals.cs');
+    const season = existsSync(globalsFile) ? read(globalsFile).match(/UPDATE_DEFAULT_SEASON = PlayerInfo\.Season\.(\w+)/)?.[1] : null;
     const themeGo = [...goName].find(([, n]) => n === 'ThemeAssets')?.[0];
-    const skin = (goComps.get(themeGo) ?? []).map((c) => c.doc).find((d) => /\n {2}assets:/.test(d))?.split(/\n {2}- theme: /)[1];
+    const skins = (goComps.get(themeGo) ?? []).map((c) => c.doc).find((d) => /\n {2}assets:/.test(d))?.split(/\n {2}assets:/)[1].split(/\n {2}\w/)[0].split(/\n {2}- theme: /).slice(1) ?? [];
+    const seasonal = season && season !== 'none' ? skins.find((k, i) => i > 0 && k.slice(0, 3) === season.slice(0, 3)) : null;
+    const skin = seasonal ?? skins[0];
+    const textureSwaps = new Map(); // material name -> texture file
+    let meshPrefix = null;
+    if (seasonal) {
+      meshPrefix = seasonal.split('\n')[0].trim();
+      for (const [, tex, mat] of seasonal.matchAll(/- texture: \{[^}]*guid: (\w+)[^}]*\}\n\s+material: \{[^}]*guid: (\w+)/g)) {
+        if (guidIndex.get(tex) && guidIndex.get(mat)?.endsWith('.mat')) textureSwaps.set(stem(guidIndex.get(mat)), guidIndex.get(tex));
+      }
+      log(`  season: ${season} (${textureSwaps.size} textures)`);
+    }
     if (skin) {
       const rgba = (key) => {
         const m = skin.match(new RegExp(`\\n {4}${key}: \\{r: ([\\d.e-]+), g: ([\\d.e-]+), b: ([\\d.e-]+), a: ([\\d.e-]+)\\}`));
@@ -1114,7 +1134,9 @@ function parseClassic(root, project, guidIndex, log) {
       };
       const refs = (key) => [...new Set([...(skin.split(`\n    ${key}:`)[1]?.split(/\n {4}\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => guidIndex.get(g)).filter((p) => p?.endsWith('.prefab')).map((p) => stem(p)))];
       config.fog.color = rgba('fogColor') ?? config.fog.color;
-      config.sky = { top: rgba('fogGradientTop')?.slice(0, 3) ?? null, bottom: rgba('fogGradientBottom')?.slice(0, 3) ?? null, power: 1 };
+      // No gradient before 1.55: the sky plane sits past the fog's end, so it shows the fog color
+      const fogRGB = config.fog.color?.slice(0, 3) ?? null;
+      config.sky = { top: rgba('fogGradientTop')?.slice(0, 3) ?? fogRGB, bottom: rgba('fogGradientBottom')?.slice(0, 3) ?? fogRGB, power: 1 };
       const tint = rgba('fogSilhouetteColor');
       const layers = [];
       const fill = refs('backgroundPrefabs');
@@ -1126,14 +1148,14 @@ function parseClassic(root, project, guidIndex, log) {
     // The scene is the same for every World Tour city; the city of the build shows in the
     // Facebook share icon Globals.cs points at ("fblogo_vancouver.png")
     // (Globals.cs, or SocialManager.cs in 1.10: any script that names it)
-    const scriptDir = path.join(project, 'Scripts', 'Assembly-CSharp');
     let city = null;
     for (const f of listDir(scriptDir).filter((p) => p.endsWith('.cs'))) {
       city = read(f).match(/fblogo_([a-z]+)\.png/i)?.[1] ?? null;
       if (city) break;
     }
     const MULTI_WORD = { losangeles: 'LosAngeles', newyork: 'NewYork', sanfrancisco: 'SanFrancisco', buenosaires: 'BuenosAires', hongkong: 'HongKong', stpetersburg: 'StPetersburg', riodejaneiro: 'RioDeJaneiro', mexicocity: 'MexicoCity' };
-    const name = city ? MULTI_WORD[city.toLowerCase()] ?? city[0].toUpperCase() + city.slice(1).toLowerCase() : 'Classic';
+    const SEASON_NAMES = { xmas: 'Xmas', halloween: 'Halloween', easter: 'Easter' };
+    const name = (city ? MULTI_WORD[city.toLowerCase()] ?? city[0].toUpperCase() + city.slice(1).toLowerCase() : 'Classic') + (seasonal ? SEASON_NAMES[season] ?? '' : '');
     log(`  ${chunks.filter((c) => !c.chunk.intro).length} chunks${introNode >= 0 ? ' + intro' : ''}, city: ${name}`);
     // Meshes the glb export left without UVs (Unity 3.5 builds): rebuilt from the assets
     const assetOfMesh = new Map();
@@ -1144,19 +1166,34 @@ function parseClassic(root, project, guidIndex, log) {
     const assetCache = new Map();
     let rebuilt = 0;
     let failed = 0;
-    const geometryFor = (mi, pi, positions) => {
+    let swapped = 0;
+    const loadAsset = (file) => {
+      if (!assetCache.has(file)) assetCache.set(file, meshAsset(file));
+      return assetCache.get(file);
+    };
+    const geometryFor = (mi, pi, positions, hasUVs) => {
       const file = assetOfMesh.get(mi);
       if (!file || !existsSync(file)) return null;
-      if (!assetCache.has(file)) assetCache.set(file, meshAsset(file));
-      const asset = assetCache.get(file);
-      const geo = asset ? submeshGeometry(asset, pi, positions) : null;
+      if (meshPrefix) {
+        const base = stem(file);
+        const swap = path.join(path.dirname(file), `${meshPrefix}_${base.slice(base.indexOf('_') + 1)}.asset`);
+        const geo = swap !== file && existsSync(swap) && loadAsset(swap) ? submeshGeometry(loadAsset(swap), pi, null) : null;
+        if (geo) {
+          swapped++;
+          return geo;
+        }
+      }
+      if (hasUVs) return null;
+      const asset = loadAsset(file);
+      const geo = asset ? submeshGeometry(asset, pi, positions()) : null;
       if (geo) rebuilt++;
       else failed++;
       return geo;
     };
     const libraryGlb = glbSubset(glb, library, extras, rename, skip, geometryFor);
     if (rebuilt || failed) log(`  Primitives rebuilt from mesh assets (UVs): ${rebuilt}${failed ? `, ${failed} left without` : ''}`);
-    return { name, chunks, config, library: libraryGlb };
+    if (swapped) log(`  Primitives swapped for ${meshPrefix} meshes: ${swapped}`);
+    return { name, chunks, config, library: libraryGlb, textureSwaps };
   }
   return null;
 }
@@ -1921,6 +1958,10 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const materials = {};
   for (const name of sortedStrings(usedMats)) {
     if (matFiles.has(name)) materials[name] = parseMaterial(matFiles.get(name), guidIndex, root);
+  }
+  // The classic build's season skin (ThemeAssets): other textures on the same materials
+  for (const [name, file] of classic?.textureSwaps ?? []) {
+    if (materials[name]) materials[name].textures._MainTex = { ...materials[name].textures._MainTex, path: path.relative(root, file) };
   }
 
   // Textures referenced by materials -> data/tex/

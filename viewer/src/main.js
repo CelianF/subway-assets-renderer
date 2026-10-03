@@ -7,7 +7,7 @@ import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCu
 import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
-import { createUI } from './ui.js';
+import { createUI, prettyTheme } from './ui.js';
 import { addCredit } from './credit.js';
 import { attachParticles, updateParticles } from './particles.js';
 
@@ -649,7 +649,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
   const missing = objs.filter(([, o]) => !o).length;
   status.textContent = only
     ? `Inspecting ${only.length} piece${only.length > 1 ? 's' : ''}`
-    : `${state.theme} · seed ${state.seed} · ${layout.items.length} pieces · ${Math.round(length)} units${missing ? ` · ${missing} without geometry` : ''}`;
+    : `${prettyTheme(state.theme)} · seed ${state.seed} · ${layout.items.length} pieces · ${Math.round(length)} units${missing ? ` · ${missing} without geometry` : ''}`;
   studio?.relayout();
   ui?.themeChanged(state.theme);
   ui?.setInspecting(only);
