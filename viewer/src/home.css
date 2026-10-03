@@ -23,7 +23,7 @@ body {
 main {
   max-width: 1080px;
   margin: 0 auto;
-  padding: 40px 16px 64px;
+  padding: 40px 16px 88px; /* room for the credit line */
 }
 
 .hero h1 {
@@ -283,4 +283,18 @@ button.danger {
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+/* Credit line, pinned to the bottom of the window */
+.credit {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 10px 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg);
+  border-top: 1px solid var(--border);
 }

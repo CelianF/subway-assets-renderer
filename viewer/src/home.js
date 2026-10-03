@@ -1,8 +1,12 @@
 // Home page: upload an APK (extraction job with progress) and list the extracted
 // environments (one per map) with open / delete.
 
+import { addCredit } from './credit.js';
+
 const $ = (id) => document.getElementById(id);
 const prettyTheme = (t) => t.replace(/([a-z])([A-Z0-9])/g, '$1 $2');
+
+addCredit();
 
 const STAGE_ORDER = ['upload', 'load', 'export-project', 'export-content', 'build', 'install', 'done'];
 

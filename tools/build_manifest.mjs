@@ -374,7 +374,7 @@ function parseTrackConfigs(file, guidIndex) {
       inMats = false;
     } else if (current === null) {
       continue;
-    } else if (s.startsWith('MeshLOD0:')) {
+    } else if (s.startsWith('MeshLOD0:') || s.startsWith('Mesh:')) { // "Mesh" before LODs (2.x)
       const m = s.match(GUID_RE);
       current.mesh = m && guidIndex.has(m[1]) ? stem(guidIndex.get(m[1])) : null;
     } else if (s.startsWith('Materials:')) {
@@ -384,7 +384,7 @@ function parseTrackConfigs(file, guidIndex) {
       if (m && guidIndex.has(m[1])) current.materials.push(stem(guidIndex.get(m[1])));
     } else if (!s.startsWith('- ')) {
       inMats = false;
-      if (!s.startsWith('MeshLOD') && !s.startsWith('Materials')) current = null;
+      if (!s.startsWith('Mesh') && !s.startsWith('Materials')) current = null;
     }
   }
   return configs;
@@ -624,11 +624,13 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   // Themes
   const themeCache = new Map();
   const themes = {};
+  const themeByGuid = new Map();
   const themeFiles = [...byName].filter(([n]) => n.endsWith('_Theme.asset')).map(([, p]) => p).sort(comparePaths);
   for (const p of themeFiles) {
     if (stem(p).startsWith('_')) continue; // abstract parent themes (e.g. _Common_Theme)
     const guid = read(`${p}.meta`).match(GUID_RE)[1];
     themes[stem(p).replace(/_Theme$/, '')] = resolveTheme(guid, guidIndex, themeCache);
+    themeByGuid.set(guid, stem(p).replace(/_Theme$/, ''));
   }
   log(`Themes: ${Object.keys(themes).join(', ')}`);
 
@@ -650,9 +652,17 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const placementCount = Object.values(chunks).reduce((n, c) => n + c.placements.length, 0);
   log(`Chunks: ${Object.keys(chunks).length} (${placementCount} placements)`);
 
+  // Configs point at their theme; match on that, as names differ in old games
+  // (theme "1.65_Amsterdam", config "Amsterdam_Config")
+  const configByTheme = new Map();
+  for (const [n, p] of byName) {
+    if (!n.endsWith('_Config.asset')) continue;
+    const m = read(p).match(/\n  Theme: \{fileID: \d+, guid: (\w+)/);
+    if (m && themeByGuid.has(m[1])) configByTheme.set(themeByGuid.get(m[1]), p);
+  }
   const themeConfigs = {};
   for (const theme of Object.keys(themes)) {
-    const p = find(`${theme}_Config.asset`);
+    const p = configByTheme.get(theme) ?? find(`${theme}_Config.asset`);
     if (!p) continue;
     themeConfigs[theme] = parseThemeConfig(p, guidIndex);
     const effectsBlock = read(p).match(/ThemeEffects:\n((?:  - .*\n)+)/);

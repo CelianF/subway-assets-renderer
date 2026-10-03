@@ -3,13 +3,15 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
-import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts } from './materials.js';
+import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setReversedDepth } from './materials.js';
 import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
+import { addCredit } from './credit.js';
 
 const params = new URLSearchParams(location.search);
+addCredit();
 // One environment (= one map) per page; maps are picked on the home page
 const ENV_ID = params.get('env');
 if (!ENV_ID) location.replace('/');
@@ -18,9 +20,37 @@ const DATA = `/envs/${encodeURIComponent(ENV_ID)}`;
 // ---------------------------------------------------------------- scene
 
 const canvas = document.getElementById('view');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: params.has('shot') });
+// Reversed depth with a 32-bit float depth buffer keeps precision nearly constant down the
+// whole run, so near-coplanar surfaces far away stop z-fighting. The canvas's own depth
+// buffer is 24-bit fixed point, so the scene renders offscreen (viewTarget) and is copied.
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, preserveDrawingBuffer: params.has('shot'), reversedDepthBuffer: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
+setReversedDepth(renderer.capabilities.reversedDepthBuffer);
+
+/** Multisampled render target with a float depth buffer. */
+function floatDepthTarget(width, height) {
+  const target = new THREE.WebGLRenderTarget(width, height, { samples: 4, depthTexture: new THREE.DepthTexture(width, height, THREE.FloatType) });
+  target.resolveDepthBuffer = false; // only the depth format matters, never read back
+  return target;
+}
+const drawingSize = renderer.getDrawingBufferSize(new THREE.Vector2());
+const viewTarget = floatDepthTarget(drawingSize.x, drawingSize.y);
+// Copies the offscreen view to the canvas as-is (gamma workflow: values are already final)
+const blitScene = new THREE.Scene();
+const blitCamera = new THREE.OrthographicCamera(); // unused by the shader; reversed depth needs updateProjectionMatrix()
+const blit = new THREE.Mesh(
+  new THREE.PlaneGeometry(2, 2),
+  new THREE.ShaderMaterial({
+    uniforms: { uMap: { value: viewTarget.texture } },
+    vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: 'uniform sampler2D uMap; varying vec2 vUv; void main() { gl_FragColor = texture2D(uMap, vUv); }',
+    depthTest: false,
+    depthWrite: false,
+  }),
+);
+blit.frustumCulled = false;
+blitScene.add(blit);
 
 const scene = new THREE.Scene();
 // Theme skybox gradient, drawn as a full-screen quad behind everything (gamma workflow)
@@ -71,6 +101,7 @@ addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   renderer.getDrawingBufferSize(globals.uResolution.value);
+  viewTarget.setSize(globals.uResolution.value.x, globals.uResolution.value.y);
 });
 renderer.getDrawingBufferSize(globals.uResolution.value);
 
@@ -562,7 +593,7 @@ function renderScreenshot() {
   const height = Math.floor(h * scale);
 
   // Raw RGBA8: shaders already output gamma-space values
-  const target = new THREE.WebGLRenderTarget(width, height, { samples: 4 });
+  const target = floatDepthTarget(width, height);
   const shotCam = camera.clone();
   shotCam.aspect = width / height;
   shotCam.updateProjectionMatrix();
@@ -904,5 +935,8 @@ renderer.setAnimationLoop(() => {
   fly.update();
   updateSkyline();
   updateCutaway();
+  renderer.setRenderTarget(viewTarget);
   renderer.render(scene, studio.active ? studio.camera : camera);
+  renderer.setRenderTarget(null);
+  renderer.render(blitScene, blitCamera);
 });

@@ -3,6 +3,17 @@
 // just a plausible sequence of the same pieces on the game's grid.
 
 const SEGMENT = 180; // 16 cells * 11.25
+
+// Older games (2.x) list the shadowed track/ground pieces as separate prefabs in the
+// slot instead of per-prefab track configs: pick them by name
+const TRACK_TYPE_NAMES = {
+  TrackNormal: /^(?!.*_shadow)/,
+  GroundNormal: /^(?!.*_shadow)/,
+  TrackShadow: /_shadow$/,
+  TrackShadowStart: /_shadow_start$/,
+  TrackShadowEnd: /_shadow_end$/,
+  TrackShadowStartEnd: /_shadow_start_end$/,
+};
 const LANES = [-20, 0, 20]; // WorldConstants.CellWidth = 20
 
 export function mulberry32(seed) {
@@ -257,7 +268,14 @@ export function generateLayout(
   // Event / extra decorations (decoration_event_*, decoration_extra_*): the game places
   // them from stripped code, so they are scattered plausibly by footprint here.
   const eventSlots = Object.keys(slots).filter((s) => /^decoration_(event|extra)_/.test(s) && has(s));
-  const decoSlots = eventSlots.filter((s) => !/tube_(start|end)/i.test(slots[s][0]));
+  // Segment-long side blocks (Buenos Aires event streets) are building variants the
+  // boundary pieces already pick from: scattered, they would sit on top of the buildings
+  const isSideBlock = (s) => {
+    const bb = manifest.prefabs[slots[s][0]]?.bbox;
+    const fullWidth = bb && bb[0][0] < -60 && bb[1][0] > 60;
+    return !!bb && !fullWidth && bb[1][2] - bb[0][2] >= SEGMENT - 10;
+  };
+  const decoSlots = eventSlots.filter((s) => !/tube_(start|end)/i.test(slots[s][0]) && !isSideBlock(s));
   function decorate(segZ) {
     if (!gen.decorations || !decoSlots.length || rng() > 0.35) return;
     const slot = pick(rng, decoSlots);
@@ -357,16 +375,19 @@ export function generateLayout(
     }
   }
 
-  // Rails: one piece per lane per segment, skipping gate stretches. Under boundaries
-  // whose TrackInfos say ShowShadows (stations, tubes, pillars) the shadowed variants
+  // Rails: one piece per lane per segment, skipping gate stretches and boundaries whose
+  // TrackInfos say SpawnTracks: false (landmarks that model their own floor and rails).
+  // Under boundaries that say ShowShadows (stations, tubes, pillars) the shadowed variants
   // are used, with start/end pieces where the shadowed stretch begins and ends.
   const trackInfos = manifest.boundaries?.[themeName]?.trackInfos ?? {};
-  const shadowedAt = (tz) => {
+  const infoAt = (tz) => {
     const run = runs.left.find((r) => tz >= r.z0 && tz < r.z1);
-    return !!(run && trackInfos[run.slot]?.ShowShadows);
+    return run ? trackInfos[run.slot] : undefined;
   };
+  const shadowedAt = (tz) => !!infoAt(tz)?.ShowShadows;
   for (let tz = 0; tz < length; tz += SEGMENT) {
     if (noTrackRanges.some(([a, b]) => tz >= a && tz < b)) continue;
+    if (infoAt(tz)?.SpawnTracks === false) continue;
     let trackType = 'TrackNormal';
     if (shadowedAt(tz)) {
       const starts = !shadowedAt(tz - SEGMENT);
@@ -376,7 +397,7 @@ export function generateLayout(
     for (const x of LANES) {
       // Under station platforms the outer tracks are covered: plain ground, no rails
       const covered = x !== 0 && platformRanges.some(([a, b]) => tz >= a && tz < b) && has('track_ground');
-      if (covered) place('track_ground', [x, 0, tz], 'track', { trackType: 'GroundNormal' });
+      if (covered) place('track_ground', [x, 0, tz], 'track', { trackType: 'GroundNormal' }, TRACK_TYPE_NAMES.GroundNormal);
       else placeTrack(x, tz, trackType);
     }
   }
@@ -387,9 +408,9 @@ export function generateLayout(
    * inside the zone.
    */
   function placeTrack(x, tz, trackType) {
-    place('track_track', [x, 0, tz], 'track', { trackType });
+    place('track_track', [x, 0, tz], 'track', { trackType }, TRACK_TYPE_NAMES[trackType]);
     const cut = obstacleMode === 'studio' && studio.some((it) => it.type === 'noTracks' && it.lane === x && it.z0 < tz + SEGMENT && it.z1 > tz);
-    if (cut && has('track_ground')) place('track_ground', [x, 0, tz], 'track', { trackType: 'GroundNormal', cut: 'inside' });
+    if (cut && has('track_ground')) place('track_ground', [x, 0, tz], 'track', { trackType: 'GroundNormal', cut: 'inside' }, TRACK_TYPE_NAMES.GroundNormal);
   }
 
   // Older game versions ship no chase chunks: fall back to random obstacles

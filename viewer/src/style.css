@@ -27,7 +27,7 @@ body {
 #status {
   position: fixed;
   left: 12px;
-  bottom: 10px;
+  bottom: 28px; /* above the credit line */
   color: #ddd;
   font-size: 12px;
   text-shadow: 0 1px 2px #000;
@@ -577,4 +577,16 @@ body.studio #view {
 .workbar-column input[type='range'] {
   flex: 1;
   min-width: 60px;
+}
+
+/* Credit line: always shown, also with the UI hidden */
+.credit {
+  position: fixed;
+  left: 12px;
+  bottom: 10px;
+  color: #ddd;
+  font-size: 11px;
+  opacity: 0.75;
+  text-shadow: 0 1px 2px #000;
+  pointer-events: none;
 }

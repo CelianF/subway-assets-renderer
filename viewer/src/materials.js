@@ -38,6 +38,18 @@ export function setBendDegrees(horizontal, vertical = 0) {
 
 const MAX_CUTS = 32;
 
+// Depth bias, in steps towards the camera. three flips the slope factor for the reversed
+// depth buffer but not the constant units, so those are flipped here
+let reversedDepth = false;
+export function setReversedDepth(on) {
+  reversedDepth = on;
+}
+function depthBias(mat, steps) {
+  mat.polygonOffset = true;
+  mat.polygonOffsetFactor = -steps;
+  mat.polygonOffsetUnits = (reversedDepth ? 4 : -4) * steps;
+}
+
 export const globals = {
   uTime: { value: 0 },
   uFogColor: { value: new THREE.Color(0.63, 0.69, 0.74) },
@@ -168,6 +180,7 @@ float fogFactor(float depth) {
 const COMBINED_FRAGMENT = /* glsl */ `
 uniform sampler2D uMap;
 uniform vec4 uColor;
+uniform vec4 uColor2;
 uniform float uMultiplier;
 uniform sampler2D uRefTex;
 uniform vec4 uRefColor;
@@ -195,6 +208,9 @@ ${CUT_MAIN}
   vec4 c = texture2D(uMap, vUv);
 #ifdef ALTERNATE
   c = mix(c, texture2D(uAltTex, vUv), uAltRatio);
+#endif
+#ifdef GRADIENT
+  c.rgb = mix(uColor.rgb, uColor2.rgb, c.r);
 #endif
 #ifdef MASK_TEXTURE
   c = vec4(vec3(c.r), c.r); // channel-packed masks (fountain foam): red = fill
@@ -357,6 +373,9 @@ const LEGACY_SHADERS = [
   [/UVScroll/i, { _HasScroll: 1, _HasTint: 1 }],
   [/Reflection/i, { _HasReflections: 1, _HasTint: 1 }],
   [/Diffuse|MatCap/i, { _HasTint: 1 }],
+  // VertexWaveGradient (2.x tulips): grey petals gradient-mapped from _Color to _Color2
+  [/VertexWaveGradient/i, { _HasGradient: 1 }],
+  [/VertexWave$/i, { _HasTint: 1 }],
 ];
 
 function translateLegacy(def) {
@@ -393,7 +412,12 @@ export class MaterialLibrary {
     else if (def.shader === 'SYBO/Bend/Specials/Fountain') mat = this.fountain(name, def);
     else if (def.shader === 'SYBO/Bend/Specials/NoFloorLava') mat = this.lava(name, def);
     else mat = this.combined(name, translateLegacy(def)); // incl. VertexWave, ScreenMask and pre-3.0 Bend/* shaders
-    if (cut) mat.defines.TRACK_CUT = cut;
+    if (cut) {
+      mat.defines.TRACK_CUT = cut;
+      // Track pieces give way to any floor laid over them (platforms, landmarks, plazas):
+      // where two floors overlap, the boundary's wins instead of flickering
+      if (!mat.polygonOffset) depthBias(mat, -1);
+    }
     this.cache.set(key, mat);
     return mat;
   }
@@ -425,7 +449,8 @@ export class MaterialLibrary {
     if (on('_HasAlternateColors', 'ALTERNATE_COLORS_ENABLED') && altTex) defines.ALTERNATE = '';
     const maskTex = def.shader === 'SYBO/Bend/Common/ScreenMask' ? this.tex(def, '_MaskTex') : null;
     if (maskTex) defines.SCREEN_MASK = '';
-    const wave = def.shader === 'SYBO/Bend/Legacy/VertexWave';
+    const wave = /(^|\/)(Legacy\/)?VertexWave/.test(def.shader);
+    if (f._HasGradient) defines.GRADIENT = '';
     if (wave) defines.WAVE = '';
 
     const tint = color4(c._Color);
@@ -441,6 +466,7 @@ export class MaterialLibrary {
         uMap: { value: this.tex(def, '_MainTex') ?? WHITE },
         uMainST: { value: new THREE.Vector4(...(main?.scale ?? [1, 1]), ...(main?.offset ?? [0, 0])) },
         uColor: { value: tint },
+        uColor2: { value: color4(c._Color2) },
         uMultiplier: { value: f._Multiplier ?? 1 },
         uScroll: { value: new THREE.Vector2(c._ScrollSpeed?.[0] ?? 0, c._ScrollSpeed?.[1] ?? 0) },
         uRefTex: { value: refTex ?? WHITE },
@@ -534,11 +560,7 @@ export class MaterialLibrary {
     }
     // Overlays modeled flush with another surface (train windows, lights, baked shadows,
     // glows) z-fight in three.js; bias them towards the camera so they win like in game
-    if (transparent || /_(glass|lights?|shadow|glow)$/i.test(name)) {
-      mat.polygonOffset = true;
-      mat.polygonOffsetFactor = -1;
-      mat.polygonOffsetUnits = -4;
-    }
+    if (transparent || /_(glass|lights?|shadow|glow)$/i.test(name)) depthBias(mat, 1);
     if (def.renderQueue > 0) mat.userData.renderQueue = def.renderQueue;
     mat.userData.unity = def;
   }
