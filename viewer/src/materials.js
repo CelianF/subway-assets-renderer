@@ -408,11 +408,13 @@ export class MaterialLibrary {
     if (this.cache.has(key)) return this.cache.get(key);
     const def = this.defs[name];
     let mat;
-    if (!def) mat = this.fromFallback(name, fallback);
+    // AssetRipper's filler for sub-meshes the renderer has no material for; Unity skips them
+    if (name === 'DefaultMaterial') mat = Object.assign(new THREE.MeshBasicMaterial(), { name, visible: false });
+    else if (!def) mat = this.fromFallback(name, fallback);
     else if (def.shader === 'SYBO/Bend/Specials/Fountain') mat = this.fountain(name, def);
     else if (def.shader === 'SYBO/Bend/Specials/NoFloorLava') mat = this.lava(name, def);
     else mat = this.combined(name, translateLegacy(def)); // incl. VertexWave, ScreenMask and pre-3.0 Bend/* shaders
-    if (cut) {
+    if (cut && mat.defines) {
       mat.defines.TRACK_CUT = cut;
       // Track pieces give way to any floor laid over them (platforms, landmarks, plazas):
       // where two floors overlap, the boundary's wins instead of flickering

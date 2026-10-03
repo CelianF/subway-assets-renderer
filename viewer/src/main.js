@@ -230,6 +230,65 @@ function applyRandomizers(obj, randomizers, seed) {
   }
 }
 
+// MeshAnimation flipbooks (water ripples, fire, wing flaps): the game swaps a node's mesh
+// through a list of frames; the glb only holds the first one
+const meshAnimations = new Set(); // { root, meshes, frames, duration, offset, delay, loop }
+
+async function applyMeshAnimations(obj, anims, seed) {
+  const rng = mulberry32(seed ^ 0x6d657368);
+  const table = sanitizedTable(Object.entries(anims)); // GLTFLoader renames "X (1)" to "X_(1)"
+  const jobs = [];
+  obj.traverse((o) => {
+    const key = nodeKey(table, o.name);
+    if (!key) return;
+    const anim = table[key];
+    // One primitive: the node is the mesh; several: a group of meshes
+    const meshes = o.isMesh ? [o] : o.children.filter((c) => c.isMesh);
+    if (!meshes.length) return;
+    jobs.push(
+      Promise.all(anim.frames.map((url) => loadGlb(url))).then((scenes) => {
+        const frames = scenes.map((scene) => {
+          const geos = [];
+          scene.traverse((m) => m.isMesh && geos.push(m.geometry));
+          return geos;
+        });
+        for (const mesh of meshes) {
+          // Full frames replace the cutaway's floor/upper split; too small to need it
+          mesh.userData.cutaway = false;
+          for (const child of [...mesh.children]) if (child.name.endsWith('_upper')) mesh.remove(child);
+        }
+        const duration = anim.duration[0] + rng() * (anim.duration[1] - anim.duration[0]);
+        meshAnimations.add({
+          root: obj,
+          meshes,
+          frames,
+          duration: Math.max(duration, 1e-3),
+          offset: anim.randomStart ? rng() * duration : 0,
+          delay: anim.delay,
+          loop: anim.loop,
+        });
+      }),
+    );
+  });
+  await Promise.all(jobs);
+}
+
+function updateMeshAnimations(time) {
+  for (const a of meshAnimations) {
+    if (!a.root.parent) {
+      meshAnimations.delete(a); // piece removed by a rebuild
+      continue;
+    }
+    const t = Math.max(0, time - a.delay) / a.duration + a.offset / a.duration;
+    const n = a.frames.length;
+    const i = a.loop ? Math.floor(t * n) % n : Math.min(n - 1, Math.floor(t * n));
+    a.meshes.forEach((mesh, k) => {
+      const geo = a.frames[i][k] ?? a.frames[i][0];
+      if (geo && mesh.geometry !== geo) mesh.geometry = geo;
+    });
+  }
+}
+
 /**
  * Signal lights show red or green. Themes whose signal has both lights keep one;
  * London-style signals only carry the red light, so green swaps in the green light
@@ -290,6 +349,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   const obj = (await loadGlb(prefab.glb, { cutaway })).clone();
   removeLowLods(obj, prefab.lodHidden);
   if (prefab.randomizers) applyRandomizers(obj, prefab.randomizers, variantSeed);
+  if (prefab.meshAnimations) await applyMeshAnimations(obj, prefab.meshAnimations, variantSeed);
   obj.traverse((o) => {
     if (!o.isMesh) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -931,6 +991,7 @@ await rebuild();
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   globals.uTime.value = clock.getElapsedTime();
+  updateMeshAnimations(globals.uTime.value);
   if (orbit.enabled) orbit.update();
   fly.update();
   updateSkyline();

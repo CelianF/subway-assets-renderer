@@ -268,17 +268,22 @@ export function generateLayout(
   // Event / extra decorations (decoration_event_*, decoration_extra_*): the game places
   // them from stripped code, so they are scattered plausibly by footprint here.
   const eventSlots = Object.keys(slots).filter((s) => /^decoration_(event|extra)_/.test(s) && has(s));
-  // Segment-long side blocks (Buenos Aires event streets) are building variants the
-  // boundary pieces already pick from: scattered, they would sit on top of the buildings
+  // Decorations also modeled inside boundary pieces (manifest "embedded": Edinburgh's
+  // barrels, Buenos Aires' event streets) are already placed by those pieces; scattered,
+  // they float or sit on top of the buildings. Older manifests lack the flag: there,
+  // segment-long side blocks are caught by size.
   const isSideBlock = (s) => {
     const bb = manifest.prefabs[slots[s][0]]?.bbox;
     const fullWidth = bb && bb[0][0] < -60 && bb[1][0] > 60;
     return !!bb && !fullWidth && bb[1][2] - bb[0][2] >= SEGMENT - 10;
   };
-  const decoSlots = eventSlots.filter((s) => !/tube_(start|end)/i.test(slots[s][0]) && !isSideBlock(s));
+  const embedded = (s) => slots[s].every((n) => manifest.prefabs[n]?.embedded);
+  // Picked among all of them so the free ones keep their odds; embedded picks place nothing
+  const decoSlots = eventSlots.filter((s) => !/tube_(start|end)/i.test(slots[s][0]));
   function decorate(segZ) {
     if (!gen.decorations || !decoSlots.length || rng() > 0.35) return;
     const slot = pick(rng, decoSlots);
+    if (embedded(slot) || isSideBlock(slot)) return;
     const prefab = manifest.prefabs[pick(rng, slots[slot])];
     const bb = prefab?.bbox;
     if (!bb) return;

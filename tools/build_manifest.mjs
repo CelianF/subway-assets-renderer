@@ -416,6 +416,39 @@ function parseRandomizers(file, guidIndex) {
   return out;
 }
 
+/** MeshAnimation components (water ripples, fire, wing flaps): mesh flipbooks.
+ *
+ * GameObject name -> { frames: [mesh names], duration: [min, max], loop, randomStart, delay }.
+ * The glb export only holds the first frame. */
+function parseMeshAnimations(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  for (const { doc, kind, fid } of docs) {
+    if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+  }
+  const out = {};
+  for (const { doc } of docs) {
+    if (!doc.startsWith('!u!114') || !/\n {2}_meshes:/.test(doc) || !/_durationMin:/.test(doc)) continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/);
+    const block = doc.match(/\n {2}_meshes:\n((?: {2}- .*\n)+)/);
+    if (!go || !names.has(go[1]) || !block) continue;
+    const frames = [...block[1].matchAll(GUID_RE_G)].map(([, g]) => guidIndex.get(g)).filter(Boolean).map((p) => stem(p));
+    if (frames.length < 2) continue;
+    const field = (key, fallback) => {
+      const m = doc.match(new RegExp(`\\n {2}${key}: ([\\d.e-]+)`));
+      return m ? num(m[1]) : fallback;
+    };
+    out[names.get(go[1])] = {
+      frames,
+      duration: [field('_durationMin', 1), field('_durationMax', 1)],
+      loop: field('_looping', 1) !== 0,
+      randomStart: field('_randomStart', 0) !== 0,
+      delay: field('_startDelay', 0),
+    };
+  }
+  return out;
+}
+
 /** Names of GameObjects whose renderers only belong to LOD1+ of a LODGroup.
  *
  * The game swaps between high/low models by screen size; the glb export
@@ -462,11 +495,15 @@ function qrot([x, y, z, w], [vx, vy, vz]) {
   return [vx + w * tx + y * tz - z * ty, vy + w * ty + z * tx - x * tz, vz + w * tz + x * ty - y * tx];
 }
 
+/** The JSON chunk of a glb. */
+function glbJson(file) {
+  const data = readFileSync(file);
+  return JSON.parse(data.toString('utf8', 20, 20 + data.readUInt32LE(12)));
+}
+
 /** Mesh/material counts and world-space AABB of a glb (from accessor bounds). */
 function glbStats(file) {
-  const data = readFileSync(file);
-  const jsonLen = data.readUInt32LE(12);
-  const gltf = JSON.parse(data.toString('utf8', 20, 20 + jsonLen));
+  const gltf = glbJson(file);
   const nodes = gltf.nodes ?? [];
   const meshes = gltf.meshes ?? [];
   const accessors = gltf.accessors ?? [];
@@ -612,13 +649,22 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const find = (name) => byName.get(name);
 
   // Primary-content glbs by name: PrefabHierarchyObject/ and Mesh/ first, then anywhere
-  // (prefabs from bundles with project paths land under Files/Assets/Art/…)
-  const glbByName = new Map();
+  // (prefabs from bundles with project paths land under Files/Assets/Art/…). A prefab and
+  // its model can share a name (2.2: prefabs/tracks/X and models/tracks/X): the prefab's
+  // export carries its materials, the model's only Default-Material.
   const allGlbs = [...walk(path.join(root, 'Files'))].filter((p) => p.endsWith('.glb')).sort(byDepth);
-  for (const p of allGlbs) if (!glbByName.has(path.basename(p))) glbByName.set(path.basename(p), p);
-  const prefabGlbs = new Map(glbByName);
+  const hasMaterials = (p) => glbJson(p).materials?.some((m) => m.name !== 'Default-Material') ?? false;
+  const byNamePreferring = (prefer) => {
+    const map = new Map();
+    for (const p of allGlbs) {
+      const prev = map.get(path.basename(p));
+      if (!prev || (!prefer(prev) && prefer(p))) map.set(path.basename(p), p);
+    }
+    return map;
+  };
+  const prefabGlbs = byNamePreferring(hasMaterials);
   for (const p of listDir(glbDir)) if (p.endsWith('.glb')) prefabGlbs.set(path.basename(p), p);
-  const meshGlbs = new Map(glbByName);
+  const meshGlbs = byNamePreferring((p) => !hasMaterials(p));
   for (const p of listDir(meshDir)) if (p.endsWith('.glb')) meshGlbs.set(path.basename(p), p);
 
   // Themes
@@ -693,6 +739,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const outGlb = path.join(out, 'glb');
   mkdirSync(outGlb, { recursive: true });
   const prefabs = {};
+  const prefabGlbSrc = new Map(); // prefab name -> the glb it was built from
   const missing = [];
   let empty = [];
   const transitionPrefabs = Object.values(boundaries).map((b) => b.transitions.map((t) => t.prefab));
@@ -713,24 +760,45 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       if (stats.bbox === null) empty.push(name);
       copyIfNewer(src, path.join(outGlb, path.basename(src)));
       prefabs[name] = { glb: `glb/${path.basename(src)}`, ...stats };
+      prefabGlbSrc.set(name, src);
     }
   }
 
-  // Random variant groups (only one child is active in game)
+  // The .prefab a glb was exported from sits at the same path in the project; by name
+  // alone, 2.2+ also has the model's prefab (models/…/X.prefab) without components
+  const filesAssets = path.join(root, 'Files', 'Assets');
+  const prefabFile = (name) => {
+    const src = prefabGlbSrc.get(name);
+    const sibling = src && path.join(project, path.relative(filesAssets, src)).replace(/\.glb$/, '.prefab');
+    return sibling && existsSync(sibling) ? sibling : find(`${name}.prefab`);
+  };
+
+  // Random variant groups (only one child is active in game), LODs, mesh flipbooks
+  const outMesh = path.join(out, 'mesh');
+  mkdirSync(outMesh, { recursive: true });
   for (const [name, info] of Object.entries(prefabs)) {
-    const prefabPath = find(`${name}.prefab`);
+    const prefabPath = prefabFile(name);
     if (!prefabPath || !info.glb) continue;
     const randomizers = parseRandomizers(prefabPath, guidIndex);
     if (Object.keys(randomizers).length) info.randomizers = randomizers;
     const lodHidden = parseLodGroups(prefabPath);
     if (lodHidden.length) info.lodHidden = lodHidden;
+    const animations = parseMeshAnimations(prefabPath, guidIndex);
+    for (const anim of Object.values(animations)) {
+      anim.frames = anim.frames.map((mesh) => {
+        const src = meshGlbs.get(`${mesh}.glb`);
+        if (!src) return null;
+        copyIfNewer(src, path.join(outMesh, path.basename(src)));
+        return `mesh/${path.basename(src)}`;
+      });
+    }
+    const complete = Object.entries(animations).filter(([, a]) => a.frames.every(Boolean));
+    if (complete.length) info.meshAnimations = Object.fromEntries(complete);
   }
 
   // Runtime-assigned track meshes (TrackController configurations)
-  const outMesh = path.join(out, 'mesh');
-  mkdirSync(outMesh, { recursive: true });
   for (const [name, info] of Object.entries(prefabs)) {
-    const prefabPath = find(`${name}.prefab`);
+    const prefabPath = prefabFile(name);
     if (!prefabPath) continue;
     const configs = parseTrackConfigs(prefabPath, guidIndex);
     if (!Object.keys(configs).length) continue;
@@ -747,6 +815,18 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     info.materials = sortedStrings(new Set([...(info.materials ?? []), ...Object.values(configs).flatMap((c) => c.materials)]));
   }
   empty = empty.filter((n) => !('trackConfigs' in prefabs[n]));
+
+  // Decorations that are also modeled inside other pieces (Edinburgh's barrels in the
+  // station, Buenos Aires' event streets in the buildings) are parts of those pieces,
+  // positioned in place; the viewer must not scatter them on their own
+  const decorations = new Set(Object.values(themes).flatMap((slots) => Object.entries(slots).filter(([slot]) => slot.startsWith('decoration_')).flatMap(([, names]) => names)));
+  for (const [name, info] of Object.entries(prefabs)) {
+    if (!info.glb || decorations.has(name)) continue;
+    for (const node of glbJson(path.join(out, info.glb)).nodes ?? []) {
+      const base = (node.name ?? '').replace(/ \(\d+\)$/, ''); // Unity's duplicate suffix
+      if (decorations.has(base) && prefabs[base]) prefabs[base].embedded = true;
+    }
+  }
 
   // Materials used by those prefabs
   const usedMats = new Set(Object.values(prefabs).flatMap((p) => p.materials ?? []));
@@ -801,6 +881,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const sumKeys = (key) => withKey(key).reduce((n, p) => n + Object.keys(p[key]).length, 0);
   log(`Randomizer groups: ${sumKeys('randomizers')} in ${withKey('randomizers').length} prefabs`);
   log(`LOD1+ renderers removed: ${sumKeys('lodHidden')} in ${withKey('lodHidden').length} prefabs`);
+  log(`Mesh animations: ${sumKeys('meshAnimations')} in ${withKey('meshAnimations').length} prefabs`);
   log(`Prefabs: ${Object.keys(prefabs).length} (${empty.length} without geometry, ${missing.length} missing glb)`);
   log(`Materials: ${Object.keys(materials).length}/${usedMats.size} resolved; shaders: ${JSON.stringify(shaders)}`);
   if (empty.length) log(`  no geometry: ${sortedStrings(empty).join(', ')}`);
@@ -824,6 +905,7 @@ function splitByTheme(manifest, staging, out, log) {
     const files = new Set([
       ...Object.values(prefabs).map((p) => p.glb).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => Object.values(p.trackConfigs ?? {}).map((c) => c.glb)).filter(Boolean),
+      ...Object.values(prefabs).flatMap((p) => Object.values(p.meshAnimations ?? {}).flatMap((a) => a.frames)),
       ...Object.values(materials).flatMap((m) => Object.values(m.textures).map((t) => t.url)).filter(Boolean),
     ]);
     const dest = path.join(out, theme);
