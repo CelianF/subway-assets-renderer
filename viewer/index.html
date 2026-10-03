@@ -14,15 +14,19 @@
       </header>
 
       <section class="upload" id="upload">
-        <input type="file" id="file" accept=".apk,.xapk,.zip,.subwaymap" hidden />
+        <input type="file" id="file" accept=".apk,.xapk,.zip,.subwaymap" multiple hidden />
         <div class="drop" id="drop">
-          <strong>Upload APK or .subwaymap</strong>
-          <span>Drop an .apk to extract its maps, or a shared .subwaymap to install it. APKPure .zip and .xapk work too.</span>
+          <strong>Upload APKs or .subwaymap</strong>
+          <span>Drop one or more .apk files to extract their maps (they queue and run one after the other), or a shared .subwaymap to install it. APKPure .zip and .xapk work too.</span>
         </div>
         <div class="job hidden" id="job">
           <div class="job-head"><span id="job-label">Uploading…</span><span id="job-pct"></span></div>
           <div class="bar"><div id="job-bar"></div></div>
           <pre id="job-log"></pre>
+        </div>
+        <div class="queue hidden" id="queue">
+          <h3>Up next <small id="queue-count"></small></h3>
+          <ol id="queue-list"></ol>
         </div>
       </section>
 

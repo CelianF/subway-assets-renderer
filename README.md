@@ -47,7 +47,7 @@ The app keeps its maps in a "Subway Assets Renderer" folder: `~/Library/Applicat
 
 ## Using it
 
-1. **Home page**: drop an `.apk` (APKPure `.zip` and `.xapk` work too). Extraction takes a few minutes. Each map becomes an environment card with Open and Delete.
+1. **Home page**: drop one or more `.apk` files (APKPure `.zip` and `.xapk` work too). They queue and extract one after the other, a few minutes each; waiting ones can be removed from the queue. Each map becomes an environment card with Open and Delete.
    If a map with the same name and game version is already installed, a dialog asks per map: **Ignore** (keep the existing one), **Keep both** (the new one is saved as a copy, with an optional note shown on its card, e.g. "Pride event") or **Replace**. Variants of a city (e.g. an event skin) are separate maps and never collide.
 2. **Sharing**: *Share* on a card downloads a `.subwaymap` file. Drop it on someone else's home page to install the map, with no APK or extraction needed. A `.subwaymap` is a plain zip of the environment folder plus a `subwaymap.json` header.
 3. **Viewer**: fly around the map. *← Environments* goes back to pick another map.
@@ -64,7 +64,7 @@ APK ──tools/ripper (headless AssetRipper)──▶ Unity project + glb expor
 ```
 
 - `tools/ripper/`: a small .NET CLI on top of the AssetRipper libraries (pinned as the `third_party/AssetRipper` submodule). The default build is framework-dependent, so a single build runs on macOS, Windows and Linux. CI (`.github/workflows/ripper.yml`) also produces self-contained builds for macOS arm64/x64 and Windows x64.
-- `server/api.js`: upload, extraction jobs, environment list and delete. It is mounted on the Vite dev server, `server/index.js` serves the production build (`npm start`), and `app/main.mjs` runs that server inside the desktop app.
+- `server/api.js`: upload, extraction queue (one job at a time), environment list and delete. It is mounted on the Vite dev server, `server/index.js` serves the production build (`npm start`), and `app/main.mjs` runs that server inside the desktop app.
 - `tools/build_manifest.mjs`: runs in a worker thread of the server, and can also be run by hand on an AssetRipper export (`node tools/build_manifest.mjs <export> --split --out <dir>`).
 
 ## How the game's data maps to the viewer

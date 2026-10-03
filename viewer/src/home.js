@@ -110,8 +110,25 @@ async function installPackage(file) {
   }
 }
 
-/** Routes a dropped/chosen file: .subwaymap installs, anything else extracts. */
-const handleFile = (file) => (/\.subwaymap$/i.test(file.name) ? installPackage(file) : upload(file));
+/**
+ * Routes dropped/chosen files in order: a .subwaymap installs, anything else is uploaded
+ * and queued for extraction on the server (one at a time there). Uploads go one after the
+ * other too, so the queue keeps the selection order.
+ */
+let sendChain = Promise.resolve();
+const uploads = []; // files still being sent: { name, fraction }
+function handleFiles(files) {
+  for (const file of files) {
+    if (/\.subwaymap$/i.test(file.name)) {
+      sendChain = sendChain.then(() => installPackage(file));
+      continue;
+    }
+    const entry = { name: file.name, fraction: 0 };
+    uploads.push(entry);
+    sendChain = sendChain.then(() => upload(file, entry));
+  }
+  watchJobs();
+}
 
 /**
  * "This map already exists" dialog: one choice per map (ignore / keep both / replace),
@@ -202,78 +219,141 @@ function askConflicts(conflicts) {
   });
 }
 
-async function upload(file) {
-  $('drop').classList.add('busy');
+/** Sends one package to the server queue. */
+async function upload(file, entry) {
   try {
-    // Upload with progress (fetch has no upload progress events)
-    const { jobId } = await new Promise((resolve, reject) => {
+    await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `/api/extract?name=${encodeURIComponent(file.name)}`);
-      xhr.upload.onprogress = (e) => e.lengthComputable && showJob(`Uploading ${file.name}`, (e.loaded / e.total) * 0.1);
-      xhr.onload = () => (xhr.status < 300 ? resolve(JSON.parse(xhr.responseText)) : reject(new Error(xhr.responseText)));
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        entry.fraction = e.loaded / e.total;
+        renderQueue();
+      };
+      xhr.onload = () => (xhr.status < 300 ? resolve(JSON.parse(xhr.responseText)) : reject(new Error(JSON.parse(xhr.responseText || '{}').error ?? xhr.statusText)));
       xhr.onerror = () => reject(new Error('Upload failed'));
       xhr.send(file);
     });
-    await followJob(jobId);
   } catch (e) {
-    showJob(`Upload failed: ${e.message}`, null);
+    showJob(`Upload of ${file.name} failed: ${e.message}`, null);
     $('job').classList.add('failed');
   } finally {
-    $('drop').classList.remove('busy');
-    loadEnvs();
+    uploads.splice(uploads.indexOf(entry), 1);
+    renderQueue();
+    watchJobs();
   }
 }
 
-/** Polls an extraction job until it ends, updating the progress card. */
-async function followJob(jobId) {
-  $('drop').classList.add('busy');
+// ---------------------------------------------------------------- queue
+
+let queued = []; // server jobs waiting their turn: { id, source }
+
+/** "Up next": files still uploading, then the server's waiting jobs (removable). */
+function renderQueue() {
+  const rows = [
+    ...queued.map((job) => ({ name: job.source, state: 'Waiting', remove: () => removeJob(job.id) })),
+    ...uploads.map((u) => ({ name: u.name, state: `Uploading ${Math.round(u.fraction * 100)}%` })),
+  ];
+  $('queue').classList.toggle('hidden', rows.length === 0);
+  $('queue-count').textContent = rows.length ? `(${rows.length})` : '';
+  $('queue-list').replaceChildren(
+    ...rows.map((r, i) =>
+      el(
+        'li',
+        {},
+        el('span', { class: 'q-pos' }, `${i + 1}.`),
+        el('span', { class: 'q-name', title: r.name }, r.name),
+        el('span', { class: 'q-state' }, r.state),
+        r.remove ? el('button', { class: 'danger', title: 'Remove from the queue', onclick: r.remove }, 'Remove') : null,
+      ),
+    ),
+  );
+}
+
+async function removeJob(id) {
+  const res = await fetch(`/api/jobs/${id}`, { method: 'DELETE' });
+  if (!res.ok) alert((await res.json().catch(() => ({}))).error ?? 'Could not remove it');
+  queued = queued.filter((j) => j.id !== id);
+  renderQueue();
+}
+
+/**
+ * Follows the server queue until it is empty: progress card for the running job, conflict
+ * dialog when it asks, final result when it ends, and the waiting list. One loop at a time.
+ */
+let watching = false;
+async function watchJobs() {
+  if (watching) return;
+  watching = true;
   $('job').classList.remove('failed');
+  let current = null; // id of the job shown in the progress card
   try {
     for (;;) {
-      const res = await fetch(`/api/jobs/${jobId}`);
-      if (!res.ok) break; // server restarted: the job is gone
-      const job = await res.json();
-      if (job.status === 'conflict') {
-        showJob('Some maps already exist', null);
-        const { choices, notes } = await askConflicts(job.conflicts);
-        await fetch(`/api/jobs/${jobId}/resolve`, { method: 'POST', body: JSON.stringify({ choices, notes }) });
-        continue;
+      const list = await (await fetch('/api/jobs')).json().catch(() => []);
+      const active = list.find((j) => j.status === 'running' || j.status === 'conflict');
+      queued = list.filter((j) => j.status === 'queued');
+      renderQueue();
+      // The job shown so far left the active list: show how it ended
+      if (current && current !== active?.id) {
+        await showResult(current);
+        current = null;
       }
-      const step = Math.max(0, STAGE_ORDER.indexOf(job.stage));
-      showJob(job.label ?? job.stage, 0.1 + (0.9 * step) / (STAGE_ORDER.length - 1), job.log.join('\n'));
-      if (job.status === 'done') {
-        const skipped = job.skipped ? `, ${job.skipped} kept as they were` : '';
-        showJob(`Done: ${job.envs.length} environment${job.envs.length === 1 ? '' : 's'} installed${skipped}`, 1, job.warning ? `Note: ${job.warning}` : '');
-        break;
+      if (active) {
+        if (current !== active.id) $('job').classList.remove('failed');
+        current = active.id;
+        await showProgress(active.id);
       }
-      if (job.status === 'error') {
-        showJob(`Extraction failed: ${job.error}`, null, job.log.join('\n'));
-        $('job').classList.add('failed');
-        break;
-      }
+      if (!active && !queued.length && !uploads.length) break;
       await new Promise((r) => setTimeout(r, 1000));
     }
   } finally {
-    $('drop').classList.remove('busy');
+    watching = false;
     loadEnvs();
   }
 }
 
+async function showProgress(jobId) {
+  const res = await fetch(`/api/jobs/${jobId}`);
+  if (!res.ok) return; // server restarted: the job is gone
+  const job = await res.json();
+  if (job.status === 'conflict') {
+    showJob(`${job.source}: some maps already exist`, null);
+    const { choices, notes } = await askConflicts(job.conflicts);
+    await fetch(`/api/jobs/${jobId}/resolve`, { method: 'POST', body: JSON.stringify({ choices, notes }) });
+    return;
+  }
+  const step = Math.max(0, STAGE_ORDER.indexOf(job.stage));
+  showJob(`${job.source}: ${job.label ?? job.stage}`, 0.1 + (0.9 * step) / (STAGE_ORDER.length - 1), job.log.join('\n'));
+}
+
+async function showResult(jobId) {
+  const res = await fetch(`/api/jobs/${jobId}`);
+  if (!res.ok) return;
+  const job = await res.json();
+  if (job.status === 'done') {
+    const skipped = job.skipped ? `, ${job.skipped} kept as they were` : '';
+    showJob(`${job.source}: ${job.envs.length} environment${job.envs.length === 1 ? '' : 's'} installed${skipped}`, 1, job.warning ? `Note: ${job.warning}` : '');
+  } else if (job.status === 'error') {
+    showJob(`${job.source}: extraction failed: ${job.error}`, null, job.log.join('\n'));
+    $('job').classList.add('failed');
+  }
+  loadEnvs(); // new maps show up while the rest of the queue runs
+}
+
 const drop = $('drop');
-drop.addEventListener('click', () => !drop.classList.contains('busy') && $('file').click());
-$('file').addEventListener('change', (e) => e.target.files[0] && handleFile(e.target.files[0]));
+drop.addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', (e) => {
+  handleFiles([...e.target.files]);
+  e.target.value = ''; // picking the same files again still fires "change"
+});
 drop.addEventListener('dragover', (e) => (e.preventDefault(), drop.classList.add('over')));
 drop.addEventListener('dragleave', () => drop.classList.remove('over'));
 drop.addEventListener('drop', (e) => {
   e.preventDefault();
   drop.classList.remove('over');
-  const file = e.dataTransfer.files[0];
-  if (file && !drop.classList.contains('busy')) handleFile(file);
+  handleFiles([...e.dataTransfer.files]);
 });
 
 loadEnvs();
-// Resume showing an extraction that is still running (page reloaded or reopened)
-fetch('/api/jobs')
-  .then((r) => r.json())
-  .then((running) => running[0] && followJob(running[0].id))
-  .catch(() => {});
+// Resume following the queue (page reloaded, or back from a map)
+watchJobs();

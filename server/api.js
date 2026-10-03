@@ -25,7 +25,11 @@ const MIME = {
   '.jpg': 'image/jpeg',
 };
 
-const jobs = new Map(); // id -> { id, status, stage, log: [], envs: [], error }
+const jobs = new Map(); // id -> { id, status, stage, log: [], envs: [], error }; insertion order = queue order
+
+// Jobs live in memory: folders left by a previous run (a queued APK copy, a half export
+// after a crash) can never finish, so they go at startup
+const staleJobsCleared = rm(JOBS, { recursive: true, force: true }).catch(() => {});
 
 // AssetRipper picks how to unpack an archive from its extension (APK, split APKs, …)
 const PACKAGE_EXTENSIONS = new Set(['.apk', '.xapk', '.zip']);
@@ -212,6 +216,7 @@ async function installPackage(entries, header, id, staging, sourceName, policy, 
 // ---------------------------------------------------------------- extraction job
 
 const STAGES = {
+  queued: 'Waiting in queue',
   upload: 'Receiving game package',
   load: 'Reading game files',
   'export-project': 'Exporting Unity project',
@@ -221,7 +226,16 @@ const STAGES = {
   done: 'Done',
 };
 
+/** Starts the oldest queued job unless one is already running (one extraction at a time). */
+function startNextJob() {
+  const all = [...jobs.values()];
+  if (all.some((j) => j.status === 'running' || j.status === 'conflict')) return;
+  const next = all.find((j) => j.status === 'queued');
+  if (next) runJob(next, next.apkPath, next.source).finally(startNextJob);
+}
+
 async function runJob(job, apkPath, sourceName) {
+  job.status = 'running';
   const dir = path.join(JOBS, job.id);
   const exportDir = path.join(dir, 'export');
   const splitDir = path.join(dir, 'envs');
@@ -233,6 +247,7 @@ async function runJob(job, apkPath, sourceName) {
     job.stage = s;
     job.label = STAGES[s] ?? s;
   };
+  setStage('load');
   try {
     // An APK/XAPK is a zip: catch HTML/XML error pages saved as .apk (expired download links)
     const head = Buffer.alloc(4);
@@ -391,25 +406,44 @@ export async function handle(req, res) {
         req.resume();
         return sendJson(res, 400, { error: `Unsupported file type "${ext}". Use an .apk, .xapk or .zip.` }), true;
       }
-      const job = { id: randomUUID(), source: sourceName, status: 'running', stage: 'upload', label: STAGES.upload, log: [], envs: [], error: null };
-      jobs.set(job.id, job);
-      const dir = path.join(JOBS, job.id);
+      await staleJobsCleared;
+      const id = randomUUID();
+      const dir = path.join(JOBS, id);
       await mkdir(dir, { recursive: true });
       const apkPath = path.join(dir, `input${ext}`);
-      await new Promise((resolve, reject) => {
-        const out = createWriteStream(apkPath);
-        req.pipe(out);
-        out.on('finish', resolve);
-        out.on('error', reject);
-        req.on('error', reject);
-      });
-      runJob(job, apkPath, sourceName); // runs in the background; poll /api/jobs/:id
-      sendJson(res, 202, { jobId: job.id });
+      try {
+        await new Promise((resolve, reject) => {
+          const out = createWriteStream(apkPath);
+          req.pipe(out);
+          out.on('finish', resolve);
+          out.on('error', reject);
+          req.on('error', reject);
+        });
+      } catch (e) {
+        await rm(dir, { recursive: true, force: true }); // upload interrupted
+        throw e;
+      }
+      // Queued once fully received, so a half upload never starts
+      const job = { id, source: sourceName, apkPath, status: 'queued', stage: 'queued', label: STAGES.queued, log: [], envs: [], error: null };
+      jobs.set(id, job);
+      startNextJob(); // runs in the background; poll /api/jobs/:id
+      sendJson(res, 202, { jobId: id });
       return true;
     }
-    // GET /api/jobs  (running jobs, so a reloaded home page can resume showing progress)
+    // GET /api/jobs  (running job first, then the queue in order)
     if (parts[1] === 'jobs' && parts.length === 2 && req.method === 'GET') {
-      sendJson(res, 200, [...jobs.values()].filter((j) => j.status === 'running' || j.status === 'conflict').map((j) => ({ id: j.id, source: j.source, stage: j.stage })));
+      const active = [...jobs.values()].filter((j) => j.status === 'running' || j.status === 'conflict' || j.status === 'queued');
+      sendJson(res, 200, active.map((j) => ({ id: j.id, source: j.source, status: j.status, stage: j.stage })));
+      return true;
+    }
+    // DELETE /api/jobs/:id  (queued jobs only: a running extraction can't be stopped cleanly)
+    if (parts[1] === 'jobs' && parts.length === 3 && req.method === 'DELETE') {
+      const job = jobs.get(parts[2]);
+      if (!job) return sendJson(res, 404, { error: 'Unknown job' }), true;
+      if (job.status !== 'queued') return sendJson(res, 409, { error: 'Only waiting jobs can be removed' }), true;
+      jobs.delete(job.id);
+      await rm(path.join(JOBS, job.id), { recursive: true, force: true });
+      sendJson(res, 200, { ok: true });
       return true;
     }
     // POST /api/jobs/:id/resolve  { choices: { <envId>: 'replace' | 'keep' | 'skip' } }
@@ -427,7 +461,7 @@ export async function handle(req, res) {
     if (parts[1] === 'jobs' && parts.length === 3 && req.method === 'GET') {
       const job = jobs.get(parts[2]);
       if (!job) return sendJson(res, 404, { error: 'Unknown job' }), true;
-      const { resolve, ...visible } = job;
+      const { resolve, apkPath, ...visible } = job;
       sendJson(res, 200, { ...visible, log: job.log.slice(-12) });
       return true;
     }
