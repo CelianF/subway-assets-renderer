@@ -13,6 +13,10 @@ app.setName(APP_NAME);
 app.setPath('userData', path.join(app.getPath('appData'), APP_NAME));
 const dataDir = IS_WIN && process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, APP_NAME) : app.getPath('userData');
 
+// Everything is served from this machine on a new port each launch, so cached copies of
+// maps are never reused and only pile up (hundreds of MB): no HTTP cache
+app.commandLine.appendSwitch('disable-http-cache');
+
 // Read by server/api.js when it is first imported
 process.env.SUBWAY_WORKSPACE ??= path.join(dataDir, 'workspace');
 if (app.isPackaged) process.env.SUBWAY_RIPPER ??= path.join(process.resourcesPath, 'ripper', IS_WIN ? 'ripper.exe' : 'ripper');

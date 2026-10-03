@@ -26,7 +26,8 @@ function el(tag, attrs = {}, ...children) {
 const DEBUG = new URLSearchParams(location.search).get('debug') === 'true';
 
 const prettySlot = (slot) => slot.replace(/^(boundary|track|special|obstacle|train|prop)_/, '').replaceAll('_', ' ');
-const prettyTheme = (t) => t.replace(/([a-z])([A-Z0-9])/g, '$1 $2');
+// Old games prefix themes with an internal number ("1.118_BuenosAires"): shown as "Buenos Aires"
+const prettyTheme = (t) => t.replace(/^\d+\.\d+_/, '').replace(/([a-z])([A-Z0-9])/g, '$1 $2');
 
 /**
  * @param manifest viewer manifest

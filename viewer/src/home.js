@@ -4,7 +4,8 @@
 import { addCredit } from './credit.js';
 
 const $ = (id) => document.getElementById(id);
-const prettyTheme = (t) => t.replace(/([a-z])([A-Z0-9])/g, '$1 $2');
+// Old games prefix themes with an internal number ("1.118_BuenosAires"): shown as "Buenos Aires"
+const prettyTheme = (t) => t.replace(/^\d+\.\d+_/, '').replace(/([a-z])([A-Z0-9])/g, '$1 $2');
 
 addCredit();
 

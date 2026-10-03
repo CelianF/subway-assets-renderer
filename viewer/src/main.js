@@ -9,6 +9,7 @@ import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
 import { addCredit } from './credit.js';
+import { attachParticles, updateParticles } from './particles.js';
 
 const params = new URLSearchParams(location.search);
 addCredit();
@@ -280,8 +281,13 @@ function updateMeshAnimations(time) {
       continue;
     }
     const t = Math.max(0, time - a.delay) / a.duration + a.offset / a.duration;
-    const n = a.frames.length;
+    const n = (a.frames ?? a.nodes).length;
     const i = a.loop ? Math.floor(t * n) % n : Math.min(n - 1, Math.floor(t * n));
+    if (a.nodes) {
+      a.nodes.forEach((node, k) => (node.visible = false));
+      a.nodes[i].visible = true; // frames can repeat (wings go 1..6..2)
+      continue;
+    }
     a.meshes.forEach((mesh, k) => {
       const geo = a.frames[i][k] ?? a.frames[i][0];
       if (geo && mesh.geometry !== geo) mesh.geometry = geo;
@@ -344,7 +350,20 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
     });
     return obj;
   }
-  if (!prefab?.glb || !prefab.bbox) return null;
+  // 1.x composites: trains chained from single cars, shadow stretches from two half pieces
+  if (prefab?.parts) {
+    const group = new THREE.Group();
+    group.name = name;
+    const kids = await Promise.all(prefab.parts.map((p, i) => instantiate(p.prefab, null, layer, variantSeed + 7919 * (i + 1), null, null, cutMode)));
+    kids.forEach((kid, i) => {
+      if (!kid) return;
+      kid.position.set(...prefab.parts[i].pos);
+      group.add(kid);
+    });
+    return group;
+  }
+  // Particle-only prefabs (glows, steam) have no geometry of their own
+  if (!prefab?.glb || (!prefab.bbox && !prefab.particles)) return null;
   const cutaway = layer === 'environment' ? 'floor' : layer === 'track' ? null : 'all';
   const obj = (await loadGlb(prefab.glb, { cutaway })).clone();
   removeLowLods(obj, prefab.lodHidden);
@@ -357,8 +376,72 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
     if (out.length === 1) applyMaterial(o, out[0]);
     else o.material = out;
   });
+  if (prefab.effectPlayers) applyEffectPlayers(obj, prefab.effectPlayers, variantSeed);
+  if (prefab.placeholders) await fillPlaceholders(obj, prefab.placeholders, { layer, seed: variantSeed, cutMode, signalSeed, signalColor });
+  if (prefab.particles && state.particles) {
+    const table = sanitizedTable(Object.entries(prefab.particles));
+    await attachParticles(obj, table, materials, (n) => nodeKey(table, n), async (url) => {
+      let geometry = null;
+      (await loadGlb(url)).traverse((o) => o.isMesh && (geometry ??= o.geometry));
+      return geometry;
+    });
+  }
   if (signalSeed != null) await applySignalColor(obj, signalSeed, signalColor);
   return obj;
+}
+
+/**
+ * 1.x placeholders: empty nodes the game fills with one prefab from a weighted list (tube
+ * sides, beach props, fountains, the signal's red or green light). Spawned pieces can
+ * have placeholders of their own.
+ */
+async function fillPlaceholders(obj, placeholders, { layer, seed, cutMode, signalSeed, signalColor }) {
+  const rng = mulberry32(seed ^ 0x706c6163);
+  const table = sanitizedTable(Object.entries(placeholders));
+  const jobs = [];
+  obj.traverse((node) => {
+    const key = nodeKey(table, node.name);
+    if (!key) return;
+    const { prefabs, probability, all } = table[key];
+    if (rng() >= probability) return;
+    let picks = all ? prefabs : [weightedPick(rng, prefabs)];
+    // Signal lights: the run's red/green choice, not a random one
+    const red = prefabs.find((p) => /red/i.test(p.name));
+    const green = prefabs.find((p) => /green/i.test(p.name));
+    if (signalSeed != null && red && green) {
+      if (signalColor === 'off') return;
+      const wantGreen = signalColor ? signalColor === 'green' : mulberry32(signalSeed)() < 0.5;
+      picks = [wantGreen ? green : red];
+    }
+    for (const pick of picks) {
+      jobs.push(
+        instantiate(pick.name, null, layer, Math.floor(rng() * 2 ** 31), null, null, cutMode).then((child) => child && node.add(child)),
+      );
+    }
+  });
+  await Promise.all(jobs);
+}
+
+function weightedPick(rng, list) {
+  let r = rng() * list.reduce((n, p) => n + (p.weight || 1), 0);
+  return list.find((p) => (r -= p.weight || 1) < 0) ?? list[0];
+}
+
+/** 1.x EffectPlayer: shows its effect children one after the other (ripples, wing flaps). */
+function applyEffectPlayers(obj, players, seed) {
+  const rng = mulberry32(seed ^ 0x65666678);
+  const table = sanitizedTable(Object.entries(players));
+  obj.traverse((node) => {
+    const key = nodeKey(table, node.name);
+    if (!key) return;
+    const fx = table[key];
+    const byName = new Map();
+    node.traverse((o) => o !== node && byName.set(THREE.PropertyBinding.sanitizeNodeName(o.name), o));
+    const frames = fx.children.map((n) => byName.get(THREE.PropertyBinding.sanitizeNodeName(n))).filter(Boolean);
+    if (frames.length < 2) return;
+    const duration = Math.max(fx.duration, 1e-3);
+    meshAnimations.add({ root: obj, nodes: frames, duration, offset: rng() * duration, delay: 0, loop: fx.loop });
+  });
 }
 
 // ---------------------------------------------------------------- run
@@ -376,6 +459,7 @@ const state = {
   fogScale: Number(params.get('fogScale') ?? 1),
   glass: 1,
   skyline: true,
+  particles: params.get('particles') !== '0', // smoke, steam, glows, sparks
   skylineOpacity: 1,
   skylineDistance: 1,
   obstacleMode: params.get('obstacleMode') ?? 'random',
@@ -564,6 +648,7 @@ function applyThemeLook() {
     skylineTheme = state.theme;
     skylineGroup.clear();
     if (cfg.background) loadSkyline(cfg.background);
+    if (cfg.skylineLayers) loadSkylineLayers(cfg.skylineLayers);
   }
   skylineGroup.visible = state.skyline && state.skylineOpacity > 0 && !state.inspect;
   skylineUniforms.uOpacity.value = state.skylineOpacity;
@@ -605,6 +690,56 @@ async function loadSkyline(bg) {
   });
   obj.userData.distance = bg.distance ?? 1000;
   skylineGroup.add(obj);
+}
+
+/**
+ * 1.x skyline: layers of flat silhouettes (one color per layer, Custom/Distorted/Skyline),
+ * farthest first. Fill objects repeat across the view; single objects (monuments) stand
+ * once each within the skyline limits.
+ */
+async function loadSkylineLayers(cfg) {
+  const layers = [...cfg.layers].sort((a, b) => a.index - b.index);
+  const maxIndex = Math.max(...layers.map((l) => l.index));
+  const rng = mulberry32(0x736b79);
+  for (const layer of layers) {
+    const group = new THREE.Group();
+    const color = new THREE.Color(...(layer.tint ?? [1, 1, 1]).slice(0, 3));
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uColor: { value: color }, ...skylineUniforms },
+      vertexShader: 'void main() { gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: 'uniform vec3 uColor; uniform float uOpacity; void main() { gl_FragColor = vec4(uColor, uOpacity); }',
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const place = async (name, x) => {
+      const prefab = manifest.prefabs[name];
+      if (!prefab?.glb || !prefab.bbox) return null;
+      const obj = (await loadGlb(prefab.glb)).clone();
+      obj.position.x = x;
+      obj.traverse((o) => {
+        if (!o.isMesh) return;
+        o.material = mat;
+        o.frustumCulled = false;
+        o.renderOrder = -1000 + layer.index; // farther layers first
+      });
+      group.add(obj);
+      return prefab;
+    };
+    // Fill: side by side across a wide span, each tile one of the fill prefabs
+    const span = 4000;
+    for (let x = -span; x < span; ) {
+      const name = layer.fill[Math.floor(rng() * layer.fill.length)];
+      if (!name) break;
+      const [lo, hi] = manifest.prefabs[name]?.bbox ?? [[0], [0]];
+      const width = Math.max(hi[0] - lo[0], 50);
+      await place(name, x - lo[0]);
+      x += width;
+    }
+    for (const name of layer.singles) await place(name, cfg.limits[0] + rng() * (cfg.limits[1] - cfg.limits[0]));
+    group.userData.distance = cfg.distance + (maxIndex - layer.index) * 150 - (layer.offset ?? 0);
+    skylineGroup.add(group);
+  }
 }
 
 function updateSkyline() {
@@ -810,6 +945,10 @@ const rendering = createWorkbar(
             { type: 'slider', label: 'Distance ×', obj: state, key: 'skylineDistance', min: 0.3, max: 3, step: 0.05, onChange: applyThemeLook },
           ],
         },
+        {
+          title: 'Particles',
+          controls: [{ type: 'toggle', label: 'Smoke, glows, sparks', obj: state, key: 'particles', onChange: () => rebuild() }],
+        },
       ],
     },
     {
@@ -990,8 +1129,11 @@ await rebuild();
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  globals.uTime.value = clock.getElapsedTime();
-  updateMeshAnimations(globals.uTime.value);
+  const now = clock.getElapsedTime();
+  const dt = now - globals.uTime.value;
+  globals.uTime.value = now;
+  updateMeshAnimations(now);
+  updateParticles(dt, studio.active ? studio.camera : camera);
   if (orbit.enabled) orbit.update();
   fly.update();
   updateSkyline();

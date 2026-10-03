@@ -91,6 +91,11 @@ attribute vec3 color; // VertexWave: vertex color = sway weight
 uniform vec3 uWaveDir;
 uniform vec3 uWavePlane;
 uniform vec3 uWaveParams; // frequency, speed, height
+uniform vec3 uWaveScales; // _SpeedScales: speed per axis
+#endif
+#ifdef WATER_WAVE
+uniform vec4 uWaterWave; // amplitude x, amplitude z, frequency x, frequency z
+uniform vec2 uWaterSpeed; // speed x, speed z
 #endif
 #ifdef LAVA
 uniform sampler2D uDisplaceTex;
@@ -102,6 +107,7 @@ varying float vDepth;
 varying vec3 vNormalV;
 varying vec3 vViewDir;
 varying vec3 vWorld;
+varying vec3 vNormalW;
 #ifdef USE_COLOR
 varying vec3 vColor;
 #endif
@@ -118,14 +124,23 @@ void main() {
   vUv = vec2(unityUv.x, 1.0 - unityUv.y);
   vec3 p = position;
 #ifdef WAVE
+  // SYBO VertexWave: a sine travelling across the wave plane (radians per unit, per second),
+  // each axis at its own speed; vertex color red weights it (0 at a plant's base)
   vec3 wp = (modelMatrix * vec4(p, 1.0)).xyz;
-  float phase = uTime * uWaveParams.y * 0.1 + dot(wp, uWavePlane) * uWaveParams.x * 0.1;
+  vec3 phase = uTime * uWaveParams.y * uWaveScales + dot(wp, uWavePlane) * uWaveParams.x;
   p += uWaveDir * sin(phase) * uWaveParams.z * color.r;
 #endif
 #ifdef LAVA
   p.y += (texture2D(uDisplaceTex, uv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5) * uMeshDisplace;
 #endif
+#ifdef WATER_WAVE
+  // Bend/Wave (1.x water): two sine swells across the surface (world space, sizes in units)
+  vec3 ww = (modelMatrix * vec4(p, 1.0)).xyz;
+  p.y += sin(ww.x * uWaterWave.z * 0.01 + uTime * uWaterSpeed.x) * uWaterWave.x * 0.25
+       + sin(ww.z * uWaterWave.w * 0.01 + uTime * uWaterSpeed.y) * uWaterWave.y * 0.25;
+#endif
   vWorld = (modelMatrix * vec4(p, 1.0)).xyz;
+  vNormalW = normalize(mat3(modelMatrix) * normal);
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   float depth = max(-mv.z, 0.0);
   mv.xy += vec2(uBend.x, -uBend.y) * depth * depth;
@@ -144,10 +159,10 @@ void main() {
 // Track cut-outs (studio "no tracks" zones): TRACK_CUT 1 hides inside, 2 shows only inside
 const CUT_GLSL = /* glsl */ `
 #include <clipping_planes_pars_fragment>
+varying vec3 vWorld;
 #ifdef TRACK_CUT
 uniform int uCutCount;
 uniform vec3 uCuts[${32}];
-varying vec3 vWorld;
 bool inCut() {
   for (int i = 0; i < ${32}; i++) {
     if (i >= uCutCount) break;
@@ -188,15 +203,33 @@ uniform vec4 uRimColor;
 uniform float uRimPower;
 uniform float uRimAmount;
 uniform float uFogMultiplier;
+uniform float uTime;
 uniform sampler2D uAltTex;
 uniform sampler2D uAltRef;
 uniform float uAltRatio;
 uniform sampler2D uMaskTex;
 uniform vec2 uResolution;
+uniform vec4 uUvWobble; // 1.x water: x amplitude, x frequency, y amplitude, y frequency
+uniform vec2 uUvWobbleSpeed;
 varying vec2 vUv;
 varying float vDepth;
 varying vec3 vNormalV;
 varying vec3 vViewDir;
+varying vec3 vNormalW;
+
+#ifdef CUBE_STRIP
+// Unity cubemap exported as a vertical strip of faces: +X, -X, +Y, -Y, +Z, -Z
+vec3 sampleCubeStrip(sampler2D strip, vec3 d) {
+  d.x = -d.x; // the glb export mirrors X
+  vec3 a = abs(d);
+  float face; vec2 st; float ma;
+  if (a.x >= a.y && a.x >= a.z) { ma = a.x; face = d.x > 0.0 ? 0.0 : 1.0; st = vec2(d.x > 0.0 ? -d.z : d.z, -d.y); }
+  else if (a.y >= a.z) { ma = a.y; face = d.y > 0.0 ? 2.0 : 3.0; st = vec2(d.x, d.y > 0.0 ? d.z : -d.z); }
+  else { ma = a.z; face = d.z > 0.0 ? 4.0 : 5.0; st = vec2(d.z > 0.0 ? d.x : -d.x, -d.y); }
+  vec2 uv = clamp((st / ma + 1.0) * 0.5, 0.002, 0.998);
+  return texture2D(strip, vec2(uv.x, (face + uv.y) / 6.0)).rgb;
+}
+#endif
 #ifdef USE_COLOR
 varying vec3 vColor;
 #endif
@@ -205,7 +238,12 @@ ${CUT_GLSL}
 
 void main() {
 ${CUT_MAIN}
-  vec4 c = texture2D(uMap, vUv);
+  vec2 uv = vUv;
+#ifdef UV_WOBBLE
+  uv.x += sin(vUv.y * uUvWobble.y * 6.2832 + uTime * uUvWobbleSpeed.x) * uUvWobble.x;
+  uv.y += sin(vUv.x * uUvWobble.w * 6.2832 + uTime * uUvWobbleSpeed.y) * uUvWobble.z * 0.1;
+#endif
+  vec4 c = texture2D(uMap, uv);
 #ifdef ALTERNATE
   c = mix(c, texture2D(uAltTex, vUv), uAltRatio);
 #endif
@@ -222,8 +260,12 @@ ${CUT_MAIN}
   c.rgb *= vColor;
 #endif
 #ifdef REFLECTIONS
+#ifdef CUBE_STRIP
+  vec3 refl = sampleCubeStrip(uRefTex, reflect(normalize(vWorld - cameraPosition), normalize(vNormalW)));
+#else
   vec3 n = normalize(vNormalV);
   vec3 refl = texture2D(uRefTex, n.xy * 0.5 + 0.5).rgb;
+#endif
 #ifdef ALTERNATE
   refl = mix(refl, texture2D(uAltRef, n.xy * 0.5 + 0.5).rgb, uAltRatio);
 #endif
@@ -378,7 +420,46 @@ const LEGACY_SHADERS = [
   [/VertexWave$/i, { _HasTint: 1 }],
 ];
 
+// 1.x "Custom/Distorted/*" (Distorted = curved world). The export keeps property blocks
+// only, so blend modes come from the shader names. Order matters: first match wins.
+const DISTORTED_SHADERS = [
+  [/Premultiplied/i, { FADE_MODE: 2, _SrcMode: 1, _DstMode: 10, _ZWrite: 0, _HasTint: 1 }],
+  [/Additive/i, { FADE_MODE: 2, _SrcMode: 1, _DstMode: 1, _ZWrite: 0, _HasTint: 1 }],
+  [/Multiply/i, { FADE_MODE: 3, _SrcMode: 2, _DstMode: 0, _ZWrite: 0 }],
+  [/Alpha Blended|Transparent/i, { FADE_MODE: 1, _SrcMode: 5, _DstMode: 10, _ZWrite: 0, _HasTint: 1 }],
+];
+
+function translateDistorted(def) {
+  const floats = { ...def.floats };
+  const colors = { ...def.colors };
+  const textures = { ...def.textures };
+  const flags = DISTORTED_SHADERS.find(([re]) => re.test(def.shader))?.[1];
+  if (flags) Object.assign(floats, flags);
+  // Tints: particles-style _TintColor is doubled; additive/premultiplied use _MainColor
+  if (/Alpha Blended/i.test(def.shader) && colors._TintColor) colors._Color = colors._TintColor.map((v) => Math.min(v * 2, 1));
+  else if (/Additive|Premultiplied/i.test(def.shader)) {
+    const tint = colors._MainColor ?? colors._TintColor;
+    if (tint) colors._Color = [...tint.slice(0, 3), 1];
+  } else if (!/Transparent/i.test(def.shader)) delete colors._Color; // "overlay" tints: unknown blend, left out
+  if (/Reflection/i.test(def.shader) && textures._Cube) {
+    textures._RefCube = { ...textures._Cube, cubeStrip: true };
+    colors._RefColor = colors._ReflectColor ?? [1, 1, 1, 0.5];
+    floats._HasReflections = 1;
+  }
+  if (/SPmask/i.test(def.shader) && textures._Mask) {
+    textures._MaskTex = textures._Mask;
+    floats._ScreenMask = 1;
+  }
+  const renderQueue = def.renderQueue > 0 ? def.renderQueue : floats._DstMode ? 3000 : 2000;
+  return { ...def, floats, colors, textures, renderQueue };
+}
+
 function translateLegacy(def) {
+  if (/^Custom\/Distorted\//.test(def.shader) && !/Skyline/.test(def.shader)) return translateDistorted(def);
+  if (/^Bend\/Wave \(UV Distorted\)/.test(def.shader)) {
+    // 1.x water: scrolling, UV-wobbled texture on a gently swelling surface
+    return { ...def, floats: { ...def.floats, _HasScroll: 1, _WaterWave: 1 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
+  }
   if (!/^(SYBO\/)?Bend\//.test(def.shader) || /Combined|Specials|Common\/ScreenMask|Legacy\/VertexWave/.test(def.shader)) return def;
   const floats = { ...def.floats };
   for (const [re, flags] of LEGACY_SHADERS) if (re.test(def.shader)) Object.assign(floats, flags, def.floats.FADE_MODE != null ? {} : {});
@@ -445,13 +526,15 @@ export class MaterialLibrary {
     if (on('_HasFogMultiplier', 'FOG_MULTIPLIER_ENABLED')) defines.FOG_MULTIPLIER = '';
     const refTex = this.tex(def, '_RefCube');
     if (on('_HasReflections', 'REFLECTIONS_ENABLED') && refTex) defines.REFLECTIONS = '';
+    if (defines.REFLECTIONS !== undefined && def.textures._RefCube?.cubeStrip) defines.CUBE_STRIP = '';
+    if (f._WaterWave) Object.assign(defines, { WATER_WAVE: '', UV_WOBBLE: '' });
     // Only the shared foam texture is a channel-packed mask; themed fountain textures are color
     if (/_Common_FountainTexture/i.test(main?.url ?? '')) defines.MASK_TEXTURE = '';
     const altTex = this.tex(def, '_AlternateTex');
     if (on('_HasAlternateColors', 'ALTERNATE_COLORS_ENABLED') && altTex) defines.ALTERNATE = '';
-    const maskTex = def.shader === 'SYBO/Bend/Common/ScreenMask' ? this.tex(def, '_MaskTex') : null;
+    const maskTex = def.shader === 'SYBO/Bend/Common/ScreenMask' || f._ScreenMask ? this.tex(def, '_MaskTex') : null;
     if (maskTex) defines.SCREEN_MASK = '';
-    const wave = /(^|\/)(Legacy\/)?VertexWave/.test(def.shader);
+    const wave = /(^|\/)(Legacy\/)?VertexWave|^Bend\/Wave \(Vertex Color Control\)/.test(def.shader); // 1.x flags
     if (f._HasGradient) defines.GRADIENT = '';
     if (wave) defines.WAVE = '';
 
@@ -483,6 +566,11 @@ export class MaterialLibrary {
         uWaveDir: { value: new THREE.Vector3(...(c._WaveDirection ?? [0, 0, 0]).slice(0, 3)) },
         uWavePlane: { value: new THREE.Vector3(...(c._WavePlaneNormal ?? [0, 0, 0]).slice(0, 3)) },
         uWaveParams: { value: new THREE.Vector3(f._Frequency ?? 1, f._Speed ?? 1, f._WaveHeight ?? 0) },
+        uWaveScales: { value: new THREE.Vector3(...(c._SpeedScales?.slice(0, 3).some((v) => v) ? c._SpeedScales.slice(0, 3) : [1, 1, 1])) },
+        uWaterWave: { value: new THREE.Vector4(f._AmplitudeX ?? 0, f._AmplitudeZ ?? 0, f._FrequenceyX ?? 1, f._FrequenceyZ ?? 1) },
+        uWaterSpeed: { value: new THREE.Vector2(f._SpeedX ?? 1, f._SpeedZ ?? 1) },
+        uUvWobble: { value: new THREE.Vector4(f._xDistortionAplitude ?? 0, f._xDistortionFrequency ?? 0, f._yDistortionAplitude ?? 0, f._yDistortionFrequency ?? 0) },
+        uUvWobbleSpeed: { value: new THREE.Vector2(f._xDistortionSpeed ?? 0, f._yDistortionSpeed ?? 0) },
       },
     });
     this.applyRenderState(mat, name, def);

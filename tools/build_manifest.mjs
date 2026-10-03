@@ -354,6 +354,155 @@ function parseThemeEffect(file, guidIndex) {
 // Prefabs the viewer needs beyond theme slots
 const EXTRA_PREFABS = ['_Common_LightSignal_Light_Green', '_Common_LightSignal_Light_Red'];
 
+// ---------------------------------------------------------------- 1.x themes
+//
+// 1.x games have no *_Theme.asset: one MonoBehaviour per city maps generic prefabs
+// (high_01_left_gen, track_shadow_mid_gen, …) to the city's own, and carries the fog,
+// sky gradient and skyline layers. Trains come as single cars the game chains in code,
+// so they are assembled here as composite prefabs ({ parts: [{ prefab, pos }] }).
+
+/** Generic prefab name (without _gen) -> regular theme slot. */
+const LEGACY_SLOTS = [
+  [/^(low|med|high)_\d+_(left|right)$/, (m) => `boundary_${m[1] === 'med' ? 'medium' : m[1]}_${m[2]}`],
+  [/^epic_\d+_(start|mid|end)$/, (m) => `boundary_epic_${m[1]}`],
+  [/^gates_base$/, () => 'boundary_gate'],
+  [/^gates_(left|mid|right|sides)$/, (m) => `special_gate_${m[1]}`],
+  [/^(pillars|station)_(start|mid|end)$/, (m) => `boundary_${m[1]}_${m[2]}`],
+  [/^station_platforms$/, () => 'special_station_platform'],
+  [/^tube$/, () => 'boundary_tube'],
+  [/^track_gates$/, () => 'track_gates'],
+  [/^track(_shadow_(start|mid|end))?$/, () => 'track_track'],
+  [/^ground(_shadow_mid)?$/, () => 'track_ground'],
+  [/^blocker_(jump|roll|standard)$/, (m) => `obstacle_barrier_${m[1]}`],
+  [/^bush_\d+$/, () => 'obstacle_bush'],
+  [/^(dumpster|lightSignal|pillar|powerBox)$/, (m) => `obstacle_${m[1]}`],
+  [/^extra_(\d+)$/, (m) => `decoration_extra_${m[1].padStart(2, '0')}`],
+  [/^event_(\d+)$/, (m) => `decoration_event_${m[1].padStart(2, '0')}`],
+  [/^train_ramp$/, () => 'train_ramp'],
+  [/^train_start$/, () => 'prop_train_start'],
+];
+// What the 2.x+ TrackInfos say for these boundaries (1.x keeps it in code)
+const LEGACY_TRACK_INFOS = {
+  boundary_epic_start: { SpawnTracks: false, ShowShadows: false },
+  boundary_epic_mid: { SpawnTracks: false, ShowShadows: false },
+  boundary_epic_end: { SpawnTracks: false, ShowShadows: false },
+  boundary_gate: { SpawnTracks: false, ShowShadows: false },
+  boundary_station_start: { SpawnTracks: true, ShowShadows: true },
+  boundary_station_mid: { SpawnTracks: true, ShowShadows: true },
+  boundary_station_end: { SpawnTracks: true, ShowShadows: true },
+  boundary_pillars_start: { SpawnTracks: true, ShowShadows: true },
+  boundary_pillars_mid: { SpawnTracks: true, ShowShadows: true },
+  boundary_pillars_end: { SpawnTracks: true, ShowShadows: true },
+  boundary_tube: { SpawnTracks: true, ShowShadows: true },
+};
+// _environmentKind._type of _environmentTransitionConfigs -> boundary slot
+const LEGACY_ENVIRONMENT_KINDS = { 2: 'boundary_tube' };
+// Train cars per variant: the moving train's first car is the locomotive
+const LEGACY_TRAIN_CARS = { Cargo: ['cargo', 'cargo'], Standard: ['standard', 'standard_front'], Subway: ['sub', 'sub_front'] };
+const LEGACY_TRAINS = [['static', [1, 2, 3, 5]], ['moving', [3, 5]]];
+
+function parseLegacyTheme(file, guidIndex) {
+  const text = read(file);
+  const name = text.match(/\n {2}m_Name: (.*)/)[1].trim();
+  const prefabName = (g) => (guidIndex.has(g) ? stem(guidIndex.get(g)) : null);
+  const color = (key, src = text) => {
+    const m = src.match(new RegExp(`${key}: \\{r: ([\\d.e-]+), g: ([\\d.e-]+), b: ([\\d.e-]+), a: ([\\d.e-]+)\\}`));
+    return m ? m.slice(1, 5).map(num) : null;
+  };
+  const number = (key, src = text) => {
+    const m = src.match(new RegExp(`\\n *${key}: ([\\d.e-]+)`));
+    return m ? num(m[1]) : null;
+  };
+
+  // Generic -> themed prefabs
+  const slots = {};
+  const cars = {}; // generic car name ("standard_front") -> themed prefab
+  const shortPieces = {}; // "track_shadow_short_start" -> themed prefab
+  const block = text.split('\n  _prefabMappingsGeneric:')[1] ?? '';
+  for (const [, g1, g2] of block.matchAll(/GenericPrefab: \{fileID: \d+, guid: (\w+)[^\n]*\n\s*ThemePrefab: \{fileID: \d+, guid: (\w+)/g)) {
+    const generic = prefabName(g1)?.replace(/_gen$/, '');
+    const themed = prefabName(g2);
+    if (!generic || !themed) continue;
+    const car = generic.match(/^train_(cargo|standard|sub)(?:_\d+)?(_front)?$/);
+    if (car) {
+      cars[car[1] + (car[2] ?? '')] = themed;
+      continue;
+    }
+    if (/_shadow_short_(start|end)$/.test(generic)) {
+      shortPieces[generic] = themed;
+      continue;
+    }
+    for (const [re, slotOf] of LEGACY_SLOTS) {
+      const m = generic.match(re);
+      if (!m) continue;
+      const list = (slots[slotOf(m)] ??= []);
+      if (!list.includes(themed)) list.push(themed);
+      break;
+    }
+  }
+
+  // Composite prefabs: trains from cars, one-segment shadowed stretches from two short pieces
+  const composites = {};
+  for (const [kind, counts] of LEGACY_TRAINS) {
+    for (const n of counts) {
+      for (const [variant, [body, front]] of Object.entries(LEGACY_TRAIN_CARS)) {
+        const car = (i) => cars[kind === 'moving' && i === 0 ? front : body] ?? cars[body];
+        if (!cars[body]) continue;
+        const prefab = `${name}_Train_${kind[0].toUpperCase()}${kind.slice(1)}_${n}_${variant}`;
+        composites[prefab] = Array.from({ length: n }, (_, i) => ({ prefab: car(i), pos: [0, 0, 30 + 60 * i] }));
+        (slots[`train_${kind}_${n}`] ??= []).push(prefab);
+      }
+    }
+  }
+  for (const kind of ['track', 'ground']) {
+    const start = shortPieces[`${kind}_shadow_short_start`];
+    const end = shortPieces[`${kind}_shadow_short_end`];
+    if (!start || !end) continue;
+    const prefab = `${name}_${kind}_shadow_start_end`;
+    composites[prefab] = [{ prefab: start, pos: [0, 0, 0] }, { prefab: end, pos: [0, 0, 90] }];
+    (slots[`track_${kind === 'track' ? 'track' : 'ground'}`] ??= []).push(prefab);
+  }
+
+  // Tube entrances/exits
+  const transitions = [];
+  for (const cfg of (text.split('\n  _environmentTransitionConfigs:')[1] ?? '').split(/\n {2}- _environmentKind:/).slice(1)) {
+    const slot = LEGACY_ENVIRONMENT_KINDS[number('_type', cfg)];
+    if (!slot) continue;
+    for (const at of ['start', 'end']) {
+      const part = cfg.split(`_transition${at === 'start' ? 'Start' : 'End'}:`)[1]?.split('_transition')[0] ?? '';
+      const m = part.match(/Prefab: \{fileID: \d+, guid: (\w+)/);
+      if (m && prefabName(m[1])) transitions.push({ slot, at, prefab: prefabName(m[1]), probability: number('SpawnProbability', part) ?? 1, exceptions: [] });
+    }
+  }
+
+  // Skyline: layers of silhouettes in one flat color, tinted per layer, behind a sky gradient
+  const bgText = text.split('\n  _background:')[1]?.split('\n  _distantObjectGlobalConfig:')[0] ?? '';
+  const layers = bgText.split(/\n {4}- Name: /).slice(1).map((layer) => {
+    const list = (key) => [...(layer.split(`${key}:`)[1]?.split(/\n {6}\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => prefabName(g)).filter(Boolean);
+    return {
+      name: layer.split('\n')[0].trim(),
+      fill: list('SkylineFillObjectPrefabs'),
+      singles: list('SingleObjectPrefabs'),
+      tint: color('_commonMaterialTintColor', layer),
+      index: number('LayerIndex', layer) ?? 0,
+      offset: number('z', (layer.match(/_offsetFromLayerDefault: \{[^}]*\}/)?.[0] ?? '').replace(/[{},]/g, '\n')) ?? 0,
+    };
+  });
+  const config = {
+    fog: { color: color('_fogColor'), start: number('_fogStartDistance'), end: number('_fogEndDistance') },
+    sky: { top: color('GradientTopColor')?.slice(0, 3) ?? null, bottom: color('GradientBottomColor')?.slice(0, 3) ?? null, power: 1 },
+  };
+  if (layers.length) {
+    config.skylineLayers = {
+      distance: number('_backgroundStartDistance') ?? 1000,
+      spacing: number('LayerSpacing', bgText) ?? 5,
+      limits: [number('SkylineLeftLimit', bgText) ?? -350, number('SkylineRightLimit', bgText) ?? 750],
+      layers,
+    };
+  }
+  return { name, slots, composites, transitions, config, trackInfos: { ...LEGACY_TRACK_INFOS } };
+}
+
 const TRACK_TYPES = {
   0: 'Invisible', 1: 'TrackNormal', 2: 'TrackShadow', 3: 'TrackShadowStart', 4: 'TrackShadowEnd',
   5: 'TrackShadowStartEnd', 6: 'GroundNormal', 7: 'GroundShadow', 8: 'GroundShadowStart',
@@ -444,6 +593,234 @@ function parseMeshAnimations(file, guidIndex) {
       loop: field('_looping', 1) !== 0,
       randomStart: field('_randomStart', 0) !== 0,
       delay: field('_startDelay', 0),
+    };
+  }
+  return out;
+}
+
+/** 1.x placeholders: empty nodes the game fills at runtime with one prefab from a list
+ * (Placeholder + MultiplePlaceholderPrefabProvider): tube sides, water ripples, props.
+ *
+ * GameObject name -> { prefabs: [{ name, weight }], probability, all }. */
+function parsePlaceholders(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  for (const { doc, kind, fid } of docs) {
+    if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+  }
+  const byGo = new Map();
+  for (const { doc } of docs) {
+    if (!doc.startsWith('!u!114')) continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    if (!go || !names.has(go)) continue;
+    const entry = byGo.get(go) ?? { prefabs: [], probability: 1, all: false };
+    const list = doc.match(/\n {2}_prefabList:\n((?: {2}[- ] .*\n?)+)/);
+    if (list) {
+      for (const [, g, w] of list[1].matchAll(/Target: \{fileID: \d+, guid: (\w+)[^\n]*\n\s*Weight: ([\d.e-]+)/g)) {
+        if (guidIndex.has(g)) entry.prefabs.push({ name: stem(guidIndex.get(g)), weight: num(w) });
+      }
+      entry.all = /\n {2}_spawnAll: 1/.test(doc);
+    }
+    const prob = doc.match(/\n {2}_spawnProbability: ([\d.e-]+)/);
+    if (prob) entry.probability = num(prob[1]);
+    byGo.set(go, entry);
+  }
+  const out = {};
+  for (const [go, entry] of byGo) if (entry.prefabs.length) out[names.get(go)] = entry;
+  return out;
+}
+
+/** 1.x EffectPlayer: shows its effect children one after the other (water ripples, wings).
+ *
+ * GameObject name -> { children: [names in order], duration, loop, randomStart }. */
+function parseEffectPlayers(file) {
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  for (const { doc, kind, fid } of docs) {
+    if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+  }
+  const out = {};
+  for (const { doc } of docs) {
+    if (!doc.startsWith('!u!114') || !/\n {2}_effectList:/.test(doc)) continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    const list = doc.match(/\n {2}_effectList:\n((?: {2}- .*\n)+)/);
+    if (!go || !names.has(go) || !list) continue;
+    const children = [...list[1].matchAll(/fileID: (\d+)/g)].map(([, id]) => names.get(id)).filter(Boolean);
+    const field = (key, fallback) => {
+      const m = doc.match(new RegExp(`\\n {2}${key}: ([\\d.e-]+)`));
+      return m ? num(m[1]) : fallback;
+    };
+    if (children.length > 1) {
+      out[names.get(go)] = { children, duration: field('_duration', 1), loop: field('_doLoop', 1) !== 0, randomStart: field('_doRandomizeStartingIndex', 0) !== 0 };
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- particles
+
+/** Minimal reader for one Unity YAML document: nested maps, "- " lists, inline {a: b} maps. */
+function parseUnityYaml(doc) {
+  const rows = doc.split('\n').slice(1).filter((l) => l.trim()).map((l) => ({ indent: l.search(/\S/), text: l.trim() }));
+  let i = 0;
+  const scalar = (v) => {
+    v = v.trim();
+    if (v === '[]') return [];
+    if (v === '{}') return {};
+    if (v.startsWith('{') && v.endsWith('}')) {
+      const out = {};
+      for (const part of v.slice(1, -1).split(/,\s*(?=\w+:)/)) {
+        const k = part.indexOf(':');
+        out[part.slice(0, k).trim()] = scalar(part.slice(k + 1));
+      }
+      return out;
+    }
+    return /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(v) ? Number(v) : v;
+  };
+  function block(indent) {
+    if (i < rows.length && rows[i].indent === indent && rows[i].text.startsWith('- ')) {
+      const list = [];
+      while (i < rows.length && rows[i].indent === indent && rows[i].text.startsWith('- ')) {
+        const first = rows[i].text.slice(2);
+        if (/^[\w]+:( |$)/.test(first)) {
+          rows[i] = { indent: indent + 2, text: first }; // the item's first key, then its siblings
+          list.push(block(indent + 2));
+        } else {
+          list.push(scalar(first));
+          i++;
+        }
+      }
+      return list;
+    }
+    const map = {};
+    while (i < rows.length && rows[i].indent === indent && !rows[i].text.startsWith('- ')) {
+      const { text } = rows[i];
+      const k = text.indexOf(':');
+      const key = text.slice(0, k);
+      const rest = text.slice(k + 1).trim();
+      i++;
+      if (rest) map[key] = scalar(rest);
+      else if (i < rows.length && (rows[i].indent > indent || (rows[i].indent === indent && rows[i].text.startsWith('- ')))) map[key] = block(rows[i].indent);
+      else map[key] = null;
+    }
+    return map;
+  }
+  const top = block(rows[0]?.indent ?? 0);
+  const keys = Object.keys(top);
+  return keys.length === 1 && top[keys[0]] && typeof top[keys[0]] === 'object' ? top[keys[0]] : top; // "ParticleSystem:" wrapper
+}
+
+const curveKeys = (c) => (Array.isArray(c?.m_Curve) ? c.m_Curve.map((k) => [k.time, k.value]) : []);
+/** MinMaxCurve -> { mode, min, max, curve, minCurve } (mode: 0 constant, 1 curve, 2 random between constants, 3 between curves) */
+function minMaxCurve(c, fallback = 0) {
+  if (c == null) return { mode: 0, min: fallback, max: fallback };
+  if (typeof c === 'number') return { mode: 0, min: c, max: c }; // very old serializations
+  const out = { mode: c.minMaxState ?? 0, min: c.minScalar ?? c.scalar ?? fallback, max: c.scalar ?? fallback };
+  if (out.mode === 1 || out.mode === 3) {
+    out.curve = curveKeys(c.maxCurve);
+    if (out.mode === 3) out.minCurve = curveKeys(c.minCurve);
+  }
+  return out;
+}
+const rgba = (c) => (c ? [c.r ?? 1, c.g ?? 1, c.b ?? 1, c.a ?? 1] : [1, 1, 1, 1]);
+/** Gradient -> { colors: [[t, r, g, b]], alphas: [[t, a]] } */
+function gradient(g) {
+  if (!g) return null;
+  const nc = g.m_NumColorKeys ?? 2;
+  const na = g.m_NumAlphaKeys ?? 2;
+  const colors = [];
+  const alphas = [];
+  for (let k = 0; k < Math.max(nc, na); k++) {
+    const key = rgba(g[`key${k}`]);
+    if (k < nc) colors.push([(g[`ctime${k}`] ?? 0) / 65535, key[0], key[1], key[2]]);
+    if (k < na) alphas.push([(g[`atime${k}`] ?? 0) / 65535, key[3]]);
+  }
+  return { colors, alphas };
+}
+/** MinMaxGradient -> { mode, min, max, gradient, minGradient } */
+function minMaxGradient(c) {
+  if (!c) return { mode: 0, max: [1, 1, 1, 1] };
+  const out = { mode: c.minMaxState ?? 0, min: rgba(c.minColor), max: rgba(c.maxColor) };
+  if ([1, 3, 4].includes(out.mode)) out.gradient = gradient(c.maxGradient);
+  if (out.mode === 3) out.minGradient = gradient(c.minGradient);
+  return out;
+}
+const vec3 = (v, f = 0) => [v?.x ?? f, v?.y ?? f, v?.z ?? f];
+
+/** ParticleSystem + ParticleSystemRenderer components: GameObject name -> emitter description. */
+function parseParticles(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  for (const { doc, kind, fid } of docs) {
+    if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+  }
+  const goOf = (doc) => doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+  const renderers = new Map();
+  for (const { doc, kind } of docs) if (kind === '199') renderers.set(goOf(doc), parseUnityYaml(doc));
+  const out = {};
+  for (const { doc, kind } of docs) {
+    if (kind !== '198') continue;
+    const go = goOf(doc);
+    const r = renderers.get(go);
+    if (!names.has(go) || !r || r.m_Enabled === 0) continue;
+    const ps = parseUnityYaml(doc);
+    const init = ps.InitialModule ?? {};
+    const shape = ps.ShapeModule ?? {};
+    const emission = ps.EmissionModule ?? {};
+    const mod = (name) => (ps[name]?.enabled ? ps[name] : null);
+    const matGuid = (r.m_Materials ?? []).map((m) => m?.guid).find((g) => g && guidIndex.has(g));
+    const meshGuid = r.m_Mesh?.guid;
+    const radius = typeof shape.radius === 'object' && shape.radius ? shape.radius.value : shape.radius;
+    const size = mod('SizeModule');
+    const color = mod('ColorModule');
+    const rot = mod('RotationModule');
+    const vel = mod('VelocityModule');
+    const force = mod('ForceModule');
+    const uv = mod('UVModule');
+    out[names.get(go)] = {
+      duration: ps.lengthInSec ?? 5,
+      loop: ps.looping !== 0,
+      prewarm: ps.prewarm === 1,
+      delay: minMaxCurve(ps.startDelay),
+      local: (ps.moveWithTransform ?? 0) !== 1, // simulation space: 0 local, 1 world
+      lifetime: minMaxCurve(init.startLifetime, 5),
+      speed: minMaxCurve(init.startSpeed, 5),
+      size: minMaxCurve(init.startSize, 1),
+      rotation: minMaxCurve(init.startRotation),
+      color: minMaxGradient(init.startColor),
+      gravity: minMaxCurve(init.gravityModifier),
+      max: Math.min(init.maxNumParticles ?? 1000, 400),
+      shape: shape.enabled === 0 ? null : {
+        type: shape.type ?? 4,
+        radius: radius ?? 1,
+        angle: shape.angle ?? 25,
+        arc: (typeof shape.arc === 'object' ? shape.arc?.value : shape.arc) ?? 360,
+        box: shape.m_Scale ? vec3(shape.m_Scale, 1) : [shape.boxX ?? 1, shape.boxY ?? 1, shape.boxZ ?? 1],
+        position: vec3(shape.m_Position),
+        rotation: vec3(shape.m_Rotation),
+        randomDirection: shape.randomDirectionAmount ?? shape.randomDirection ?? 0,
+      },
+      rate: minMaxCurve(emission.enabled === 0 ? 0 : emission.rateOverTime ?? emission.rate, 0),
+      bursts: (emission.enabled === 0 ? [] : emission.m_Bursts ?? []).map((b) => ({
+        time: b.time ?? 0,
+        count: minMaxCurve(b.countCurve ?? b.minCount, b.minCount ?? 1),
+        cycles: b.cycleCount ?? 1,
+        interval: b.repeatInterval ?? 0.01,
+      })),
+      sizeOverLife: size ? minMaxCurve(size.curve, 1) : null,
+      colorOverLife: color ? minMaxGradient(color.gradient) : null,
+      rotationOverLife: rot ? minMaxCurve(rot.curve) : null,
+      velocity: vel ? { x: minMaxCurve(vel.x), y: minMaxCurve(vel.y), z: minMaxCurve(vel.z), world: vel.inWorldSpace === 1 } : null,
+      force: force ? { x: minMaxCurve(force.x), y: minMaxCurve(force.y), z: minMaxCurve(force.z), world: force.inWorldSpace === 1 } : null,
+      sheet: uv && (uv.tilesX > 1 || uv.tilesY > 1) ? { x: uv.tilesX, y: uv.tilesY, frame: minMaxCurve(uv.frameOverTime), cycles: uv.cycles ?? 1, row: uv.animationType === 1 ? (uv.randomRow ? -1 : uv.rowIndex ?? 0) : null } : null,
+      render: {
+        mode: r.m_RenderMode ?? 0,
+        material: matGuid ? stem(guidIndex.get(matGuid)) : null,
+        mesh: meshGuid && guidIndex.has(meshGuid) ? stem(guidIndex.get(meshGuid)) : null,
+        lengthScale: r.m_LengthScale ?? 2,
+        velocityScale: r.m_VelocityScale ?? 0,
+        maxSize: r.m_MaxParticleSize ?? 0.5,
+      },
     };
   }
   return out;
@@ -678,13 +1055,24 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     themes[stem(p).replace(/_Theme$/, '')] = resolveTheme(guid, guidIndex, themeCache);
     themeByGuid.set(guid, stem(p).replace(/_Theme$/, ''));
   }
-  log(`Themes: ${Object.keys(themes).join(', ')}`);
+  // 1.x: no theme assets, a mapping MonoBehaviour per city instead
+  const legacy = {};
+  if (!themeFiles.length) {
+    for (const [n, p] of byName) {
+      if (!n.endsWith('.asset') || !read(p).includes('\n  _prefabMappingsGeneric:')) continue;
+      const theme = parseLegacyTheme(p, guidIndex);
+      legacy[theme.name] = theme;
+      themes[theme.name] = theme.slots;
+    }
+  }
+  log(`Themes: ${Object.keys(themes).join(', ')}${Object.keys(legacy).length ? ' (1.x format)' : ''}`);
 
   // Boundary transitions (tube entrances/exits, …) per theme
   const boundaries = {};
   for (const theme of Object.keys(themes)) {
     const p = find(`${theme}_Boundaries.asset`);
     if (p) boundaries[theme] = parseBoundaries(p, guidIndex);
+    else if (legacy[theme]) boundaries[theme] = { transitions: legacy[theme].transitions, trackInfos: legacy[theme].trackInfos };
   }
   const transitionCount = Object.values(boundaries).reduce((n, b) => n + b.transitions.length, 0);
   log(`Transitions: ${transitionCount} in ${Object.keys(boundaries).length} themes`);
@@ -720,6 +1108,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     }
     if (effects.length) themeConfigs[theme].effects = effects;
   }
+  for (const [theme, info] of Object.entries(legacy)) themeConfigs[theme] ??= info.config;
   log(`Theme configs: ${Object.keys(themeConfigs).length}`);
 
   // Slot types declare their length in cells (BoundaryType.CellDepth); bounding boxes
@@ -746,10 +1135,34 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   transitionPrefabs.push(EXTRA_PREFABS);
   transitionPrefabs.push(Object.values(themeConfigs).filter((c) => c.background).map((c) => c.background.prefab));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.effects ?? []).map((e) => e.prefab)));
+  // 1.x: skyline layers, and the cars / short pieces composites are built from
+  const composites = new Map(Object.values(legacy).flatMap((t) => Object.entries(t.composites)));
+  transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.skylineLayers?.layers ?? []).flatMap((l) => [...l.fill, ...l.singles])));
+  transitionPrefabs.push([...composites.values()].flatMap((parts) => parts.map((p) => p.prefab)));
   const nameLists = [...Object.values(themes).flatMap((slots) => Object.values(slots)), ...transitionPrefabs];
+  // 1.x placeholder contents (and theirs, recursively)
+  const placeholderTargets = [];
+  {
+    const seen = new Set();
+    const queue = nameLists.flat();
+    while (queue.length) {
+      const name = queue.pop();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const file = find(`${name}.prefab`);
+      if (!file) continue;
+      for (const entry of Object.values(parsePlaceholders(file, guidIndex))) {
+        for (const { name: target } of entry.prefabs) {
+          placeholderTargets.push(target);
+          queue.push(target);
+        }
+      }
+    }
+  }
+  nameLists.push(placeholderTargets);
   for (const names of nameLists) {
     for (const name of names) {
-      if (name in prefabs) continue;
+      if (name in prefabs || composites.has(name)) continue;
       const src = prefabGlbs.get(`${name}.glb`);
       if (!src) {
         missing.push(name);
@@ -762,6 +1175,30 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       prefabs[name] = { glb: `glb/${path.basename(src)}`, ...stats };
       prefabGlbSrc.set(name, src);
     }
+  }
+
+  // Composites: their parts placed side by side
+  for (const [name, parts] of composites) {
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (const { prefab, pos } of parts) {
+      const bb = prefabs[prefab]?.bbox;
+      if (!bb) continue;
+      for (let k = 0; k < 3; k++) {
+        lo[k] = Math.min(lo[k], bb[0][k] + pos[k]);
+        hi[k] = Math.max(hi[k], bb[1][k] + pos[k]);
+      }
+    }
+    if (lo[0] === Infinity) {
+      missing.push(name);
+      continue;
+    }
+    prefabs[name] = {
+      parts,
+      meshes: parts.reduce((n, p) => n + (prefabs[p.prefab]?.meshes ?? 0), 0),
+      materials: sortedStrings(new Set(parts.flatMap((p) => prefabs[p.prefab]?.materials ?? []))),
+      bbox: [lo, hi],
+    };
   }
 
   // The .prefab a glb was exported from sits at the same path in the project; by name
@@ -794,6 +1231,25 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     }
     const complete = Object.entries(animations).filter(([, a]) => a.frames.every(Boolean));
     if (complete.length) info.meshAnimations = Object.fromEntries(complete);
+    const placeholders = parsePlaceholders(prefabPath, guidIndex);
+    for (const entry of Object.values(placeholders)) entry.prefabs = entry.prefabs.filter((p) => prefabs[p.name]?.glb);
+    const filled = Object.entries(placeholders).filter(([, e]) => e.prefabs.length);
+    if (filled.length) info.placeholders = Object.fromEntries(filled);
+    const effects = parseEffectPlayers(prefabPath);
+    if (Object.keys(effects).length) info.effectPlayers = effects;
+    const particles = parseParticles(prefabPath, guidIndex);
+    for (const p of Object.values(particles)) {
+      // Mesh particles (leaves, debris) need their mesh
+      if (p.render.mode === 4 && p.render.mesh) {
+        const src = meshGlbs.get(`${p.render.mesh}.glb`);
+        if (src) {
+          copyIfNewer(src, path.join(outMesh, path.basename(src)));
+          p.render.meshGlb = `mesh/${path.basename(src)}`;
+        }
+      }
+      if (p.render.material) info.materials = sortedStrings(new Set([...(info.materials ?? []), p.render.material]));
+    }
+    if (Object.keys(particles).length) info.particles = particles;
   }
 
   // Runtime-assigned track meshes (TrackController configurations)
@@ -825,6 +1281,10 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     for (const node of glbJson(path.join(out, info.glb)).nodes ?? []) {
       const base = (node.name ?? '').replace(/ \(\d+\)$/, ''); // Unity's duplicate suffix
       if (decorations.has(base) && prefabs[base]) prefabs[base].embedded = true;
+    }
+    // 1.x: spawned into another piece's placeholder (tube sides, props on a beach)
+    for (const entry of Object.values(info.placeholders ?? {})) {
+      for (const { name: target } of entry.prefabs) if (decorations.has(target)) prefabs[target].embedded = true;
     }
   }
 
@@ -882,6 +1342,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   log(`Randomizer groups: ${sumKeys('randomizers')} in ${withKey('randomizers').length} prefabs`);
   log(`LOD1+ renderers removed: ${sumKeys('lodHidden')} in ${withKey('lodHidden').length} prefabs`);
   log(`Mesh animations: ${sumKeys('meshAnimations')} in ${withKey('meshAnimations').length} prefabs`);
+  log(`Placeholders: ${sumKeys('placeholders')} in ${withKey('placeholders').length} prefabs; effect players: ${sumKeys('effectPlayers')}`);
+  log(`Particle systems: ${sumKeys('particles')} in ${withKey('particles').length} prefabs`);
   log(`Prefabs: ${Object.keys(prefabs).length} (${empty.length} without geometry, ${missing.length} missing glb)`);
   log(`Materials: ${Object.keys(materials).length}/${usedMats.size} resolved; shaders: ${JSON.stringify(shaders)}`);
   if (empty.length) log(`  no geometry: ${sortedStrings(empty).join(', ')}`);
@@ -899,6 +1361,13 @@ function splitByTheme(manifest, staging, out, log) {
     for (const n of EXTRA_PREFABS) names.add(n);
     if (config.background) names.add(config.background.prefab);
     for (const e of config.effects ?? []) names.add(e.prefab);
+    for (const l of config.skylineLayers?.layers ?? []) for (const n of [...l.fill, ...l.singles]) names.add(n);
+    for (const n of [...names]) for (const part of manifest.prefabs[n]?.parts ?? []) names.add(part.prefab);
+    for (const queue = [...names]; queue.length; ) {
+      for (const entry of Object.values(manifest.prefabs[queue.pop()]?.placeholders ?? {})) {
+        for (const { name } of entry.prefabs) if (!names.has(name)) names.add(name), queue.push(name);
+      }
+    }
     const prefabs = Object.fromEntries(sortedStrings(names).filter((n) => n in manifest.prefabs).map((n) => [n, manifest.prefabs[n]]));
     const mats = new Set(Object.values(prefabs).flatMap((p) => p.materials ?? []));
     const materials = Object.fromEntries(sortedStrings(mats).filter((m) => m in manifest.materials).map((m) => [m, manifest.materials[m]]));
@@ -906,6 +1375,7 @@ function splitByTheme(manifest, staging, out, log) {
       ...Object.values(prefabs).map((p) => p.glb).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => Object.values(p.trackConfigs ?? {}).map((c) => c.glb)).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => Object.values(p.meshAnimations ?? {}).flatMap((a) => a.frames)),
+      ...Object.values(prefabs).flatMap((p) => Object.values(p.particles ?? {}).map((e) => e.render.meshGlb)).filter(Boolean),
       ...Object.values(materials).flatMap((m) => Object.values(m.textures).map((t) => t.url)).filter(Boolean),
     ]);
     const dest = path.join(out, theme);

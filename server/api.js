@@ -226,6 +226,27 @@ const STAGES = {
   done: 'Done',
 };
 
+/**
+ * A .zip that only wraps one APK (macOS "Compress", some download sites) is unwrapped:
+ * AssetRipper reads zips as split-APK bundles (APKPure: manifest.json + APKs) and would
+ * find nothing in it. Returns the path to hand to the ripper.
+ */
+async function unwrapSinglePackage(apkPath) {
+  if (path.extname(apkPath).toLowerCase() !== '.zip') return apkPath;
+  let entries;
+  try {
+    entries = readZip(await readFile(apkPath)).filter((e) => !e.name.startsWith('__MACOSX/') && !path.basename(e.name).startsWith('.'));
+  } catch {
+    return apkPath; // let the ripper report it
+  }
+  const [only] = entries;
+  if (entries.length !== 1 || !PACKAGE_EXTENSIONS.has(path.extname(only.name).toLowerCase())) return apkPath;
+  const inner = path.join(path.dirname(apkPath), `inner${path.extname(only.name).toLowerCase()}`);
+  await writeFile(inner, only.data);
+  await rm(apkPath, { force: true });
+  return unwrapSinglePackage(inner); // a zip in a zip
+}
+
 /** Starts the oldest queued job unless one is already running (one extraction at a time). */
 function startNextJob() {
   const all = [...jobs.values()];
@@ -257,6 +278,7 @@ async function runJob(job, apkPath, sourceName) {
     if (head.toString('latin1', 0, 2) !== 'PK') {
       throw new Error('This file is not an APK (it looks like a web page or an error message). Download the APK again.');
     }
+    apkPath = await unwrapSinglePackage(apkPath);
     const [cmd, pre] = ripperCommand();
     await run(cmd, [...pre, exportDir, apkPath], (line) => {
       const m = line.match(/^@@stage (\S+)/);

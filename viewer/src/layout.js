@@ -9,7 +9,7 @@ const SEGMENT = 180; // 16 cells * 11.25
 const TRACK_TYPE_NAMES = {
   TrackNormal: /^(?!.*_shadow)/,
   GroundNormal: /^(?!.*_shadow)/,
-  TrackShadow: /_shadow$/,
+  TrackShadow: /_shadow(_mid)?$/, // 1.x: track_shadow_mid
   TrackShadowStart: /_shadow_start$/,
   TrackShadowEnd: /_shadow_end$/,
   TrackShadowStartEnd: /_shadow_start_end$/,
