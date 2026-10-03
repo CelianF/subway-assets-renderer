@@ -5,6 +5,7 @@
 //   Linux    ~/.config/Subway Assets Renderer/workspace
 import { app, BrowserWindow, dialog, shell } from 'electron';
 import path from 'node:path';
+import { startUpdates } from './updater.mjs';
 
 const APP_NAME = 'Subway Assets Renderer';
 const IS_WIN = process.platform === 'win32';
@@ -65,6 +66,7 @@ if (!app.requestSingleInstanceLock()) {
       const { start } = await import('../server/index.js');
       const port = await start({ port: 0, host: '127.0.0.1' });
       createWindow(port);
+      startUpdates(() => window);
     } catch (e) {
       dialog.showErrorBox(APP_NAME, `Could not start: ${e.message}`);
       app.quit();

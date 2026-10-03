@@ -39,7 +39,10 @@
     ],
     "artifactName": "Subway-Assets-Renderer-${version}-${os}-${arch}.${ext}",
     "mac": {
-      "target": "dmg",
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "category": "public.app-category.graphics-design",
       "hardenedRuntime": true,
       "entitlements": "app/entitlements.mac.plist",
@@ -61,5 +64,8 @@
       "provider": "github",
       "releaseType": "draft"
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }
