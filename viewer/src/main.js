@@ -4,7 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setReversedDepth, texturesReady } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces, trainLength } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI, prettyTheme } from './ui.js';
@@ -362,8 +362,15 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
     });
     return group;
   }
-  // ≤ 1.43: a chunk of the classic level library
-  if (prefab?.chunk && prefab.node) return instantiateChunk(prefab, layer, variantSeed, worldZ);
+  // ≤ 1.43: a chunk of the classic level library, or one of its trains/obstacles (studio)
+  if (prefab?.node) {
+    const obj = await instantiateChunk(prefab, layer, variantSeed, worldZ);
+    if (!obj || !prefab.offset) return obj;
+    const group = new THREE.Group();
+    obj.position.set(...prefab.offset);
+    group.add(obj);
+    return group;
+  }
   // Particle-only prefabs (glows, steam) have no geometry of their own
   if (!prefab?.glb || (!prefab.bbox && !prefab.particles)) return null;
   const cutaway = layer === 'environment' ? 'floor' : layer === 'track' ? null : 'all';
@@ -401,7 +408,7 @@ const HOLD_INDICES = [0, 1, 2, 3, 0, 4, 5, 1, 0, 2, 4, 1, 3, 2, 0, 5, 1, 0, 3, 1
  * (children flipped left/right), RandomizeOffset (a random allowed lane). Coins and
  * pickups are left out; trains and obstacles follow the layer toggles.
  */
-async function instantiateChunk(prefab, layer, seed, worldZ) {
+async function instantiateChunk(prefab, layer, seed, worldZ, { keepObstacles = false } = {}) {
   const library = await loadGlb(prefab.glb, { cutaway: 'floor' });
   const source = library.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(prefab.node));
   if (!source) return null;
@@ -415,7 +422,10 @@ async function instantiateChunk(prefab, layer, seed, worldZ) {
   for (const o of nodes) {
     const x = o.userData;
     if (!o.parent && o !== obj) continue; // removed with an ancestor
-    if (x.hide || (x.layer === 'train' && !state.trains) || (x.layer === 'obstacle' && !state.obstacles)) {
+    // In the studio the chunks keep their scenery only: trains and obstacles are placed by hand
+    const placed = prefab.chunk && !keepObstacles && state.obstacleMode === 'studio' && (x.layer === 'train' || x.layer === 'obstacle');
+    const toggled = !keepObstacles && ((x.layer === 'train' && !state.trains) || (x.layer === 'obstacle' && !state.obstacles));
+    if (x.hide || placed || toggled) {
       o.removeFromParent();
       continue;
     }
@@ -431,7 +441,7 @@ async function instantiateChunk(prefab, layer, seed, worldZ) {
     if (x.mirror && rng() < 0.5) for (const c of o.children) c.position.x *= -1;
     if (x.lanes?.length) o.position.x = x.lanes[Math.floor(rng() * x.lanes.length)];
   }
-  placeMovingTrains(obj);
+  if (prefab.chunk) placeMovingTrains(obj);
   obj.traverse((o) => {
     if (!o.isMesh) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -1155,7 +1165,7 @@ const studio = createStudio({
     saveStudio();
     rebuild({ dynamicOnly: true });
   },
-  fromRun: () => itemsToStudio(currentLayout('random').items),
+  fromRun: () => runToStudio(),
   // Skin of a train placed with "Any" before skins were fixed at placement
   actualVariant: (it) => {
     const shown = window.__viewer?.items?.find((i) => i.group === `studio${it.lane}@${it.z0}` && i.slot.startsWith('train_') && i.slot !== 'train_ramp');
@@ -1164,14 +1174,58 @@ const studio = createStudio({
   onExit: () => exitStudio(),
 });
 
-function enterStudio() {
+/**
+ * The auto-generated run as studio items. Classic chunks pick their trains and obstacles
+ * when instantiated, so those are read from the chunks as the run lays them out.
+ */
+async function runToStudio(mode = 'random') {
+  const items = currentLayout(mode).items;
+  const chunks = items.filter((it) => manifest.prefabs[it.prefab]?.chunk);
+  if (!chunks.length) return itemsToStudio(items);
+  const out = [];
+  const v = new THREE.Vector3();
+  for (const it of chunks) {
+    const obj = await instantiateChunk(manifest.prefabs[it.prefab], it.layer, it.variantSeed, it.pos[2], { keepObstacles: true });
+    if (!obj) continue;
+    obj.position.set(...it.pos);
+    obj.updateMatrixWorld(true);
+    const ramps = [];
+    const trains = [];
+    const box = new THREE.Box3();
+    obj.traverse((o) => {
+      // Names as exported, less three.js's "_2", "_3"… for repeats; classic node names hold no digits
+      const name = o.name.replace(/(_\d+)+$/, '');
+      o.getWorldPosition(v);
+      const lane = Math.max(-20, Math.min(20, Math.round(v.x / 20) * 20));
+      let m;
+      if ((m = name.match(/^(?:train_|Classic_Train_Static_\d_)(cargo|standard|sub)/i))) {
+        box.setFromObject(o);
+        if (box.isEmpty()) return;
+        const cars = Math.max(1, Math.round((box.max.z - box.min.z) / 60));
+        trains.push({ lane, z: Math.round(box.min.z), cars, variant: { cargo: 'cargo', standard: 'passenger', sub: 'subway' }[m[1].toLowerCase()] });
+      } else if (/^(train_ramp|Classic_Ramp)$/.test(name)) ramps.push({ lane, z: v.z });
+      else if ((m = name.match(/^(?:blocker_|Classic_Blocker_)(jump|roll|standard)$/i))) out.push({ type: 'obstacle', key: m[1].toLowerCase(), lane, z: Math.round(v.z) });
+      else if (/^(lightSignal|Classic_LightSignal)$/.test(name)) out.push({ type: 'signal', x: Math.round(v.x), z: Math.round(v.z), color: 'green' });
+    });
+    for (const t of trains) {
+      // A ramp just in front of the train in its lane
+      const ramp = ramps.find((r) => r.lane === t.lane && Math.abs(t.z - (r.z + 30)) < 15);
+      const z0 = ramp ? Math.round(ramp.z - 36) : t.z;
+      if (out.some((o) => o.type === 'train' && o.lane === t.lane && o.z0 === z0)) continue; // node and its mesh child
+      out.push({ type: 'train', lane: t.lane, z0, z1: t.z + trainLength(t.cars), kind: 'static', variant: t.variant, ramp: !!ramp });
+    }
+  }
+  return out;
+}
+
+async function enterStudio() {
   settings.close();
   generation.close();
   rendering.close();
   if (state.obstacleMode !== 'studio') {
     // Start from the run on screen when nothing was placed yet
     if (!state.studio.length) {
-      state.studio = itemsToStudio(currentLayout().items);
+      state.studio = await runToStudio(state.obstacleMode);
       saveStudio();
     }
     state.obstacleMode = 'studio';

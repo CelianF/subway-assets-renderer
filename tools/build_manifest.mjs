@@ -1190,10 +1190,44 @@ function parseClassic(root, project, guidIndex, log) {
       else failed++;
       return geo;
     };
+    // Studio pieces: one of each train, the ramp, blockers and the signal, as found in the
+    // chunks (the game has no separate prefabs for them)
+    const PIECES = {
+      train_static_1: [['train_cargo', 'Cargo'], ['train_standard', 'Standard'], ['train_sub', 'Subway']],
+      train_static_3: [['train_cargo_3', 'Cargo'], ['train_standard_3', 'Standard'], ['train_sub_3', 'Subway']],
+      train_static_5: [['train_cargo_5', 'Cargo'], ['train_standard_5', 'Standard'], ['train_sub_5', 'Subway']],
+      train_ramp: [['train_ramp', 'Ramp']],
+      obstacle_barrier_jump: [['blocker_jump', 'Blocker_Jump']],
+      obstacle_barrier_roll: [['blocker_roll', 'Blocker_Roll']],
+      obstacle_barrier_standard: [['blocker_standard', 'Blocker_Standard']],
+      obstacle_lightSignal: [['lightSignal', 'LightSignal']],
+    };
+    const inLibrary = new Set();
+    const collect = (i) => {
+      if (skip.has(i)) return;
+      inLibrary.add(i);
+      for (const c of json.nodes[i].children ?? []) collect(c);
+    };
+    collect(library);
+    const pieces = [];
+    for (const [slot, options] of Object.entries(PIECES)) {
+      for (const [node, label] of options) {
+        const ni = json.nodes.findIndex((n, i) => n.name === node && n.mesh != null && inLibrary.has(i) && !rename.has(i) && !extras.get(i)?.hide);
+        if (ni < 0) continue;
+        const name = `Classic_${slot.startsWith('train_static') ? `Train_Static_${slot.slice(-1)}_` : ''}${label}`;
+        rename.set(ni, name);
+        // Trains start at their origin elsewhere (the studio lays them from there); these
+        // have it a wagon's half length in
+        let bbox = subtreeBbox(ni);
+        const offset = slot.startsWith('train_static') && bbox ? [0, 0, -bbox[0][2]] : null;
+        if (offset) bbox = bbox.map(([x, y, z]) => [x, y, round(z + offset[2], 3)]);
+        pieces.push({ name, slot, bbox, offset });
+      }
+    }
     const libraryGlb = glbSubset(glb, library, extras, rename, skip, geometryFor);
     if (rebuilt || failed) log(`  Primitives rebuilt from mesh assets (UVs): ${rebuilt}${failed ? `, ${failed} left without` : ''}`);
     if (swapped) log(`  Primitives swapped for ${meshPrefix} meshes: ${swapped}`);
-    return { name, chunks, config, library: libraryGlb, textureSwaps };
+    return { name, chunks, pieces, config, library: libraryGlb, textureSwaps };
   }
   return null;
 }
@@ -1700,7 +1734,10 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   }
   // ≤ 1.43: no themes either, the level is a scene of hand-built chunks
   const classic = !Object.keys(themes).length ? parseClassic(root, project, guidIndex, log) : null;
-  if (classic) themes[classic.name] = { classic_chunk: classic.chunks.map((c) => c.name) };
+  if (classic) {
+    themes[classic.name] = { classic_chunk: classic.chunks.map((c) => c.name) };
+    for (const p of classic.pieces) (themes[classic.name][p.slot] ??= []).push(p.name);
+  }
   log(`Themes: ${Object.keys(themes).join(', ')}${Object.keys(legacy).length ? ' (1.x format)' : ''}${classic ? ' (classic chunks)' : ''}`);
 
   // Boundary transitions (tube entrances/exits, …) per theme
@@ -1776,7 +1813,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const composites = new Map(Object.values(legacy).flatMap((t) => Object.entries(t.composites)));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.skylineLayers?.layers ?? []).flatMap((l) => [...l.fill, ...l.singles])));
   transitionPrefabs.push([...composites.values()].flatMap((parts) => parts.map((p) => p.prefab)));
-  const classicNames = new Set(classic?.chunks.map((c) => c.name) ?? []);
+  const classicNames = new Set([...(classic?.chunks ?? []), ...(classic?.pieces ?? [])].map((c) => c.name));
   const nameLists = [...Object.values(themes).flatMap((slots) => Object.values(slots)), ...transitionPrefabs];
   // 1.x placeholder contents (and theirs, recursively)
   // Placeholders can name generic prefabs ("event_3_gen"): the game swaps in the city's own
@@ -1824,6 +1861,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     writeFileSync(file, classic.library);
     const { materials } = glbStats(file);
     for (const c of classic.chunks) prefabs[c.name] = { glb: 'glb/Classic_chunks.glb', node: c.name, meshes: 1, materials, bbox: c.bbox, chunk: c.chunk };
+    for (const p of classic.pieces) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', node: p.name, meshes: 1, materials, bbox: p.bbox, ...(p.offset ? { offset: p.offset } : {}) };
   }
 
   // 1.x: the generic role of each themed prefab (name rules in the viewer use it)

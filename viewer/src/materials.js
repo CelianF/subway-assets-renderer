@@ -226,8 +226,11 @@ vec3 sampleCubeStrip(sampler2D strip, vec3 d) {
   if (a.x >= a.y && a.x >= a.z) { ma = a.x; face = d.x > 0.0 ? 0.0 : 1.0; st = vec2(d.x > 0.0 ? -d.z : d.z, -d.y); }
   else if (a.y >= a.z) { ma = a.y; face = d.y > 0.0 ? 2.0 : 3.0; st = vec2(d.x, d.y > 0.0 ? d.z : -d.z); }
   else { ma = a.z; face = d.z > 0.0 ? 4.0 : 5.0; st = vec2(d.z > 0.0 ? d.x : -d.x, -d.y); }
-  vec2 uv = clamp((st / ma + 1.0) * 0.5, 0.002, 0.998);
-  return texture2D(strip, vec2(uv.x, (face + uv.y) / 6.0)).rgb;
+  // Half a texel in from each face's edges, and the top mip level: across a face boundary
+  // the lookup jumps, which would pick a blurry mip and draw seams (the strips come pre-blurred)
+  float inset = 0.5 / float(textureSize(strip, 0).x);
+  vec2 uv = clamp((st / ma + 1.0) * 0.5, inset, 1.0 - inset);
+  return textureLod(strip, vec2(uv.x, (face + uv.y) / 6.0), 0.0).rgb;
 }
 #endif
 #ifdef USE_COLOR
@@ -244,6 +247,7 @@ ${CUT_MAIN}
   uv.y += sin(vUv.x * uUvWobble.w * 6.2832 + uTime * uUvWobbleSpeed.y) * uUvWobble.z * 0.1;
 #endif
   vec4 c = texture2D(uMap, uv);
+  vec3 base = c.rgb;
 #ifdef ALTERNATE
   c = mix(c, texture2D(uAltTex, vUv), uAltRatio);
 #endif
@@ -261,7 +265,8 @@ ${CUT_MAIN}
 #endif
 #ifdef REFLECTIONS
 #ifdef CUBE_STRIP
-  vec3 refl = sampleCubeStrip(uRefTex, reflect(normalize(vWorld - cameraPosition), normalize(vNormalW)));
+  vec3 viewDir = normalize(vWorld - cameraPosition);
+  vec3 refl = sampleCubeStrip(uRefTex, reflect(viewDir, normalize(vNormalW)));
 #else
   vec3 n = normalize(vNormalV);
   vec3 refl = texture2D(uRefTex, n.xy * 0.5 + 0.5).rgb;
@@ -269,7 +274,13 @@ ${CUT_MAIN}
 #ifdef ALTERNATE
   refl = mix(refl, texture2D(uAltRef, n.xy * 0.5 + 0.5).rgb, uAltRatio);
 #endif
+#ifdef DISTORTED_REFLECT
+  // 1.x "Unlit with overlay and Reflection": faint head-on, strong at grazing angles, and
+  // scaled by the texture's brightness (dark paint barely reflects)
+  c.rgb += refl * uRefColor.rgb * (1.0 - clamp(-dot(viewDir, normalize(vNormalW)), 0.0, 1.0)) * 0.495 * (base.r + base.g + base.b);
+#else
   c.rgb += refl * uRefColor.rgb * uRefColor.a;
+#endif
 #endif
 #ifdef SCREEN_MASK
   // ScreenMask (rails): a highlight band picked by screen height, added on top
@@ -456,6 +467,7 @@ function translateDistorted(def) {
     textures._RefCube = { ...textures._Cube, cubeStrip: true };
     colors._RefColor = colors._ReflectColor ?? [1, 1, 1, 0.5];
     floats._HasReflections = 1;
+    floats._DistortedReflect = 1;
   }
   if (/SPmask/i.test(def.shader) && textures._Mask) {
     textures._MaskTex = textures._Mask;
@@ -538,6 +550,7 @@ export class MaterialLibrary {
     const refTex = this.tex(def, '_RefCube');
     if (on('_HasReflections', 'REFLECTIONS_ENABLED') && refTex) defines.REFLECTIONS = '';
     if (defines.REFLECTIONS !== undefined && def.textures._RefCube?.cubeStrip) defines.CUBE_STRIP = '';
+    if (defines.CUBE_STRIP !== undefined && f._DistortedReflect) defines.DISTORTED_REFLECT = '';
     if (f._WaterWave) Object.assign(defines, { WATER_WAVE: '', UV_WOBBLE: '' });
     // Only the shared foam texture is a channel-packed mask; themed fountain textures are color
     if (/_Common_FountainTexture/i.test(main?.url ?? '')) defines.MASK_TEXTURE = '';

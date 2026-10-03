@@ -187,6 +187,8 @@ export function studioCatalog(manifest, themeName, trainTheme = null) {
     // Pillars come with pillar halls: not a free-placement tool
     obstacles: Object.fromEntries(Object.entries(OBSTACLE_SLOTS).filter(([k, slot]) => k !== 'pillar' && has(slot))),
     signal: has('obstacle_lightSignal'),
+    // Classic maps model their rails into the chunks: no track to take out
+    tracks: !slots.classic_chunk?.length,
   };
 }
 
@@ -204,7 +206,6 @@ export function generateLayout(
   gen = { ...DEFAULT_GEN, ...gen };
   // Trains (and ramps) can come from another theme
   const slots = themeSlots(manifest, themeName, trainTheme);
-  if (slots.classic_chunk?.length) return classicLayout(manifest, slots.classic_chunk, seed, sections);
   const has = (slot) => slots[slot]?.length > 0;
   const rng = mulberry32(seed);
   const items = [];
@@ -223,6 +224,16 @@ export function generateLayout(
     items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(placeRng() * 2 ** 31), ...extra });
     return prefab;
   };
+  // ≤ 1.43: the game's hand-built chunks; in the studio, hand-placed trains and obstacles
+  // on top (the chunks leave theirs out)
+  if (slots.classic_chunk?.length) {
+    const classic = classicLayout(manifest, slots.classic_chunk, seed, sections);
+    if (obstacleMode !== 'studio') return classic;
+    items.push(...classic.items);
+    placeStudio();
+    return { items, length: classic.length };
+  }
+
   // Boundary runs per side of the track, for the theme's transition pieces
   const runs = { left: [], right: [] };
   const addRun = (side, slot, z0, z1) => runs[side].push({ slot, z0, z1 });

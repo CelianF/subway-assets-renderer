@@ -560,10 +560,10 @@ export function createStudio(ctx) {
       el(
         'div',
         { class: 'studio-row studio-modes' },
-        ...MODES.map(([m, label]) => btn(label, mode === m, () => setTool(m === 'place' ? placeTool : { type: m }), m === 'remove' ? 'danger' : '')),
+        ...MODES.filter(([m]) => m !== 'noTracks' || cat.tracks !== false).map(([m, label]) => btn(label, mode === m, () => setTool(m === 'place' ? placeTool : { type: m }), m === 'remove' ? 'danger' : '')),
         btn('💥 Wipe', false, () => confirm('Remove everything placed, including no-track zones?') && (setTool(tool), commit([], 'Wiped')), 'danger'),
         el('span', { class: 'studio-sep' }),
-        el('button', { title: 'Replace everything with the auto-generated run', onclick: () => commit(ctx.fromRun(), 'Copied the auto-generated run') }, '⟳ Copy auto run'),
+        el('button', { title: 'Replace everything with the auto-generated run', onclick: async () => commit(await ctx.fromRun(), 'Copied the auto-generated run') }, '⟳ Copy auto run'),
         el('button', { class: 'primary', onclick: () => ctx.onExit() }, 'Done'),
       ),
       el('div', { class: 'studio-row studio-status' }, info, el('span', { class: 'studio-hint' }, 'Drag or wheel: scroll · Ctrl+wheel: zoom · Esc: cancel')),
