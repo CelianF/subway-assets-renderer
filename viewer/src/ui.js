@@ -183,7 +183,7 @@ export function createUI(manifest, actions) {
           ...(DEBUG ? [['B', 'Piece browser']] : []),
           ['G', 'Screenshot gallery'],
           ['H', 'This help'],
-        ].map(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]),
+        ].flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]),
       ),
       el('p', {}, 'Click anywhere to close.'),
     ),

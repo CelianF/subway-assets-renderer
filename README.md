@@ -4,6 +4,16 @@ Environment viewer for Subway Surfers maps. Upload an APK, and each map it conta
 
 No game assets are included in this repo. Everything is extracted locally from your own game package.
 
+![Flying through London](docs/screenshots/viewer.png)
+
+| Home: your maps | Generation |
+|---|---|
+| ![Home page with one card per map](docs/screenshots/home.png) | ![Generation panel: seed, sections, building pieces](docs/screenshots/generation.png) |
+| **Rendering** | **Studio** |
+| ![Rendering panel: fog and skyline](docs/screenshots/rendering.png) | ![Studio: top view of the run with placement tools](docs/screenshots/studio.png) |
+| **Settings** | **Controls (H)** |
+| ![Settings menu: camera and screenshot options](docs/screenshots/settings.png) | ![Keyboard and mouse controls](docs/screenshots/help.png) |
+
 ## Download
 
 Get the app for your OS from the [Releases](https://github.com/CelianF/subway-assets-renderer/releases) page. Nothing else to install.
