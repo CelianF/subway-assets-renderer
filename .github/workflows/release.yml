@@ -57,12 +57,30 @@ jobs:
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY }}
         run: |
           extra=()
-          if [ "$RUNNER_OS" = macOS ]; then
+          if [ "$RUNNER_OS" != macOS ]; then
+            # The Developer ID certificate is for macOS only: electron-builder would
+            # otherwise sign the Windows installer with it
+            unset CSC_LINK CSC_KEY_PASSWORD
+          else
             if [ -z "$CSC_LINK" ]; then
               # No Developer ID yet: ad-hoc signature (needed to run on Apple Silicon at all)
-              unset CSC_LINK CSC_KEY_PASSWORD
               extra+=(-c.mac.identity=-)
+            else
+              # Our own keychain: electron-builder's set-key-partition-list fails on
+              # current macOS runners. It then finds the identity by auto-discovery.
+              keychain="$RUNNER_TEMP/signing.keychain-db"
+              keychain_password=$(openssl rand -hex 16)
+              security create-keychain -p "$keychain_password" "$keychain"
+              security set-keychain-settings -lut 21600 "$keychain"
+              security unlock-keychain -p "$keychain_password" "$keychain"
+              printf '%s' "$CSC_LINK" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+              security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+              rm "$RUNNER_TEMP/cert.p12"
+              security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
+              security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+              export CSC_KEYCHAIN="$keychain"
             fi
+            unset CSC_LINK CSC_KEY_PASSWORD
             if [ -n "$APPLE_API_KEY_CONTENT" ]; then
               export APPLE_API_KEY="$RUNNER_TEMP/apple_api_key.p8"
               printf '%s' "$APPLE_API_KEY_CONTENT" > "$APPLE_API_KEY"
