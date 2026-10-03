@@ -18,7 +18,7 @@ No game assets are included in this repo. Everything is extracted locally from y
 
 Get the app for your OS from the [Releases](https://github.com/CelianF/subway-assets-renderer/releases) page. Nothing else to install.
 
-- **macOS** (`.dmg`, `arm64` for Apple Silicon, `x64` for Intel): the app is not notarized yet, so after copying it to Applications run `xattr -cr "/Applications/Subway Assets Renderer.app"` once, or allow it in System Settings → Privacy & Security.
+- **macOS** (`.dmg`, `arm64` for Apple Silicon, `x64` for Intel): signed and notarized, open it and drag the app to Applications.
 - **Windows** (`.exe`): the installer is not signed. When SmartScreen warns, click *More info* → *Run anyway*.
 - **Linux** (`.AppImage`): `chmod +x Subway-Assets-Renderer-*.AppImage`, then run it.
 
