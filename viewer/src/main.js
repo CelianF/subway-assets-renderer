@@ -417,6 +417,7 @@ async function instantiateChunk(prefab, layer, seed, worldZ, { keepObstacles = f
   obj.updateMatrixWorld(true); // distances along the chunk, for RandomizerHold
   const rng = mulberry32(seed);
   const holdStart = state.seed % HOLD_INDICES.length;
+  let chunkStep = null;
   const nodes = [];
   obj.traverse((o) => nodes.push(o));
   for (const o of nodes) {
@@ -434,7 +435,10 @@ async function instantiateChunk(prefab, layer, seed, worldZ, { keepObstacles = f
       for (const c of [...o.children]) if (c !== keep) c.removeFromParent();
     } else if (x.pick === 'hold' && x.hold?.length) {
       const z = worldZ + new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).z;
-      const slot = HOLD_INDICES[(holdStart + Math.floor(z / 3000) + holdStart) % HOLD_INDICES.length];
+      // The game keeps one look (tunnel, forest, city…) for 3000 units; mixed, each chunk
+      // draws its own from the same sequence (so with the game's proportions)
+      const step = state.gen.classicMix ? (chunkStep ??= Math.floor(mulberry32(seed ^ 0x686f6c64)() * HOLD_INDICES.length)) : Math.floor(z / 3000);
+      const slot = HOLD_INDICES[(holdStart + step + holdStart) % HOLD_INDICES.length];
       const keep = o.children[x.hold[slot]];
       for (const c of [...o.children]) if (c !== keep) c.removeFromParent();
     }
@@ -1004,6 +1008,20 @@ const generation = createSettings(
             ['gate', 'Gates', hasSlot('boundary_gate')],
             ['epic', 'Landmark', hasSlot('boundary_epic_start')],
           ]),
+        },
+        {
+          title: 'Scenery',
+          visible: () => hasSlot('classic_chunk'),
+          controls: [
+            {
+              type: 'toggle',
+              label: 'Mix scenery',
+              title: 'Each section picks its own look (tunnel, forest, city…). Off: long stretches of one look, as in the game',
+              obj: state.gen,
+              key: 'classicMix',
+              onChange: regen,
+            },
+          ],
         },
         {
           title: 'Pillars',

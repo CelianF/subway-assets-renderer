@@ -78,6 +78,7 @@ export const DEFAULT_GEN = {
   signals: true,
   decorations: true,
   fixPillars: true, // pillar halls always keep their pillars (studio, obstacles off)
+  classicMix: true, // ≤ 1.43: scenery picked per chunk instead of the game's 3000-unit stretches
   pieces: {}, // building piece key ("low_01", "high_03"…) -> false to leave it out
   density: 1, // obstacles per distance (gaps shrink as it grows)
   trainShare: 0.55, // chance a spot gets a train rather than an obstacle
