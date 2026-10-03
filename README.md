@@ -20,6 +20,7 @@ npm run dev          # http://localhost:5173
 ## Using it
 
 1. **Home page**: drop an `.apk` (APKPure `.zip` and `.xapk` work too). Extraction takes a few minutes. Each map becomes an environment card with Open and Delete.
+   If a map with the same name and game version is already installed, a dialog asks per map: **Ignore** (keep the existing one), **Keep both** (the new one is saved as a numbered copy) or **Replace**. Variants of a city (e.g. an event skin) are separate maps and never collide.
 2. **Sharing**: *Share* on a card downloads a `.subwaymap` file. Drop it on someone else's home page to install the map, with no APK or extraction needed. A `.subwaymap` is a plain zip of the environment folder plus a `subwaymap.json` header.
 3. **Viewer**: fly around the map. *← Environments* goes back to pick another map.
    - Drag to look, WASD to move, Space/Shift for up/down, Ctrl to sprint, −/= for fly speed, mouse wheel for field of view. **M** opens the settings menu, **Tab** hides the interface, P takes a screenshot, H shows help (add `?debug=true` to the URL for the piece browser, B).

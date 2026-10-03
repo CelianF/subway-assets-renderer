@@ -76,6 +76,56 @@ async function listEnvs() {
   return out.sort((a, b) => a.theme.localeCompare(b.theme) || String(b.gameVersion).localeCompare(String(a.gameVersion)));
 }
 
+// ---------------------------------------------------------------- installing environments
+
+const CONFLICT_POLICIES = new Set(['replace', 'keep', 'skip']);
+
+async function readEnv(id) {
+  try {
+    return JSON.parse(await readFile(path.join(ENVS, id, 'env.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Moves a built environment folder into ENVS. When the map + version already exists:
+ * 'replace' overwrites it, 'keep' installs a numbered copy next to it, 'skip' drops it.
+ * @returns the installed env, or null when skipped
+ */
+async function placeEnv(srcDir, baseId, policy, fields) {
+  await mkdir(ENVS, { recursive: true });
+  let id = baseId;
+  let copy;
+  if (existsSync(path.join(ENVS, baseId))) {
+    if (policy === 'skip') {
+      await rm(srcDir, { recursive: true, force: true });
+      return null;
+    }
+    if (policy === 'keep') {
+      for (copy = 2; existsSync(path.join(ENVS, `${baseId}_${copy}`)); copy++);
+      id = `${baseId}_${copy}`;
+    } else {
+      await rm(path.join(ENVS, baseId), { recursive: true, force: true });
+    }
+  }
+  const env = { ...fields, id, ...(copy ? { copy } : {}) };
+  if (!copy) delete env.copy;
+  await writeFile(path.join(srcDir, 'env.json'), JSON.stringify(env, null, 1));
+  await rename(srcDir, path.join(ENVS, id));
+  return env;
+}
+
+/** Existing environments a list of new map ids would collide with. */
+async function findConflicts(maps) {
+  const out = [];
+  for (const m of maps) {
+    const existing = await readEnv(m.id);
+    if (existing) out.push({ id: m.id, theme: m.theme, gameVersion: m.gameVersion, existingSource: existing.source, existingDate: existing.createdAt });
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- .subwaymap packages
 // A .subwaymap is a zip of one environment folder plus a subwaymap.json header:
 //   subwaymap.json  { format, id, theme, gameVersion, createdAt }
@@ -103,24 +153,28 @@ async function exportEnv(id) {
   return { env, zip: writeZip(entries) };
 }
 
-async function importEnv(buf, sourceName) {
+async function importEnv(buf, sourceName, policy = null) {
   const entries = readZip(buf);
   const headerEntry = entries.find((e) => e.name === 'subwaymap.json');
   if (!headerEntry) throw new Error('Not a .subwaymap package (subwaymap.json missing)');
   const header = JSON.parse(headerEntry.data.toString('utf8'));
   if (header.format > SUBWAYMAP_FORMAT) throw new Error('This .subwaymap was made by a newer version of the viewer');
   if (!entries.some((e) => e.name === 'manifest.json')) throw new Error('Package has no manifest.json');
-  const id = slug(header.id ?? `${header.theme}_${header.gameVersion}`);
+  const id = slug(`${header.theme}_${header.gameVersion}`);
+  if (!policy) {
+    const conflicts = await findConflicts([{ id, theme: header.theme, gameVersion: header.gameVersion }]);
+    if (conflicts.length) return { conflicts };
+  }
   const staging = path.join(JOBS, `import-${randomUUID()}`);
   try {
-    return await installPackage(entries, header, id, staging, sourceName);
+    return await installPackage(entries, header, id, staging, sourceName, policy ?? 'replace');
   } catch (e) {
     await rm(staging, { recursive: true, force: true });
     throw e;
   }
 }
 
-async function installPackage(entries, header, id, staging, sourceName) {
+async function installPackage(entries, header, id, staging, sourceName, policy) {
   for (const { name, data } of entries) {
     if (name === 'subwaymap.json') continue;
     const target = path.resolve(staging, name);
@@ -128,22 +182,17 @@ async function installPackage(entries, header, id, staging, sourceName) {
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, data);
   }
-  const env = {
+  const fields = {
     thumbnail: entries.some((e) => e.name === 'thumbnail.jpg'),
     ...JSON.parse(entries.find((e) => e.name === 'env.json')?.data.toString('utf8') ?? '{}'),
-    id,
     theme: header.theme,
     gameVersion: header.gameVersion,
     importedFrom: sourceName,
   };
-  env.source ??= sourceName;
-  env.createdAt ??= new Date().toISOString();
-  await writeFile(path.join(staging, 'env.json'), JSON.stringify(env, null, 1));
-  await mkdir(ENVS, { recursive: true });
-  const dest = path.join(ENVS, id);
-  await rm(dest, { recursive: true, force: true }); // same map + version: replace
-  await rename(staging, dest);
-  return env;
+  fields.source ??= sourceName;
+  fields.createdAt ??= new Date().toISOString();
+  const env = await placeEnv(staging, id, policy, fields);
+  return env ?? { skipped: true, theme: header.theme, gameVersion: header.gameVersion };
 }
 
 // ---------------------------------------------------------------- extraction job
@@ -193,21 +242,40 @@ async function runJob(job, apkPath, sourceName) {
     await run(pythonCommand(), ['tools/build_manifest.py', exportDir, '--split', '--out', splitDir, '--source-name', sourceName], log);
     await rm(exportDir, { recursive: true, force: true }); // ~2 GB of intermediate files
 
-    setStage('install');
-    await mkdir(ENVS, { recursive: true });
+    const maps = [];
     for (const theme of await readdir(splitDir)) {
       const manifest = JSON.parse(await readFile(path.join(splitDir, theme, 'manifest.json'), 'utf8'));
-      const version = manifest.source?.gameVersion ?? 'unknown';
-      const id = slug(`${theme}_${version}`);
-      const dest = path.join(ENVS, id);
-      await rm(dest, { recursive: true, force: true }); // re-extracting the same version replaces it
-      await rename(path.join(splitDir, theme), dest);
-      const env = { id, theme, gameVersion: version, source: sourceName, createdAt: new Date().toISOString(), thumbnail: false };
-      await writeFile(path.join(dest, 'env.json'), JSON.stringify(env, null, 1));
-      job.envs.push(id);
+      const gameVersion = manifest.source?.gameVersion ?? 'unknown';
+      maps.push({ theme, gameVersion, id: slug(`${theme}_${gameVersion}`) });
+    }
+    if (!maps.length) throw new Error('No map found in this package: this game version is not supported.');
+
+    // Maps already installed (same map, same version): ask what to do, per map
+    const conflicts = await findConflicts(maps);
+    let choices = {};
+    if (conflicts.length) {
+      job.status = 'conflict';
+      job.conflicts = conflicts;
+      job.label = 'Waiting for your choice';
+      choices = await new Promise((resolve) => (job.resolve = resolve));
+      job.status = 'running';
+      delete job.conflicts;
+    }
+
+    setStage('install');
+    for (const m of maps) {
+      const policy = CONFLICT_POLICIES.has(choices[m.id]) ? choices[m.id] : 'replace';
+      const env = await placeEnv(path.join(splitDir, m.theme), m.id, policy, {
+        theme: m.theme,
+        gameVersion: m.gameVersion,
+        source: sourceName,
+        createdAt: new Date().toISOString(),
+        thumbnail: false,
+      });
+      if (env) job.envs.push(env.id);
+      else job.skipped = (job.skipped ?? 0) + 1;
     }
     await rm(dir, { recursive: true, force: true });
-    if (!job.envs.length) throw new Error('No map found in this package: this game version is not supported.');
     setStage('done');
     job.status = 'done';
   } catch (e) {
@@ -284,8 +352,9 @@ export async function handle(req, res) {
     if (parts[1] === 'import' && req.method === 'POST') {
       const name = path.basename(url.searchParams.get('name') ?? 'map.subwaymap');
       await mkdir(JOBS, { recursive: true });
-      const env = await importEnv(await readBody(req, MAX_PACKAGE), name);
-      sendJson(res, 200, env);
+      const policy = CONFLICT_POLICIES.has(url.searchParams.get('onConflict')) ? url.searchParams.get('onConflict') : null;
+      const result = await importEnv(await readBody(req, MAX_PACKAGE), name, policy);
+      sendJson(res, result.conflicts ? 409 : 200, result);
       return true;
     }
     // PUT /api/envs/:id/thumbnail  (image/jpeg body)
@@ -325,14 +394,26 @@ export async function handle(req, res) {
     }
     // GET /api/jobs  (running jobs, so a reloaded home page can resume showing progress)
     if (parts[1] === 'jobs' && parts.length === 2 && req.method === 'GET') {
-      sendJson(res, 200, [...jobs.values()].filter((j) => j.status === 'running').map((j) => ({ id: j.id, source: j.source, stage: j.stage })));
+      sendJson(res, 200, [...jobs.values()].filter((j) => j.status === 'running' || j.status === 'conflict').map((j) => ({ id: j.id, source: j.source, stage: j.stage })));
+      return true;
+    }
+    // POST /api/jobs/:id/resolve  { choices: { <envId>: 'replace' | 'keep' | 'skip' } }
+    if (parts[1] === 'jobs' && parts[3] === 'resolve' && req.method === 'POST') {
+      const job = jobs.get(parts[2]);
+      if (!job?.resolve) return sendJson(res, 409, { error: 'Nothing to resolve' }), true;
+      const { choices = {} } = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const resolve = job.resolve;
+      delete job.resolve;
+      resolve(choices);
+      sendJson(res, 200, { ok: true });
       return true;
     }
     // GET /api/jobs/:id
     if (parts[1] === 'jobs' && parts.length === 3 && req.method === 'GET') {
       const job = jobs.get(parts[2]);
       if (!job) return sendJson(res, 404, { error: 'Unknown job' }), true;
-      sendJson(res, 200, { ...job, log: job.log.slice(-12) });
+      const { resolve, ...visible } = job;
+      sendJson(res, 200, { ...visible, log: job.log.slice(-12) });
       return true;
     }
     sendJson(res, 404, { error: 'Unknown endpoint' });

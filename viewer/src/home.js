@@ -37,7 +37,7 @@ async function loadEnvs() {
           'div',
           { class: 'env-info' },
           el('h3', {}, prettyTheme(env.theme)),
-          el('p', {}, `v${env.gameVersion}`),
+          el('p', {}, `v${env.gameVersion}${env.copy ? ` · copy ${env.copy}` : ''}`),
           el(
             'div',
             { class: 'env-actions' },
@@ -76,19 +76,26 @@ function showJob(label, fraction, log = '') {
 async function installPackage(file) {
   $('drop').classList.add('busy');
   $('job').classList.remove('failed');
-  try {
-    const env = await new Promise((resolve, reject) => {
+  const send = (onConflict) =>
+    new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/import?name=${encodeURIComponent(file.name)}`);
+      xhr.open('POST', `/api/import?name=${encodeURIComponent(file.name)}${onConflict ? `&onConflict=${onConflict}` : ''}`);
       xhr.upload.onprogress = (e) => e.lengthComputable && showJob(`Installing ${file.name}`, e.loaded / e.total);
       xhr.onload = () => {
         const body = JSON.parse(xhr.responseText || '{}');
-        xhr.status < 300 ? resolve(body) : reject(new Error(body.error ?? xhr.statusText));
+        xhr.status < 300 || xhr.status === 409 ? resolve(body) : reject(new Error(body.error ?? xhr.statusText));
       };
       xhr.onerror = () => reject(new Error('Upload failed'));
       xhr.send(file);
     });
-    showJob(`Installed ${prettyTheme(env.theme)} (v${env.gameVersion})`, 1);
+  try {
+    let env = await send(null);
+    if (env.conflicts) {
+      const choices = await askConflicts(env.conflicts);
+      env = await send(choices[env.conflicts[0].id]);
+    }
+    if (env.skipped) showJob(`Kept the existing ${prettyTheme(env.theme)} (v${env.gameVersion})`, 1);
+    else showJob(`Installed ${prettyTheme(env.theme)} (v${env.gameVersion})${env.copy ? ` as copy ${env.copy}` : ''}`, 1);
   } catch (e) {
     showJob(`Install failed: ${e.message}`, null);
     $('job').classList.add('failed');
@@ -100,6 +107,76 @@ async function installPackage(file) {
 
 /** Routes a dropped/chosen file: .subwaymap installs, anything else extracts. */
 const handleFile = (file) => (/\.subwaymap$/i.test(file.name) ? installPackage(file) : upload(file));
+
+/**
+ * "This map already exists" dialog: one choice per map (ignore / keep both / replace),
+ * with buttons to apply a choice to all. Resolves to { envId: policy }.
+ */
+let conflictOpen = false;
+function askConflicts(conflicts) {
+  if (conflictOpen) return new Promise(() => {}); // a poll tick while the dialog is up
+  conflictOpen = true;
+  return new Promise((resolve) => {
+    const choices = Object.fromEntries(conflicts.map((c) => [c.id, 'keep']));
+    const POLICIES = [
+      ['skip', 'Ignore', 'Keep the existing map, drop the new one'],
+      ['keep', 'Keep both', 'Save the new one as a copy next to it'],
+      ['replace', 'Replace', 'Overwrite the existing map'],
+    ];
+    const rows = conflicts.map((c) => {
+      const buttons = POLICIES.map(([policy, label, title]) =>
+        el('button', { class: `choice ${policy === 'replace' ? 'danger' : ''}`, 'data-policy': policy, title, onclick: () => set(c.id, policy) }, label),
+      );
+      const date = c.existingDate ? new Date(c.existingDate).toLocaleDateString() : '';
+      return {
+        id: c.id,
+        buttons,
+        node: el(
+          'div',
+          { class: 'conflict-row' },
+          el('div', {}, el('strong', {}, `${prettyTheme(c.theme)} v${c.gameVersion}`), el('small', {}, `Already installed${date ? ` on ${date}` : ''}${c.existingSource ? ` from ${c.existingSource}` : ''}`)),
+          el('div', { class: 'choices' }, ...buttons),
+        ),
+      };
+    });
+    function set(id, policy) {
+      choices[id] = policy;
+      for (const r of rows) if (r.id === id) r.buttons.forEach((b) => b.classList.toggle('active', b.dataset.policy === policy));
+    }
+    const overlay = el(
+      'div',
+      { class: 'modal-overlay' },
+      el(
+        'div',
+        { class: 'modal' },
+        el('h3', {}, conflicts.length === 1 ? 'This map already exists' : `${conflicts.length} maps already exist`),
+        el('p', { class: 'muted' }, 'Same map and same game version. Small variants of a city (e.g. an event skin) are separate maps and never collide.'),
+        ...rows.map((r) => r.node),
+        conflicts.length > 1
+          ? el('div', { class: 'conflict-all' }, el('span', { class: 'muted' }, 'All:'), ...POLICIES.map(([policy, label]) => el('button', { onclick: () => conflicts.forEach((c) => set(c.id, policy)) }, label)))
+          : null,
+        el(
+          'div',
+          { class: 'modal-actions' },
+          el(
+            'button',
+            {
+              class: 'primary',
+              onclick: () => {
+                overlay.remove();
+                conflictOpen = false;
+                resolve(choices);
+              },
+            },
+            'Continue',
+          ),
+        ),
+      ),
+    );
+    conflicts.forEach((c) => set(c.id, 'keep'));
+    document.body.append(overlay);
+  });
+}
 
 async function upload(file) {
   $('drop').classList.add('busy');
@@ -132,10 +209,17 @@ async function followJob(jobId) {
       const res = await fetch(`/api/jobs/${jobId}`);
       if (!res.ok) break; // server restarted: the job is gone
       const job = await res.json();
+      if (job.status === 'conflict') {
+        showJob('Some maps already exist', null);
+        const choices = await askConflicts(job.conflicts);
+        await fetch(`/api/jobs/${jobId}/resolve`, { method: 'POST', body: JSON.stringify({ choices }) });
+        continue;
+      }
       const step = Math.max(0, STAGE_ORDER.indexOf(job.stage));
       showJob(job.label ?? job.stage, 0.1 + (0.9 * step) / (STAGE_ORDER.length - 1), job.log.join('\n'));
       if (job.status === 'done') {
-        showJob(`Done: ${job.envs.length} environment${job.envs.length === 1 ? '' : 's'} extracted`, 1, job.warning ? `Note: ${job.warning}` : '');
+        const skipped = job.skipped ? `, ${job.skipped} kept as they were` : '';
+        showJob(`Done: ${job.envs.length} environment${job.envs.length === 1 ? '' : 's'} installed${skipped}`, 1, job.warning ? `Note: ${job.warning}` : '');
         break;
       }
       if (job.status === 'error') {
