@@ -77,9 +77,10 @@ export const DEFAULT_GEN = {
   obstacles: { jump: true, roll: true, standard: true, bush: true, dumpster: true, powerBox: true, pillar: true },
   signals: true,
   decorations: true,
-  fixPillars: true, // pillar halls always keep their pillars (studio, obstacles off)
   classicMix: true, // ≤ 1.43: scenery picked per chunk instead of the game's 3000-unit stretches
   pieces: {}, // building piece key ("low_01", "high_03"…) -> false to leave it out
+  variants: {}, // landmark variant ("prefab|group|child") -> false to leave it out
+  showcase: false, // debug: no randomness, every piece and landmark variant laid out once
   density: 1, // obstacles per distance (gaps shrink as it grows)
   trainShare: 0.55, // chance a spot gets a train rather than an obstacle
 };
@@ -98,7 +99,7 @@ const OBSTACLE_SLOTS = {
  * whose [zMinimum, zMaximum) window holds the current distance and that aren't still in use,
  * picked by probability. About 720 units per section.
  */
-function classicLayout(manifest, names, seed, sections) {
+function classicLayout(manifest, names, seed, sections, showcase = false) {
   const rng = mulberry32(seed);
   const all = names.map((name) => ({ name, ...manifest.prefabs[name]?.chunk }));
   const chunks = all.filter((c) => c.zSize > 0 && !c.intro);
@@ -109,6 +110,14 @@ function classicLayout(manifest, names, seed, sections) {
   if (intro) items.push({ prefab: intro.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, 0], variantSeed: Math.floor(rng() * 2 ** 31) });
   let z = 0;
   const laid = [];
+  if (showcase) {
+    // Debug: every chunk once, by difficulty (as the game unlocks them)
+    for (const chunk of [...chunks].sort((a, b) => a.zMin - b.zMin || a.name.localeCompare(b.name))) {
+      items.push({ prefab: chunk.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(rng() * 2 ** 31) });
+      z += chunk.zSize;
+    }
+    return { items, length: z };
+  }
   while (z < target) {
     let pool = chunks.filter((c) => c.zMin <= z && z < (c.zMax ?? Infinity));
     if (!pool.length) pool = chunks.filter((c) => c.zMin <= z); // past every window: anything allowed so far
@@ -138,6 +147,26 @@ export { RAMP_LENGTH };
 export const buildingPieceKey = (name) => name.match(/(?:^|_)((?:low|med|medium|high)_\d+)_(?:left|right)$/i)?.[1]?.toLowerCase() ?? null;
 /** Name to apply name rules to: 1.x pieces carry their generic role ("high_01_left_hawaiihd_2017" -> "high_01_left"). */
 const roleOf = (manifest, name) => manifest.prefabs[name]?.role ?? name;
+
+/**
+ * Landmark variants a theme's game randomizer picks between (Underwater's kraken: static,
+ * active, animated), for the generation picker: [{ key: "prefab|group|child", label }].
+ */
+export function landmarkVariants(manifest, themeName) {
+  const slots = Object.assign({}, ...Object.values(manifest.themes[themeName]));
+  const out = [];
+  for (const slot of ['boundary_epic_start', 'boundary_epic_mid', 'boundary_epic_end']) {
+    for (const prefab of slots[slot] ?? []) {
+      for (const [group, entry] of Object.entries(manifest.prefabs[prefab]?.randomizers ?? {})) {
+        for (const child of Object.keys(entry?.weights ?? {})) {
+          const nice = (t) => t.replace(/[_-]+/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+          out.push({ key: `${prefab}|${group}|${child}`, label: `${nice(group)}: ${nice(child).toLowerCase()}`, prefab });
+        }
+      }
+    }
+  }
+  return out;
+}
 
 /** Building pieces of a theme, grouped by height, for the "map sections" picker. */
 export function buildingPieces(manifest, themeName) {
@@ -188,6 +217,7 @@ export function studioCatalog(manifest, themeName, trainTheme = null) {
     // Pillars come with pillar halls: not a free-placement tool
     obstacles: Object.fromEntries(Object.entries(OBSTACLE_SLOTS).filter(([k, slot]) => k !== 'pillar' && has(slot))),
     signal: has('obstacle_lightSignal'),
+    pillars: has('boundary_pillars_mid') && has('obstacle_pillar'),
     // Classic maps model their rails into the chunks: no track to take out
     tracks: !slots.classic_chunk?.length,
   };
@@ -217,10 +247,19 @@ export function generateLayout(
   let z = 0;
 
   let placeRng = rng; // studio items use their own stable generator
+  // Showcase (debug): each slot's prefabs in turn instead of at random
+  const turns = new Map();
+  const choose = (key, list) => {
+    if (!gen.showcase) return pick(placeRng, list);
+    const n = turns.get(key) ?? 0;
+    turns.set(key, n + 1);
+    return list[n % list.length];
+  };
+  const count = (slot, lo, hi) => (gen.showcase ? Math.max(slots[slot]?.length ?? 1, 1) : randInt(rng, lo, hi));
   const place = (slot, pos, layer = 'environment', extra = {}, nameFilter = null) => {
     if (!has(slot)) return null;
     const named = nameFilter ? slots[slot].filter((n) => nameFilter.test(roleOf(manifest, n))) : [];
-    const prefab = pick(placeRng, named.length ? named : slots[slot]);
+    const prefab = choose(`${slot}|${nameFilter ?? ''}`, named.length ? named : slots[slot]);
     // Per-instance seed for the prefab's random variant groups
     items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(placeRng() * 2 ** 31), ...extra });
     return prefab;
@@ -228,7 +267,7 @@ export function generateLayout(
   // ≤ 1.43: the game's hand-built chunks; in the studio, hand-placed trains and obstacles
   // on top (the chunks leave theirs out)
   if (slots.classic_chunk?.length) {
-    const classic = classicLayout(manifest, slots.classic_chunk, seed, sections);
+    const classic = classicLayout(manifest, slots.classic_chunk, seed, sections, gen.showcase);
     if (obstacleMode !== 'studio') return classic;
     items.push(...classic.items);
     placeStudio();
@@ -260,6 +299,7 @@ export function generateLayout(
   const buildingsType = sectionTypes.find((t) => t.name === 'buildings');
 
   function buildings() {
+    if (gen.showcase) return showcaseBuildings();
     const n = randInt(rng, 2, 5);
     // Heights that still have an allowed piece on both sides ("map sections" picker)
     const allowed = (slot) => (slots[slot] ?? []).filter((nm) => gen.pieces[buildingPieceKey(roleOf(manifest, nm))] !== false);
@@ -281,11 +321,34 @@ export function generateLayout(
       z += SEGMENT;
     }
   }
+  /** Showcase: every building piece of each height, both sides, then the ad slots. */
+  function showcaseBuildings() {
+    for (const height of ['low', 'medium', 'high']) {
+      const n = Math.max(slots[`boundary_${height}_left`]?.length ?? 0, slots[`boundary_${height}_right`]?.length ?? 0);
+      for (let i = 0; i < n; i++) {
+        place(`boundary_${height}_left`, [0, 0, z]);
+        place(`boundary_${height}_right`, [0, 0, z]);
+        addRun('left', `boundary_${height}_left`, z, z + SEGMENT);
+        addRun('right', `boundary_${height}_right`, z, z + SEGMENT);
+        decorate(z);
+        z += SEGMENT;
+      }
+    }
+    for (const ad of ['boundary_sponsored_right_front', 'boundary_sponsored_right_back'].filter(has)) {
+      for (let i = 0; i < slots[ad].length; i++) {
+        place('boundary_low_left', [0, 0, z]);
+        place(ad, [0, 0, z]);
+        addRun('left', 'boundary_low_left', z, z + SEGMENT);
+        addRun('right', ad, z, z + SEGMENT);
+        z += SEGMENT;
+      }
+    }
+  }
   /** Places a building slot using only the pieces left on in the picker. */
   function placeAllowed(slot, restrict) {
     if (!restrict) return place(slot, [0, 0, z]);
     const names = slots[slot].filter((nm) => gen.pieces[buildingPieceKey(roleOf(manifest, nm))] !== false);
-    const prefab = pick(placeRng, names);
+    const prefab = choose(slot, names);
     items.push({ prefab, slot, layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(placeRng() * 2 ** 31) });
     return prefab;
   }
@@ -293,7 +356,7 @@ export function generateLayout(
   function station() {
     const start = z;
     placeRun('boundary_station_start');
-    for (let i = randInt(rng, 1, 3); i > 0; i--) placeRun('boundary_station_mid');
+    for (let i = count('boundary_station_mid', 1, 3); i > 0; i--) placeRun('boundary_station_mid');
     placeRun('boundary_station_end');
     // Raised platforms along both outer tracks, the length of the station (90 + n·180 + 90
     // tiles exactly with the 180-long platform piece)
@@ -302,7 +365,7 @@ export function generateLayout(
   }
   function tube() {
     const start = z;
-    for (let i = randInt(rng, 2, 4); i > 0; i--) placeRun('boundary_tube');
+    for (let i = gen.showcase ? Math.max(slots.boundary_tube.length, 2) : randInt(rng, 2, 4); i > 0; i--) placeRun('boundary_tube');
     // Old games list the tube entrance/exit as event decorations instead of transitions
     const transitions = manifest.boundaries?.[themeName]?.transitions ?? [];
     if (!transitions.some((t) => t.slot === 'boundary_tube')) {
@@ -360,15 +423,13 @@ export function generateLayout(
   function pillars() {
     const start = z;
     placeRun('boundary_pillars_start');
-    for (let i = randInt(rng, 1, 3); i > 0; i--) placeRun('boundary_pillars_mid');
+    for (let i = count('boundary_pillars_mid', 1, 3); i > 0; i--) placeRun('boundary_pillars_mid');
     placeRun('boundary_pillars_end');
     // Like the game's Pillars chunk: a pillar in the middle lane every 180, mid-segment.
-    // "Fix pillars" keeps them as part of the hall (they hold its roof), whatever the
-    // obstacle settings or studio edits; otherwise they come and go with the obstacles
-    const asObstacles = gen.obstacles.pillar && obstacleMode !== 'studio';
-    if (has('obstacle_pillar') && (gen.fixPillars || asObstacles)) {
-      const layer = gen.fixPillars ? 'environment' : 'obstacle';
-      for (let pz = start + SEGMENT / 2; pz < z; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], layer);
+    // They come and go with the obstacles; in the studio they are items like the others
+    // ("Fix pillars" puts back any that are missing)
+    if (has('obstacle_pillar') && gen.obstacles.pillar && obstacleMode !== 'studio') {
+      for (let pz = start + SEGMENT / 2; pz < z; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], 'obstacle');
       pillarRanges.push([start, z]);
     }
   }
@@ -377,7 +438,7 @@ export function generateLayout(
     place('track_gates', [0, 0, z]);
     // The wall across the lanes, open on one lane (left/mid/right) or both sides
     const walls = ['special_gate_left', 'special_gate_mid', 'special_gate_right', 'special_gate_sides'].filter(has);
-    if (walls.length) place(pick(rng, walls), [0, 0, z], 'wall');
+    if (walls.length) place(choose('gate_walls', walls), [0, 0, z], 'wall');
     placeRun('boundary_gate');
     z = Math.max(z, start + slotLength(manifest, 'track_gates', manifest.prefabs[slots.track_gates[0]]));
     noTrackRanges.push([start, z]);
@@ -385,8 +446,48 @@ export function generateLayout(
   // Landmark (Tower Bridge, …): start/mid/end are 360 each. Some themes model the
   // whole landmark in epic_start and keep mid/end as empty placeholders, which still
   // reserve their length.
-  function epic() {
-    for (const slot of ['boundary_epic_start', 'boundary_epic_mid', 'boundary_epic_end']) placeRun(slot);
+  function epic(variants = null) {
+    for (const slot of ['boundary_epic_start', 'boundary_epic_mid', 'boundary_epic_end']) {
+      const before = items.length;
+      placeRun(slot);
+      // Showcase: the landmark's random groups set to one variant each time
+      if (variants && slot === 'boundary_epic_start' && items.length > before) items[before].variants = variants;
+    }
+  }
+
+  // Showcase (debug): every section type in turn, the gate once per wall and the landmark
+  // once per variant, buildings in between, so every piece loads
+  if (gen.showcase) {
+    const type = (name) => sectionTypes.find((t) => t.name === name);
+    const steps = [];
+    for (const name of ['buildings', 'station', 'tube', 'pillars']) if (type(name)) steps.push(() => type(name).build());
+    if (type('gate')) {
+      const walls = ['special_gate_left', 'special_gate_mid', 'special_gate_right', 'special_gate_sides'].filter(has).length;
+      for (let i = 0; i < Math.max(walls, 1); i++) steps.push(gate);
+    }
+    if (type('epic')) {
+      const groups = {};
+      for (const v of landmarkVariants(manifest, themeName)) {
+        const [, group, child] = v.key.split('|');
+        (groups[group] ??= []).push(child);
+      }
+      const n = Math.max(1, ...Object.values(groups).map((c) => c.length));
+      for (let i = 0; i < n; i++) steps.push(() => epic(Object.keys(groups).length ? Object.fromEntries(Object.entries(groups).map(([g, c]) => [g, c[i % c.length]])) : null));
+    }
+    for (const [i, step] of steps.entries()) {
+      if (i > 0 && buildingsType) buildingsLink();
+      step();
+    }
+  }
+  // A short building stretch between showcase sections
+  function buildingsLink() {
+    for (let i = 0; i < 2; i++) {
+      place('boundary_low_left', [0, 0, z]);
+      place('boundary_low_right', [0, 0, z]);
+      addRun('left', 'boundary_low_left', z, z + SEGMENT);
+      addRun('right', 'boundary_low_right', z, z + SEGMENT);
+      z += SEGMENT;
+    }
   }
 
   // Random sections, but every run of 4+ sections shows the theme's landmark and a gate
@@ -410,7 +511,7 @@ export function generateLayout(
     if (buildingsType && prev && prev !== buildingsType && section !== buildingsType) finalPlan.push(buildingsType);
     finalPlan.push(section);
   }
-  for (const section of finalPlan) section.build();
+  if (!gen.showcase) for (const section of finalPlan) section.build();
   const length = z;
   placeTransitions();
 

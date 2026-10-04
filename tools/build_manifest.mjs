@@ -560,7 +560,8 @@ function parseTrackConfigs(file, guidIndex) {
   return configs;
 }
 
-/** RandomChildRandomizer components: GameObject name -> activation probability.
+/** RandomChildRandomizer / WeightedChildRandomizer components: GameObject name ->
+ * activation probability, or { probability, weights: child name -> weight }.
  *
  * At runtime the game enables one random child of such a node (with that probability)
  * and disables the others; the glb export contains all of them. */
@@ -578,10 +579,139 @@ function parseRandomizers(file, guidIndex) {
     if (!doc.startsWith('!u!114')) continue;
     const script = doc.match(/m_Script: .*guid: (\w+)/);
     if (!script || !guidIndex.has(script[1])) continue;
-    if (stem(guidIndex.get(script[1])) !== 'RandomChildRandomizer') continue;
+    const kind = stem(guidIndex.get(script[1]));
+    if (kind !== 'RandomChildRandomizer' && kind !== 'WeightedChildRandomizer') continue;
     const go = doc.match(/m_GameObject: \{fileID: (\d+)/);
     const prob = doc.match(/_activationProbability: ([\d.]+)/);
-    if (go && names.has(go[1])) out[names.get(go[1])] = prob ? num(prob[1]) : 1.0;
+    if (!go || !names.has(go[1])) continue;
+    const probability = prob ? num(prob[1]) : 1.0;
+    // WeightedChildRandomizer (3.x): children picked by weight ("static" kraken 2, "active" 2, "active_animated" 1)
+    const weighted = [...doc.matchAll(/- GameObject: \{fileID: (\d+)\}\n\s+Weight: ([\d.]+)/g)].filter(([, fid]) => names.has(fid));
+    out[names.get(go[1])] = weighted.length ? { probability, weights: Object.fromEntries(weighted.map(([, fid, w]) => [names.get(fid), num(w)])) } : probability;
+  }
+  return out;
+}
+
+/**
+ * Animator components (the Underwater kraken that throws a train car): the controller's
+ * states from its default one, following each state's first transition, baked into one
+ * looping clip per Animator. Poses (one-frame clips) are held HOLD seconds; tracks are
+ * sampled at 30 fps from Unity's Hermite curves, converted to glb space (X mirrored).
+ * Returns [{ node, duration, tracks: [{ path, property, times, values }] }].
+ */
+function parseAnimators(file, guidIndex) {
+  const HOLD = 1.5;
+  const FPS = 30;
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  for (const { doc, kind, fid } of docs) if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+  const out = [];
+  for (const { doc, kind } of docs) {
+    if (kind !== '95') continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    const controller = guidIndex.get(doc.match(/m_Controller: \{[^}]*guid: (\w+)/)?.[1]);
+    if (!names.has(go) || !controller || !existsSync(controller)) continue;
+    const cdocs = new Map(yamlDocs(read(controller)).filter((d) => d.fid).map((d) => [d.fid, d]));
+    // The default state's chain, then chains the game starts by script (a trigger plays
+    // "attack", which leads on to "post"): states no transition leads to, in list order
+    const states = [...cdocs.values()].filter((d) => d.kind === '1102');
+    const next = (sdoc) => {
+      const transition = sdoc.split('m_Transitions:')[1]?.match(/fileID: (\d+)/)?.[1];
+      return transition && cdocs.get(transition)?.doc.match(/m_DstState: \{fileID: (\d+)/)?.[1];
+    };
+    const targets = new Set(states.map((d) => next(d.doc)).filter(Boolean));
+    const defaultState = [...cdocs.values()].find((d) => d.kind === '1107')?.doc.match(/m_DefaultState: \{fileID: (\d+)/)?.[1];
+    const sequence = [];
+    for (const head of [defaultState, ...states.map((d) => d.fid).filter((f) => !targets.has(f))]) {
+      for (let state = head; state && cdocs.has(state) && !sequence.some((st) => st.fid === state); state = next(cdocs.get(state).doc)) {
+        const clip = guidIndex.get(cdocs.get(state).doc.match(/m_Motion: \{[^}]*guid: (\w+)/)?.[1]);
+        sequence.push({ fid: state, clip });
+      }
+    }
+    const tracks = new Map(); // path|property -> { times, values }
+    let start = 0;
+    for (const { clip } of sequence) {
+      if (!clip || !existsSync(clip)) continue;
+      const text = read(clip);
+      const stop = Number(text.match(/m_StopTime: ([\d.eE+-]+)/)?.[1] ?? 0);
+      const length = stop < 0.1 ? HOLD : stop;
+      const frames = Math.max(1, Math.round(length * FPS));
+      for (const [section, property] of [['m_RotationCurves', 'quaternion'], ['m_PositionCurves', 'position'], ['m_ScaleCurves', 'scale']]) {
+        const block = text.split(`\n  ${section}:`)[1]?.split(/\n  \w/)[0] ?? '';
+        for (const item of block.split('\n  - curve:').slice(1)) {
+          const curvePath = item.match(/\n\s+path: (.*)/)?.[1].trim() ?? '';
+          const n = property === 'quaternion' ? 4 : 3;
+          const vec = (s) => {
+            const v = ['x', 'y', 'z', 'w'].slice(0, n).map((c) => Number(s.match(new RegExp(`${c}: ([^,}]+)`))?.[1]));
+            return v;
+          };
+          const keys = [...item.matchAll(/time: ([^\n]+)\n\s+value: (\{[^}]*\})\n\s+inSlope: (\{[^}]*\})\n\s+outSlope: (\{[^}]*\})/g)].map(([, t, v, i, o]) => ({ t: Number(t), v: vec(v), i: vec(i), o: vec(o) }));
+          if (!keys.length) continue;
+          const at = (time) => {
+            if (time <= keys[0].t) return keys[0].v;
+            const k = keys.findIndex((key) => key.t >= time);
+            if (k < 0) return keys[keys.length - 1].v;
+            const a = keys[k - 1];
+            const b = keys[k];
+            const dt = b.t - a.t;
+            const u = (time - a.t) / dt;
+            const [h00, h10, h01, h11] = [2 * u ** 3 - 3 * u ** 2 + 1, u ** 3 - 2 * u ** 2 + u, -2 * u ** 3 + 3 * u ** 2, u ** 3 - u ** 2];
+            // Infinite tangents are steps
+            return a.v.map((av, c) => (!Number.isFinite(a.o[c]) || !Number.isFinite(b.i[c]) ? av : h00 * av + h10 * dt * a.o[c] + h01 * b.v[c] + h11 * dt * b.i[c]));
+          };
+          const key = `${curvePath}|${property}`;
+          if (!tracks.has(key)) tracks.set(key, { path: curvePath, property, times: [], values: [] });
+          const track = tracks.get(key);
+          for (let f = 0; f <= frames; f++) {
+            const v = at(Math.min((f / frames) * stop, stop));
+            // Unity -> glb: X mirrored (position -x; rotation x, -y, -z, w)
+            const g = property === 'position' ? [-v[0], v[1], v[2]] : property === 'quaternion' ? [v[0], -v[1], -v[2], v[3]] : v;
+            track.times.push(round(start + (f / frames) * length, 4));
+            track.values.push(...g.map((x) => round(x, 5)));
+          }
+        }
+      }
+      start += length;
+    }
+    if (tracks.size) out.push({ node: names.get(go), duration: round(start, 4), tracks: [...tracks.values()] });
+  }
+  return out;
+}
+
+/**
+ * SkinnedMeshRenderers: the prefab glb leaves skinned meshes out (the kraken's arm), and
+ * the mesh's own glb has positions, UVs, joints and weights but no skin. Returns what the
+ * viewer needs to rebuild it: [{ node, mesh (glb name), bones: [GameObject names],
+ * bindPoses: [16 floats, column-major, glb space], materials: [names] }].
+ */
+function parseSkinnedMeshes(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  const goOfTransform = new Map();
+  for (const { doc, kind, fid } of docs) {
+    if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+    if (kind === '4') goOfTransform.set(fid, doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1]);
+  }
+  const out = [];
+  for (const { doc, kind } of docs) {
+    if (kind !== '137') continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    const meshFile = guidIndex.get(doc.match(/\n {2}m_Mesh: \{[^}]*guid: (\w+)/)?.[1]);
+    if (!names.has(go) || !meshFile || !existsSync(meshFile)) continue;
+    const list = (key) => [...(doc.split(`\n  ${key}:`)[1]?.split(/\n  \w/)[0] ?? '').matchAll(/- \{fileID: (\d+)(?:, guid: (\w+))?/g)];
+    const bones = list('m_Bones').map(([, fid]) => names.get(goOfTransform.get(fid)) ?? null);
+    const materials = list('m_Materials').map(([, , guid]) => guidIndex.get(guid)).filter(Boolean).map((p) => stem(p));
+    // Bind poses (row-major eRC) mirrored on X like the glb: entries in row 0 or column 0
+    // (not both) change sign; stored column-major for THREE.Matrix4.fromArray
+    const mesh = read(meshFile);
+    const poses = (mesh.split('\n  m_BindPose:')[1]?.split(/\n  \w/)[0] ?? '').split('\n  - ').slice(1).map((m) => {
+      const e = (r, c) => Number(m.match(new RegExp(`e${r}${c}: ([^\\n]+)`))?.[1] ?? (r === c ? 1 : 0));
+      const col = [];
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) col.push(round(((r === 0) !== (c === 0) ? -1 : 1) * e(r, c), 6));
+      return col;
+    });
+    if (!bones.length || bones.includes(null) || poses.length !== bones.length) continue;
+    out.push({ node: names.get(go), mesh: stem(meshFile), bones, bindPoses: poses, materials });
   }
   return out;
 }
@@ -1332,6 +1462,8 @@ function parseParticles(file, guidIndex) {
   const goOf = (doc) => doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
   const renderers = new Map();
   for (const { doc, kind } of docs) if (kind === '199') renderers.set(goOf(doc), parseUnityYaml(doc));
+  const systemGo = new Map(); // ParticleSystem fileID -> GameObject (for sub-emitter links)
+  for (const { doc, kind, fid } of docs) if (kind === '198') systemGo.set(fid, goOf(doc));
   const out = {};
   for (const { doc, kind } of docs) {
     if (kind !== '198') continue;
@@ -1374,6 +1506,8 @@ function parseParticles(file, guidIndex) {
         position: vec3(shape.m_Position),
         rotation: vec3(shape.m_Rotation),
         randomDirection: shape.randomDirectionAmount ?? shape.randomDirection ?? 0,
+        // Mesh shapes (6, 13, 14) without their mesh fire from the origin along +Z
+        hasMesh: [shape.m_Mesh, shape.m_MeshRenderer, shape.m_SkinnedMeshRenderer].some((m) => m?.fileID),
       },
       rate: minMaxCurve(emission.enabled === 0 ? 0 : emission.rateOverTime ?? emission.rate, 0),
       bursts: (emission.enabled === 0 ? [] : emission.m_Bursts ?? []).map((b) => ({
@@ -1395,8 +1529,17 @@ function parseParticles(file, guidIndex) {
         lengthScale: r.m_LengthScale ?? 2,
         velocityScale: r.m_VelocityScale ?? 0,
         maxSize: r.m_MaxParticleSize ?? 0.5,
+        alignment: r.m_RenderAlignment ?? 0, // 0 view, 1 world, 2 local, 3 facing, 4 velocity
       },
     };
+    // Sub-emitters (fireworks): systems started by this one's particles, at their birth
+    // (type 0, following them) or death (type 2). Named after their nodes.
+    // (fileIDs read as text: 18 digits don't survive as numbers)
+    const subBlock = mod('SubModule') ? doc.split('\n  SubModule:')[1]?.split(/\n  \w/)[0] ?? '' : '';
+    const subs = [...subBlock.matchAll(/emitter: \{fileID: (\d+)\}\n\s+type: (\d+)(?:\n\s+properties: \d+)?(?:\n\s+emitProbability: ([\d.]+))?/g)]
+      .map(([, fid, type, prob]) => ({ node: names.get(systemGo.get(fid)), type: Number(type), probability: prob != null ? Number(prob) : 1 }))
+      .filter((e) => e.node && (e.type === 0 || e.type === 2));
+    if (subs.length) out[names.get(go)].subEmitters = subs;
   }
   return out;
 }
@@ -1629,6 +1772,8 @@ function parseMaterial(file, guidIndex, exportRoot) {
       } else if (s.startsWith('m_Texture:') && texName) {
         const m = s.match(GUID_RE);
         if (m && guidIndex.has(m[1])) mat.textures[texName] = { path: path.relative(exportRoot, guidIndex.get(m[1])) };
+        // Unity's built-in "Default-Particle" (a soft round glow), not in any export
+        else if (/fileID: 10300, guid: 0000000000000000f000000000000000/.test(s)) mat.textures[texName] = { builtin: 'Default-Particle' };
       } else if ((s.startsWith('m_Scale:') || s.startsWith('m_Offset:')) && texName in mat.textures) {
         const nums = (s.slice(s.indexOf(':') + 1).match(NUMBERS_RE) ?? []).map(num);
         mat.textures[texName][s.startsWith('m_Scale') ? 'scale' : 'offset'] = nums;
@@ -1912,6 +2057,23 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     if (Object.keys(randomizers).length) info.randomizers = randomizers;
     const lodHidden = parseLodGroups(prefabPath);
     if (lodHidden.length) info.lodHidden = lodHidden;
+    const skinned = parseSkinnedMeshes(prefabPath, guidIndex).filter((sk) => {
+      const src = meshGlbs.get(`${sk.mesh}.glb`);
+      if (!src) return false;
+      copyIfNewer(src, path.join(outMesh, path.basename(src)));
+      sk.mesh = `mesh/${path.basename(src)}`;
+      return true;
+    });
+    if (skinned.length) {
+      info.skinned = skinned;
+      info.materials = sortedStrings(new Set([...(info.materials ?? []), ...skinned.flatMap((sk) => sk.materials)]));
+    }
+    const animators = parseAnimators(prefabPath, guidIndex);
+    if (animators.length) {
+      mkdirSync(path.join(out, 'anim'), { recursive: true });
+      writeFileSync(path.join(out, 'anim', `${name}.json`), JSON.stringify(animators));
+      info.animators = `anim/${name}.json`;
+    }
     const animations = parseMeshAnimations(prefabPath, guidIndex);
     for (const anim of Object.values(animations)) {
       anim.frames = anim.frames.map((mesh) => {
@@ -2007,6 +2169,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   mkdirSync(outTex, { recursive: true });
   for (const mat of Object.values(materials)) {
     for (const tex of Object.values(mat.textures)) {
+      if (tex.builtin) continue;
       const src = path.join(root, tex.path);
       delete tex.path;
       if (!['.png', '.jpg', '.jpeg'].includes(suffix(src).toLowerCase())) {
@@ -2086,6 +2249,8 @@ function splitByTheme(manifest, staging, out, log) {
       ...Object.values(prefabs).flatMap((p) => Object.values(p.trackConfigs ?? {}).map((c) => c.glb)).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => Object.values(p.meshAnimations ?? {}).flatMap((a) => a.frames)),
       ...Object.values(prefabs).flatMap((p) => Object.values(p.particles ?? {}).map((e) => e.render.meshGlb)).filter(Boolean),
+      ...Object.values(prefabs).map((p) => p.animators).filter(Boolean),
+      ...Object.values(prefabs).flatMap((p) => (p.skinned ?? []).map((sk) => sk.mesh)),
       ...Object.values(materials).flatMap((m) => Object.values(m.textures).map((t) => t.url)).filter(Boolean),
     ]);
     const dest = path.join(out, theme);

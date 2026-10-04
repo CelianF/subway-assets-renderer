@@ -31,6 +31,12 @@ static class Program
 		try
 		{
 			FullConfiguration settings = new();
+			// Debugging aid: SUBWAY_SHADER_EXPORT=Decompile (or Yaml) exports real shader code
+			// instead of the editor dummies the importer gets by default
+			if (Enum.TryParse(Environment.GetEnvironmentVariable("SUBWAY_SHADER_EXPORT"), out ShaderExportMode shaderMode))
+			{
+				settings.ExportSettings.ShaderExportMode = shaderMode;
+			}
 			ExportHandler handler = new(settings);
 
 			Stage("load");

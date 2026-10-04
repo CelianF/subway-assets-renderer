@@ -153,9 +153,10 @@ function shapeSpawn(shape, pos, dir) {
       dir.set(0, 0, 1);
       break;
     }
-    default: // mesh shapes: from the emitter's origin
+    default: // mesh shapes: from the emitter's origin (along +Z when no mesh is set)
       pos.set(0, 0, 0);
-      randomUnit(dir);
+      if (shape.hasMesh === false) dir.set(0, 0, 1);
+      else randomUnit(dir);
   }
   if (shape.randomDirection) dir.lerp(randomUnit(new THREE.Vector3()), shape.randomDirection).normalize();
   if (shape.rotation?.some((v) => v)) {
@@ -283,7 +284,8 @@ function particleLook(materials, name) {
   const f = def?.floats ?? {};
   const c = def?.colors ?? {};
   let blend;
-  if (f._SrcMode != null && f._DstMode != null && /Combined/.test(shader)) blend = [f._SrcMode, f._DstMode];
+  // Blend factors when the material has them (Combined, Bend/Particle Effect…), else from the name
+  if (f._SrcMode != null && f._DstMode != null) blend = [f._SrcMode, f._DstMode];
   else if (/Premultipl/i.test(shader)) blend = [1, 10];
   else if (/Additive/i.test(shader)) blend = [/Premul/i.test(shader) ? 1 : 5, 1];
   else if (/Multiply/i.test(shader)) blend = [2, 0];
@@ -347,6 +349,13 @@ class Emitter {
     this.color0 = new Float32Array(this.max * 4);
     this.rand = new Float32Array(this.max * 2);
     this.axis = new Float32Array(this.max * 3);
+    this.heading = new Float32Array(this.max * 3); // direction of travel (velocity-aligned meshes)
+    this.ids = new Int32Array(this.max); // stable particle ids, for birth sub-emitters
+    this.index = new Map(); // id -> slot
+    this.nextId = 1;
+    this.subs = []; // { emitter, type: 0 birth | 2 death, probability }
+    this.sources = null; // as a sub-emitter: where its parent's particles start it
+    this.spawnOffset = null; // weather: emission follows the camera
     this.count = 0;
     this.time = 0;
     this.emitAcc = 0;
@@ -398,9 +407,12 @@ class Emitter {
     this.gravityLocal = null;
   }
 
-  spawn() {
+  spawn(offset = null) {
     if (this.count >= this.max) return;
     const i = this.count++;
+    const id = this.nextId++;
+    this.ids[i] = id;
+    this.index.set(id, i);
     const d = this.def;
     const t = (this.time % this.period) / Math.max(d.duration, 1e-3);
     const pos = new THREE.Vector3();
@@ -409,6 +421,13 @@ class Emitter {
     const speed = sample(d.speed, t);
     pos.x = -pos.x; // Unity -> glb space
     dir.x = -dir.x;
+    if (offset) pos.add(offset);
+    if (this.covered?.(pos.z)) {
+      // Weather: no snow inside tubes, stations, pillar halls
+      this.count--;
+      this.index.delete(id);
+      return;
+    }
     this.local.pos.set([pos.x, pos.y, pos.z], i * 3);
     this.local.vel.set([dir.x * speed, dir.y * speed, dir.z * speed], i * 3);
     this.age[i] = 0;
@@ -421,10 +440,56 @@ class Emitter {
     this.rand.set([Math.random(), Math.random()], i * 2);
     randomUnit(dir);
     this.axis.set([dir.x, dir.y, dir.z], i * 3);
+    for (const sub of this.subs) if (sub.type === 0 && Math.random() < sub.probability) sub.emitter.start(this, id, i);
+  }
+
+  /** As a sub-emitter: one run of this system, at (and following, for births) a parent particle. */
+  start(parent, id, i) {
+    if (!parent.toSub) parent.toSub = new Map();
+    if (!parent.toSub.has(this)) {
+      // Parent particle space -> this emitter's space (pieces never move)
+      parent.node.updateWorldMatrix(true, false);
+      this.node.updateWorldMatrix(true, false);
+      parent.toSub.set(this, new THREE.Matrix4().copy(this.node.matrixWorld).invert().multiply(parent.node.matrixWorld));
+    }
+    const pos = new THREE.Vector3().fromArray(parent.local.pos, i * 3).applyMatrix4(parent.toSub.get(this));
+    this.sources.push({ parent, follow: id, pos, time: 0, acc: 0, bursts: new Set() });
+  }
+
+  /** Emission for each run its parent started: rate and bursts over the system's duration. */
+  emitSources(dt) {
+    const d = this.def;
+    this.sources = this.sources.filter((s) => {
+      if (s.follow != null) {
+        const i = s.parent.index.get(s.follow);
+        if (i == null) s.follow = null; // parent particle gone: stays where it was
+        else s.pos.fromArray(s.parent.local.pos, i * 3).applyMatrix4(s.parent.toSub.get(this));
+      }
+      s.time += dt;
+      if (s.time > d.duration && !(d.loop && s.follow != null)) return false;
+      const t = Math.min(s.time / Math.max(d.duration, 1e-3), 1);
+      s.acc += sample(d.rate, t) * dt;
+      for (; s.acc >= 1; s.acc -= 1) this.spawn(s.pos);
+      d.bursts.forEach((b, k) => {
+        for (let n = 0; n < (b.cycles || 1); n++) {
+          if (s.time >= b.time + n * b.interval && !s.bursts.has(`${k}:${n}`)) {
+            s.bursts.add(`${k}:${n}`);
+            const count = Math.round(sample(b.count, 0));
+            for (let m = 0; m < count; m++) this.spawn(s.pos);
+          }
+        }
+      });
+      return true;
+    });
   }
 
   kill(i) {
     const j = --this.count;
+    this.index.delete(this.ids[i]);
+    if (i !== j) {
+      this.ids[i] = this.ids[j];
+      this.index.set(this.ids[i], i);
+    }
     if (i === j) return;
     const move = (arr, n) => arr.copyWithin(i * n, j * n, j * n + n);
     move(this.local.pos, 3);
@@ -437,6 +502,7 @@ class Emitter {
     move(this.color0, 4);
     move(this.rand, 2);
     move(this.axis, 3);
+    move(this.heading, 3);
   }
 
   step(dt) {
@@ -453,7 +519,8 @@ class Emitter {
     }
     this.time += dt;
     const local = this.time - this.delay;
-    if (local >= 0) {
+    if (this.sources) this.emitSources(dt);
+    else if (local >= 0) {
       const cycle = Math.floor(local / this.period);
       const inCycle = local - cycle * this.period;
       const emitting = d.loop || inCycle < d.duration;
@@ -461,7 +528,7 @@ class Emitter {
         const t = inCycle / Math.max(d.duration, 1e-3);
         this.emitAcc += sample(d.rate, t) * dt;
         while (this.emitAcc >= 1) {
-          this.spawn();
+          this.spawn(this.spawnOffset);
           this.emitAcc -= 1;
         }
         d.bursts.forEach((b, k) => {
@@ -470,7 +537,7 @@ class Emitter {
             if (inCycle >= b.time + n * b.interval && !this.burstDone.has(key)) {
               this.burstDone.add(key);
               const count = Math.round(sample(b.count, 0));
-              for (let m = 0; m < count; m++) this.spawn();
+              for (let m = 0; m < count; m++) this.spawn(this.spawnOffset);
             }
           }
         });
@@ -483,6 +550,7 @@ class Emitter {
     for (let i = this.count - 1; i >= 0; i--) {
       this.age[i] += dt;
       if (this.age[i] >= this.life[i]) {
+        for (const sub of this.subs) if (sub.type === 2 && Math.random() < sub.probability) sub.emitter.start(this, null, i);
         this.kill(i);
         continue;
       }
@@ -511,6 +579,9 @@ class Emitter {
       pos[p] += (v[p] + ex) * dt;
       pos[p + 1] += (v[p + 1] + ey) * dt;
       pos[p + 2] += (v[p + 2] + ez) * dt;
+      this.heading[p] = v[p] + ex;
+      this.heading[p + 1] = v[p + 1] + ey;
+      this.heading[p + 2] = v[p + 2] + ez;
       this.rot[i] += this.spin[i] * dt;
     }
   }
@@ -523,11 +594,21 @@ class Emitter {
       const m = new THREE.Matrix4();
       const q = new THREE.Quaternion();
       const axis = new THREE.Vector3();
+      const facing = new THREE.Matrix4();
+      const zero = new THREE.Vector3();
+      const up = new THREE.Vector3(0, 1, 0);
+      const byVelocity = d.render.alignment === 4;
       for (let i = 0; i < this.count; i++) {
         const lt = this.age[i] / this.life[i];
         const size = this.size0[i] * (d.sizeOverLife ? sample(d.sizeOverLife, lt, this.rand[i * 2]) : 1);
-        axis.fromArray(this.axis, i * 3);
-        q.setFromAxisAngle(axis, this.rot[i]);
+        axis.fromArray(this.heading, i * 3);
+        if (byVelocity && axis.lengthSq() > 1e-6) {
+          // Velocity alignment: the mesh's +Z along the direction of travel (swimming fish)
+          q.setFromRotationMatrix(facing.lookAt(axis, zero, up));
+        } else {
+          axis.fromArray(this.axis, i * 3);
+          q.setFromAxisAngle(axis, this.rot[i]);
+        }
         m.compose(new THREE.Vector3().fromArray(this.local.pos, i * 3), q, new THREE.Vector3(size, size, size));
         this.object.setMatrixAt(i, m);
         this.color(i, lt, col, life);
@@ -585,12 +666,63 @@ export async function attachParticles(root, particles, materials, nodeKey, meshG
     const key = nodeKey(o.name);
     if (key) nodes.push([o, particles[key]]);
   });
+  const made = [];
   for (const [node, def] of nodes) {
     const geometry = def.render.mode === 4 && def.render.meshGlb ? await meshGeometry(def.render.meshGlb) : null;
     if (def.render.mode === 4 && !geometry) continue; // mesh particles without their mesh
     const emitter = new Emitter(node, root, def, materials, geometry);
     emitters.add(emitter);
+    made.push(emitter);
   }
+  // Sub-emitters: the parent's own descendants first (two fireworks share child names)
+  const within = (node, ancestor) => {
+    for (let n = node; n; n = n.parent) if (n === ancestor) return true;
+    return false;
+  };
+  for (const e of made) {
+    for (const link of e.def.subEmitters ?? []) {
+      const key = THREE.PropertyBinding.sanitizeNodeName(link.node); // node keys are sanitized ("star (1)" -> "star_(1)")
+      const named = made.filter((s) => s !== e && nodeKey(s.node.name) === key);
+      const sub = named.find((s) => within(s.node, e.node)) ?? named[0];
+      if (!sub) continue;
+      sub.sources ??= [];
+      e.subs.push({ emitter: sub, type: link.type, probability: link.probability });
+    }
+  }
+}
+
+let weather = null;
+
+/**
+ * Snow along the whole run. Some themes only snow around their start train (2.27 North
+ * Pole); this emitter uses that snow and lays its flakes around the camera instead, in
+ * world space, so they fall in place as the camera moves.
+ */
+export function setWeather(scene, def, materials) {
+  if (weather) {
+    weather.root.removeFromParent();
+    weather = null;
+  }
+  if (!def) return;
+  const group = new THREE.Group();
+  group.name = 'weather';
+  scene.add(group);
+  weather = new Emitter(group, group, { ...def, local: true, prewarm: false }, materials, null);
+  weather.spawnOffset = new THREE.Vector3();
+  weather.weather = true;
+  weather.covered = (z) => weatherCover.some(([a, b]) => z >= a && z < b);
+  emitters.add(weather);
+}
+
+/** Stretches of the run [z0, z1) under a roof, where no snow falls. */
+export function setWeatherCover(ranges) {
+  weatherCover = ranges;
+  if (weather) weather.covered = (z) => weatherCover.some(([a, b]) => z >= a && z < b);
+}
+let weatherCover = [];
+
+export function setWeatherVisible(visible) {
+  if (weather) weather.root.visible = visible;
 }
 
 /** Steps and uploads every live emitter near the camera; drops those of removed pieces. */
@@ -599,6 +731,20 @@ export function updateParticles(dt, camera) {
   const at = new THREE.Vector3();
   dt = Math.min(dt, 0.1);
   for (const e of emitters) {
+    if (e.weather) {
+      // Just ahead of and above the camera, where the flakes are seen
+      const ahead = camera.getWorldDirection(at).setY(0).normalize().multiplyScalar(60);
+      e.spawnOffset.copy(cam).add(ahead).add(new THREE.Vector3(0, 30, 0));
+      e.object.visible = e.root.visible;
+      if (e.root.visible) {
+        e.step(dt);
+        e.upload();
+      }
+      continue;
+    }
+    // A run's pieces join the scene only once all are loaded: gone means removed after that
+    if (e.root.parent) e.attached = true;
+    else if (!e.attached && (e.loadWait = (e.loadWait ?? 0) + dt) < 60) continue;
     if (!e.root.parent) {
       e.object.geometry.dispose();
       e.material.dispose();
@@ -610,9 +756,9 @@ export function updateParticles(dt, camera) {
     e.object.visible = near;
     if (!near) continue;
     if (!e.warmed) {
-      // Looping systems start full, as if they had been running
+      // Looping systems start full, as if they had been running (sub-emitters follow their parent)
       e.warmed = true;
-      if (e.def.loop) e.advance(Math.min(e.def.duration + (e.def.lifetime?.max ?? 0), 20));
+      if (e.def.loop && !e.sources) e.advance(Math.min(e.def.duration + (e.def.lifetime?.max ?? 0), 20));
     }
     e.step(dt);
     e.upload();

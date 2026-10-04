@@ -1,17 +1,34 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setReversedDepth, texturesReady } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces, trainLength } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI, prettyTheme } from './ui.js';
 import { addCredit } from './credit.js';
-import { attachParticles, updateParticles } from './particles.js';
+import { attachParticles, updateParticles, setWeather, setWeatherVisible, setWeatherCover } from './particles.js';
 
 const params = new URLSearchParams(location.search);
+
+// Debug flags kept across maps (storage can be missing or blocked: then they just reset)
+function storedFlag(key) {
+  try {
+    return localStorage.getItem(key) === '1';
+  } catch {
+    return false;
+  }
+}
+function storeFlag(key, on) {
+  try {
+    localStorage.setItem(key, on ? '1' : '0');
+  } catch {
+    // not kept
+  }
+}
 addCredit();
 // One environment (= one map) per page; maps are picked on the home page
 const ENV_ID = params.get('env');
@@ -219,15 +236,111 @@ function removeLowLods(obj, lodHidden = []) {
  * Mimics the game's RandomChildRandomizer: with probability p one random child
  * stays, all others are removed (the export contains every variant at once).
  */
-function applyRandomizers(obj, randomizers, seed) {
+function applyRandomizers(obj, randomizers, seed, prefabName = '', forced = null) {
   const rng = mulberry32(seed);
   const table = sanitizedTable(Object.entries(randomizers));
   const groups = [];
   obj.traverse((o) => nodeKey(table, o.name) && groups.push(o));
   for (const group of groups) {
     const children = [...group.children];
-    const keep = rng() < table[nodeKey(table, group.name)] ? children[Math.floor(rng() * children.length)] : null;
+    const groupName = Object.keys(randomizers).find((k) => THREE.PropertyBinding.sanitizeNodeName(k) === nodeKey(table, group.name)) ?? group.name;
+    const entry = table[nodeKey(table, group.name)];
+    const { probability = entry, weights = null } = typeof entry === 'object' ? entry : {};
+    let keep = null;
+    if (forced?.[groupName]) {
+      // Showcase: this variant (by name)
+      const want = THREE.PropertyBinding.sanitizeNodeName(forced[groupName]);
+      keep = children.find((c) => c.name === want || c.name.replace(/_\d+$/, '') === want) ?? null;
+    } else if (rng() < probability) {
+      if (weights) {
+        // WeightedChildRandomizer: by the weight of each child (by name)
+        const childKey = (c) => (c.name in weights ? c.name : Object.keys(weights).find((k) => THREE.PropertyBinding.sanitizeNodeName(k) === c.name.replace(/_\d+$/, '')));
+        // Variants left out in Generation > Landmark weigh nothing (unless that's all of them)
+        const allowed = (c) => state.gen.variants[`${prefabName}|${groupName}|${childKey(c)}`] !== false;
+        const anyAllowed = children.some((c) => childKey(c) && allowed(c));
+        const weightOf = (c) => (anyAllowed && !allowed(c) ? 0 : weights[childKey(c)] ?? 0);
+        let r = rng() * children.reduce((n, c) => n + weightOf(c), 0);
+        keep = children.find((c) => (r -= weightOf(c)) < 0) ?? null;
+      } else keep = children[Math.floor(rng() * children.length)];
+    }
     for (const child of children) if (child !== keep) child.removeFromParent();
+  }
+}
+
+// Animator clips (the Underwater kraken throwing a train car), baked by the importer into
+// one loop per Animator: played on repeat with a pause, each piece at its own phase
+const mixers = new Set(); // { root, mixer }
+const animatorFiles = new Map();
+
+/**
+ * Skinned meshes the prefab glb left out (the kraken's arm): the mesh glb has joints and
+ * weights but no skin, so the skeleton is rebuilt from the bone names and bind poses.
+ */
+async function applySkinned(obj, list) {
+  const key = (name) => THREE.PropertyBinding.sanitizeNodeName(name);
+  const findIn = (root, name) => {
+    let found = null;
+    root.traverse((o) => (found ??= o.name === key(name) || o.name.replace(/_\d+$/, '') === key(name) ? o : null));
+    return found;
+  };
+  for (const sk of list) {
+    const holder = findIn(obj, sk.node);
+    if (!holder) continue; // its variant wasn't picked
+    // The bones: in the nearest subtree around the renderer that holds them all
+    let bones = null;
+    for (let scope = holder.parent; scope && !bones; scope = scope.parent) {
+      const found = sk.bones.map((b) => findIn(scope, b));
+      if (found.every(Boolean)) bones = found;
+    }
+    let geometry = null;
+    (await loadGlb(sk.mesh)).traverse((o) => (geometry ??= o.isMesh ? o.geometry : null));
+    if (!bones || !geometry?.attributes.skinIndex) continue;
+    const mesh = new THREE.SkinnedMesh(geometry, new THREE.MeshBasicMaterial({ name: sk.materials[0] ?? 'DefaultMaterial' }));
+    mesh.name = `${holder.name}_skinned`;
+    mesh.frustumCulled = false; // bounds follow the bones
+    holder.add(mesh);
+    obj.updateMatrixWorld(true);
+    // Unity skins with bone × bind pose (bind poses include the renderer's transform);
+    // three.js applies the bind matrix (the mesh's own transform) as well, so take it out
+    const meshInverse = mesh.matrixWorld.clone().invert();
+    const inverses = sk.bindPoses.map((m) => new THREE.Matrix4().fromArray(m).multiply(meshInverse));
+    mesh.bind(new THREE.Skeleton(bones, inverses), mesh.matrixWorld);
+  }
+}
+
+async function applyAnimators(obj, url, seed) {
+  if (!animatorFiles.has(url)) animatorFiles.set(url, fetch(dataUrl(url)).then((r) => r.json()).catch(() => []));
+  const rng = mulberry32(seed ^ 0x616e696d);
+  for (const anim of await animatorFiles.get(url)) {
+    let root = null;
+    obj.traverse((o) => (root ??= o.name === THREE.PropertyBinding.sanitizeNodeName(anim.node) ? o : null));
+    if (!root) continue; // its variant wasn't picked
+    // Unity paths ("Armature/Bone/Bone.007") walked child by child from the Animator
+    const find = (path) => {
+      let node = root;
+      for (const part of path ? path.split('/') : []) {
+        const name = THREE.PropertyBinding.sanitizeNodeName(part);
+        node = node?.children.find((c) => c.name === name || c.name.replace(/_\d+$/, '') === name);
+      }
+      return node;
+    };
+    const Track = { quaternion: THREE.QuaternionKeyframeTrack, position: THREE.VectorKeyframeTrack, scale: THREE.VectorKeyframeTrack };
+    const tracks = anim.tracks.map((t) => (find(t.path) ? new Track[t.property](`${find(t.path).uuid}.${t.property}`, t.times, t.values) : null)).filter(Boolean);
+    if (!tracks.length) continue;
+    const mixer = new THREE.AnimationMixer(root);
+    const action = mixer.clipAction(new THREE.AnimationClip(anim.node, anim.duration, tracks));
+    action.play();
+    mixer.setTime(rng() * anim.duration);
+    mixers.add({ root: obj, mixer });
+  }
+}
+
+function updateAnimators(dt) {
+  for (const m of mixers) {
+    // A run's pieces join the scene only once all are loaded: gone means removed after that
+    if (m.root.parent) m.attached = true;
+    else if (m.attached || (m.loadWait = (m.loadWait ?? 0) + dt) > 60) mixers.delete(m);
+    if (m.root.parent) m.mixer.update(dt);
   }
 }
 
@@ -276,8 +389,10 @@ async function applyMeshAnimations(obj, anims, seed) {
 
 function updateMeshAnimations(time) {
   for (const a of meshAnimations) {
+    if (a.root.parent) a.attached = true;
     if (!a.root.parent) {
-      meshAnimations.delete(a); // piece removed by a rebuild
+      // Removed by a rebuild (pieces only join the scene once the whole run has loaded)
+      if (a.attached || time - (a.created ??= time) > 60) meshAnimations.delete(a);
       continue;
     }
     const t = Math.max(0, time - a.delay) / a.duration + a.offset / a.duration;
@@ -336,7 +451,7 @@ function applyMaterial(mesh, mat) {
 }
 
 /** Instantiates a prefab (or one of its runtime track configs) with manifest materials. */
-async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null, signalColor = null, cutMode = null, worldZ = 0) {
+async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null, signalColor = null, cutMode = null, worldZ = 0, variants = null) {
   // Rails hide inside studio "no tracks" zones; fill ground only shows inside them
   const cut = layer === 'track' ? (cutMode === 'inside' ? 2 : 1) : 0;
   const prefab = manifest.prefabs[name];
@@ -374,9 +489,13 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   // Particle-only prefabs (glows, steam) have no geometry of their own
   if (!prefab?.glb || (!prefab.bbox && !prefab.particles)) return null;
   const cutaway = layer === 'environment' ? 'floor' : layer === 'track' ? null : 'all';
-  const obj = (await loadGlb(prefab.glb, { cutaway })).clone();
+  const source = await loadGlb(prefab.glb, { cutaway });
+  // Skinned meshes need their own skeleton (a plain clone keeps the source's bones)
+  const obj = prefab.animators ? cloneSkinned(source) : source.clone();
   removeLowLods(obj, prefab.lodHidden);
-  if (prefab.randomizers) applyRandomizers(obj, prefab.randomizers, variantSeed);
+  if (prefab.randomizers) applyRandomizers(obj, prefab.randomizers, variantSeed, name, variants);
+  if (prefab.skinned) await applySkinned(obj, prefab.skinned);
+  if (prefab.animators) await applyAnimators(obj, prefab.animators, variantSeed);
   if (prefab.meshAnimations) await applyMeshAnimations(obj, prefab.meshAnimations, variantSeed);
   obj.traverse((o) => {
     if (!o.isMesh) return;
@@ -565,6 +684,7 @@ const state = {
   glass: 1,
   skyline: true,
   particles: params.get('particles') !== '0', // smoke, steam, glows, sparks
+  weather: params.get('weather') !== '0', // snow along the whole run (themes that snow at the start)
   skylineOpacity: 1,
   skylineDistance: 1,
   obstacleMode: params.get('obstacleMode') ?? 'random',
@@ -576,7 +696,7 @@ const state = {
   bend: Number(params.get('bend') ?? 0),
   bendVertical: Number(params.get('bendV') ?? 0),
   fov: 55,
-  gen: structuredClone(DEFAULT_GEN),
+  gen: { ...structuredClone(DEFAULT_GEN), showcase: storedFlag('debug:showcase') },
   studio: loadStudio(),
 };
 
@@ -634,7 +754,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
   const objs = await Promise.all(
     items.map(async (it) => {
       try {
-        const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed, it.signalSeed, it.signalColor, it.cut, it.pos[2]);
+        const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed, it.signalSeed, it.signalColor, it.cut, it.pos[2], it.variants);
         if (obj) {
           obj.position.set(...it.pos);
           if (it.scale) obj.scale.setScalar(it.scale);
@@ -649,6 +769,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
   if (id !== buildId) return; // superseded by a newer rebuild
   if (window.__viewer) window.__viewer.items = layout.items;
   runLength = length;
+  if (!dynamicOnly) setWeatherCover(coveredRanges(layout.items));
   for (const [name, g] of Object.entries(layers)) if (!dynamicOnly || DYNAMIC_LAYERS.has(name)) g.clear();
   for (const [it, obj] of objs) {
     if (!obj) continue;
@@ -744,8 +865,42 @@ scene.add(skylineGroup);
 let skylineTheme = null;
 
 /** Fog, sky and skyline from the theme's ThemeConfig. */
+/** Stretches of the run under a roof (tubes, stations, pillar halls): [z0, z1) each. */
+function coveredRanges(items) {
+  const ranges = [];
+  const covered = items.filter((it) => /^boundary_(tube|station_|pillars_)/.test(it.slot)).sort((a, b) => a.pos[2] - b.pos[2]);
+  for (const it of covered) {
+    const z0 = it.pos[2];
+    const z1 = z0 + Math.max(manifest.prefabs[it.prefab]?.bbox?.[1][2] ?? 180, 90);
+    const last = ranges[ranges.length - 1];
+    if (last && z0 <= last[1] + 1) last[1] = Math.max(last[1], z1);
+    else ranges.push([z0, z1]);
+  }
+  return ranges;
+}
+
+/** The theme's largest looping box of snow (2.27 North Pole: around the start train only). */
+function themeSnow() {
+  let best = null;
+  let volume = 0;
+  for (const p of Object.values(manifest.prefabs)) {
+    for (const [name, def] of Object.entries(p.particles ?? {})) {
+      if (!/snow/i.test(name) || !def.loop || def.shape?.type !== 5) continue;
+      const v = def.shape.box.reduce((a, b) => a * b, 1);
+      if (v > volume) [best, volume] = [def, v];
+    }
+  }
+  return best;
+}
+let weatherTheme = null;
+
 function applyThemeLook() {
   const cfg = manifest.themeConfigs?.[state.theme] ?? {};
+  if (weatherTheme !== state.theme) {
+    weatherTheme = state.theme;
+    setWeather(scene, themeSnow(), materials);
+  }
+  setWeatherVisible(state.particles && state.weather && !state.inspect && !studio?.active);
   // No fog/skyline while inspecting: the camera frames pieces from far away
   // (nor in the studio's top view, 600 units above the run)
   setFog(cfg.fog, state.fog && !state.inspect && !studio?.active, state.fogScale);
@@ -974,10 +1129,27 @@ const shuffle = () => {
   generation.refresh();
 };
 const regen = () => rebuild();
+
+/** Puts the middle-lane pillars back in every pillar hall: as studio items, or by turning pillar obstacles on. */
+function fixPillars() {
+  if (state.obstacleMode !== 'studio') {
+    state.gen.obstacles.pillar = true;
+    generation.refresh();
+    return regen();
+  }
+  const gen = { ...state.gen, obstacles: { ...state.gen.obstacles, pillar: true } };
+  const spots = generateLayout(manifest, state.theme, { ...state, obstacleMode: 'random', gen, trainTheme: trainTheme() }).items.filter((it) => it.slot === 'obstacle_pillar');
+  const has = (z) => state.studio.some((it) => it.type === 'obstacle' && it.key === 'pillar' && it.lane === 0 && Math.abs(it.z - z) < 1);
+  const missing = spots.filter((p) => !has(p.pos[2]));
+  state.studio = [...state.studio, ...missing.map((p) => ({ type: 'obstacle', key: 'pillar', lane: 0, z: p.pos[2] }))];
+  saveStudio();
+  rebuild({ dynamicOnly: true });
+}
 const catalog = () => studioCatalog(manifest, state.theme, trainTheme());
 // "low_01" -> "Low 01" ("med" pieces read as "Medium")
 const pieceLabel = (key) => key.replace(/^med_/, 'medium_').replace(/^(\w)/, (c) => c.toUpperCase()).replace('_', ' ');
 for (const piece of buildingPieces(manifest, state.theme)) state.gen.pieces[piece.key] ??= true;
+for (const v of landmarkVariants(manifest, state.theme)) state.gen.variants[v.key] ??= true;
 const toggles = (obj, entries, onChange = regen) => entries.filter(([, , show = true]) => show).map(([key, label]) => ({ type: 'toggle', label, obj, key, onChange }));
 const hasSlot = (slot) => Object.values(manifest.themes[state.theme]).some((c) => c[slot]?.length);
 const isAuto = () => state.obstacleMode !== 'studio';
@@ -1026,16 +1198,19 @@ const generation = createSettings(
         {
           title: 'Pillars',
           visible: () => hasSlot('boundary_pillars_mid') && hasSlot('obstacle_pillar'),
-          controls: [
-            {
-              type: 'toggle',
-              label: 'Fix pillars',
-              title: 'Pillar halls always keep their middle-lane pillars, even with pillar obstacles off or in the studio',
-              obj: state.gen,
-              key: 'fixPillars',
-              onChange: regen,
-            },
-          ],
+          controls: [{ type: 'button', label: '🏛 Fix pillars', title: 'Put a pillar back in every pillar hall spot that has none', action: () => fixPillars() }],
+        },
+        {
+          title: 'Landmark',
+          visible: () => state.gen.sections.epic !== false && landmarkVariants(manifest, state.theme).length > 0,
+          controls: landmarkVariants(manifest, state.theme).map((v) => ({
+            type: 'toggle',
+            label: v.label,
+            obj: state.gen.variants,
+            key: v.key,
+            onChange: regen,
+            extra: { label: '👁', title: 'Preview the landmark', action: () => (generation.close(), inspectPieces([v.prefab])) },
+          })),
         },
         {
           title: 'Building pieces',
@@ -1082,7 +1257,10 @@ const rendering = createWorkbar(
         },
         {
           title: 'Particles',
-          controls: [{ type: 'toggle', label: 'Smoke, glows, sparks', obj: state, key: 'particles', onChange: () => rebuild() }],
+          controls: [
+            { type: 'toggle', label: 'Smoke, glows, sparks', obj: state, key: 'particles', onChange: () => (rebuild(), applyThemeLook()) },
+            { type: 'toggle', label: 'Snow along the run', obj: state, key: 'weather', visible: () => !!themeSnow(), onChange: applyThemeLook },
+          ],
         },
       ],
     },
@@ -1184,6 +1362,7 @@ const studio = createStudio({
     rebuild({ dynamicOnly: true });
   },
   fromRun: () => runToStudio(),
+  fixPillars: () => fixPillars(),
   // Skin of a train placed with "Any" before skins were fixed at placement
   actualVariant: (it) => {
     const shown = window.__viewer?.items?.find((i) => i.group === `studio${it.lane}@${it.z0}` && i.slot.startsWith('train_') && i.slot !== 'train_ramp');
@@ -1288,22 +1467,57 @@ const ui = createUI(manifest, {
 if (params.has('shot')) document.getElementById('ui').classList.add('hidden');
 
 // Tab hides / shows the whole interface; M or the toolbar opens the settings menu
+// Debug menu (K): tools for checking imports
+const debugMenu = createSettings(
+  document.getElementById('ui'),
+  [
+    {
+      tab: 'Debug',
+      groups: [
+        {
+          title: 'Generation',
+          controls: [
+            {
+              type: 'toggle',
+              label: 'Show everything',
+              title: 'No randomness: every building piece, section and landmark variant once, one after the other',
+              obj: state.gen,
+              key: 'showcase',
+              // A debug mode for going through maps: stays on from one map to the next
+              onChange: () => (storeFlag('debug:showcase', state.gen.showcase), regen()),
+            },
+          ],
+        },
+      ],
+    },
+  ],
+  { title: 'Debug' },
+);
+
 addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+  if (e.code === 'KeyK' && !e.metaKey && !e.ctrlKey && !studio.active) {
+    settings.close();
+    generation.close();
+    rendering.close();
+    debugMenu.toggle();
+    return;
+  }
   if (e.code === 'Tab') {
     e.preventDefault();
     document.body.classList.toggle('ui-hidden');
   } else if (e.code === 'KeyM' && !studio.active) {
     settings.toggle();
-  } else if (e.code === 'Escape' && (settings.isOpen() || generation.isOpen())) {
+  } else if (e.code === 'Escape' && (settings.isOpen() || generation.isOpen() || debugMenu.isOpen())) {
     settings.close();
     generation.close();
+    debugMenu.close();
   }
 });
 
 applyCamera(state.camera);
 setControlMode(state.controls);
-window.__viewer = { fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, settings, enterStudio, exitStudio };
+window.__viewer = { fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, settings, enterStudio, exitStudio, rebuild };
 await rebuild();
 
 const clock = new THREE.Clock();
@@ -1312,6 +1526,7 @@ renderer.setAnimationLoop(() => {
   const dt = now - globals.uTime.value;
   globals.uTime.value = now;
   updateMeshAnimations(now);
+  updateAnimators(dt);
   updateParticles(dt, studio.active ? studio.camera : camera);
   if (orbit.enabled) orbit.update();
   fly.update();

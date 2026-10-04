@@ -86,12 +86,18 @@ uniform vec4 uMainST;
 uniform vec2 uScroll;
 #ifdef WAVE
 #ifndef USE_COLOR
-attribute vec3 color; // VertexWave: vertex color = sway weight
+attribute vec4 color; // VertexWave: vertex color red = sway weight, alpha = phase offset (2.x)
+#define WAVE_ALPHA color.a
+#elif defined(USE_COLOR_ALPHA)
+#define WAVE_ALPHA color.a
+#else
+#define WAVE_ALPHA 1.0
 #endif
 uniform vec3 uWaveDir;
 uniform vec3 uWavePlane;
 uniform vec3 uWaveParams; // frequency, speed, height
 uniform vec3 uWaveScales; // _SpeedScales: speed per axis
+uniform vec3 uWaveExtra; // _OffsetScale, _VertexColorWeight, _IgnoreVertexColor (2.x)
 #endif
 #ifdef WATER_WAVE
 uniform vec4 uWaterWave; // amplitude x, amplitude z, frequency x, frequency z
@@ -112,6 +118,7 @@ varying vec3 vNormalW;
 varying vec3 vColor;
 #endif
 #include <clipping_planes_pars_vertex>
+#include <skinning_pars_vertex>
 
 void main() {
   // Unity applies tiling/offset (and scrolls) with V pointing up; glTF UVs have V
@@ -123,12 +130,31 @@ void main() {
   vec2 unityUv = vec2(uv.x, 1.0 - uv.y) * uMainST.xy + offset;
   vUv = vec2(unityUv.x, 1.0 - unityUv.y);
   vec3 p = position;
+  vec3 n = normal;
+#ifdef USE_SKINNING
+  // Animated rigs (the Underwater kraken): three.js bone skinning
+  vec3 objectNormal = normal;
+  vec3 transformed = position;
+#include <skinbase_vertex>
+#include <skinnormal_vertex>
+#include <skinning_vertex>
+  p = transformed;
+  n = objectNormal;
+#endif
 #ifdef WAVE
   // SYBO VertexWave: a sine travelling across the wave plane (radians per unit, per second),
   // each axis at its own speed; vertex color red weights it (0 at a plant's base)
   vec3 wp = (modelMatrix * vec4(p, 1.0)).xyz;
+#ifdef WAVE_2X
+  // 2.x SYBO/Bend/VertexWave (from its compiled code): the wave travels along _WaveDirection,
+  // vertices move along _WavePlaneNormal (object space); vertex alpha offsets the phase,
+  // red weights the motion; _Time.x * 10 = half a second's worth
+  vec3 phase = vec3(uTime * 0.5 * uWaveParams.y) * uWaveScales + dot(wp, -uWaveDir) * uWaveParams.x + uWaveExtra.x * WAVE_ALPHA;
+  p += sin(phase) * uWaveParams.z * uWavePlane * mix(color.r, 1.0, uWaveExtra.z) * uWaveExtra.y;
+#else
   vec3 phase = uTime * uWaveParams.y * uWaveScales + dot(wp, uWavePlane) * uWaveParams.x;
   p += uWaveDir * sin(phase) * uWaveParams.z * color.r;
+#endif
 #endif
 #ifdef LAVA
   p.y += (texture2D(uDisplaceTex, uv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5) * uMeshDisplace;
@@ -140,12 +166,12 @@ void main() {
        + sin(ww.z * uWaterWave.w * 0.01 + uTime * uWaterSpeed.y) * uWaterWave.y * 0.25;
 #endif
   vWorld = (modelMatrix * vec4(p, 1.0)).xyz;
-  vNormalW = normalize(mat3(modelMatrix) * normal);
+  vNormalW = normalize(mat3(modelMatrix) * n);
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   float depth = max(-mv.z, 0.0);
   mv.xy += vec2(uBend.x, -uBend.y) * depth * depth;
   vDepth = -mv.z;
-  vNormalV = normalize(normalMatrix * normal);
+  vNormalV = normalize(normalMatrix * n);
   vViewDir = normalize(-mv.xyz);
 #ifdef USE_COLOR
   vColor = color.rgb; // vec3 or vec4 (RGBA vertex colors) depending on the mesh
@@ -423,6 +449,27 @@ function loadTexture(url) {
   return textureCache.get(url);
 }
 
+/** Unity's built-in Default-Particle: a soft disc fading out to the edges (color and alpha). */
+let defaultParticleTex = null;
+function defaultParticle() {
+  if (defaultParticleTex) return defaultParticleTex;
+  const n = 64;
+  const data = new Uint8Array(n * n * 4);
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const d = Math.hypot((x + 0.5) / n - 0.5, (y + 0.5) / n - 0.5) * 2;
+      const a = Math.max(0, 1 - d) ** 2;
+      const v = Math.round(a * 255); // color fades too: additive blending ignores alpha
+      data.set([v, v, v, v], (y * n + x) * 4);
+    }
+  }
+  defaultParticleTex = new THREE.DataTexture(data, n, n);
+  defaultParticleTex.colorSpace = THREE.NoColorSpace;
+  defaultParticleTex.magFilter = defaultParticleTex.minFilter = THREE.LinearFilter;
+  defaultParticleTex.needsUpdate = true;
+  return defaultParticleTex;
+}
+
 // ---------------------------------------------------------------- library
 
 const color4 = (c, fallback = [1, 1, 1, 1]) => new THREE.Vector4(...(c ?? fallback));
@@ -502,6 +549,7 @@ export class MaterialLibrary {
 
   tex(def, name) {
     const t = def.textures[name];
+    if (t?.builtin === 'Default-Particle') return defaultParticle();
     if (!t?.url) return null;
     return loadTexture(t.url.startsWith('/') ? t.url : `${this.baseUrl}/${t.url}`); // merged envs use absolute paths
   }
@@ -561,6 +609,8 @@ export class MaterialLibrary {
     const wave = /(^|\/)(Legacy\/)?VertexWave|^Bend\/Wave \(Vertex Color Control\)/.test(def.shader); // 1.x flags
     if (f._HasGradient) defines.GRADIENT = '';
     if (wave) defines.WAVE = '';
+    const wave2x = def.shader === 'SYBO/Bend/VertexWave';
+    if (wave2x) defines.WAVE_2X = '';
 
     const tint = color4(c._Color);
     const mat = new THREE.ShaderMaterial({
@@ -587,8 +637,10 @@ export class MaterialLibrary {
         uAltTex: { value: altTex ?? WHITE },
         uAltRef: { value: this.tex(def, '_AlternateRef') ?? refTex ?? WHITE },
         uMaskTex: { value: maskTex ?? WHITE },
-        uWaveDir: { value: new THREE.Vector3(...(c._WaveDirection ?? [0, 0, 0]).slice(0, 3)) },
-        uWavePlane: { value: new THREE.Vector3(...(c._WavePlaneNormal ?? [0, 0, 0]).slice(0, 3)) },
+        // 2.x: directions mirrored on X like the glb
+        uWaveDir: { value: new THREE.Vector3(...(c._WaveDirection ?? [0, 0, 0]).slice(0, 3)).multiply(wave2x ? new THREE.Vector3(-1, 1, 1) : new THREE.Vector3(1, 1, 1)) },
+        uWavePlane: { value: new THREE.Vector3(...(c._WavePlaneNormal ?? [0, 0, 0]).slice(0, 3)).multiply(wave2x ? new THREE.Vector3(-1, 1, 1) : new THREE.Vector3(1, 1, 1)) },
+        uWaveExtra: { value: new THREE.Vector3(f._OffsetScale ?? 0, f._VertexColorWeight ?? 1, f._IgnoreVertexColor ? 1 : 0) },
         uWaveParams: { value: new THREE.Vector3(f._Frequency ?? 1, f._Speed ?? 1, f._WaveHeight ?? 0) },
         uWaveScales: { value: new THREE.Vector3(...(c._SpeedScales?.slice(0, 3).some((v) => v) ? c._SpeedScales.slice(0, 3) : [1, 1, 1])) },
         uWaterWave: { value: new THREE.Vector4(f._AmplitudeX ?? 0, f._AmplitudeZ ?? 0, f._FrequenceyX ?? 1, f._FrequenceyZ ?? 1) },

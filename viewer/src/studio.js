@@ -30,6 +30,7 @@ const LABELS = {
   bush: 'Bush',
   dumpster: 'Dumpster',
   powerBox: 'Power box',
+  pillar: 'Pillar',
 };
 const KIND_LABELS = { static: 'Parked', moving: 'Moving', falling: 'Lava' };
 const VARIANT_LABELS = { auto: 'Any', cargo: 'Cargo', passenger: 'Passenger', subway: 'Subway' };
@@ -563,6 +564,7 @@ export function createStudio(ctx) {
         ...MODES.filter(([m]) => m !== 'noTracks' || cat.tracks !== false).map(([m, label]) => btn(label, mode === m, () => setTool(m === 'place' ? placeTool : { type: m }), m === 'remove' ? 'danger' : '')),
         btn('💥 Wipe', false, () => confirm('Remove everything placed, including no-track zones?') && (setTool(tool), commit([], 'Wiped')), 'danger'),
         el('span', { class: 'studio-sep' }),
+        ...(cat.pillars ? [el('button', { title: 'Put a pillar back in every pillar hall spot that has none', onclick: () => ctx.fixPillars() }, '🏛 Fix pillars')] : []),
         el('button', { title: 'Replace everything with the auto-generated run', onclick: async () => commit(await ctx.fromRun(), 'Copied the auto-generated run') }, '⟳ Copy auto run'),
         el('button', { class: 'primary', onclick: () => ctx.onExit() }, 'Done'),
       ),
