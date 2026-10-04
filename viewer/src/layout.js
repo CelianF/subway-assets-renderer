@@ -112,7 +112,9 @@ function classicLayout(manifest, names, seed, sections, showcase = false) {
   const laid = [];
   if (showcase) {
     // Debug: every chunk once, by difficulty (as the game unlocks them)
-    for (const chunk of [...chunks].sort((a, b) => a.zMin - b.zMin || a.name.localeCompare(b.name))) {
+    // (not the ones a run never picks: zMaximum below zMinimum, e.g. 1.10's jetpack landing)
+    const usable = chunks.filter((c) => c.zMax == null || c.zMax > c.zMin);
+    for (const chunk of usable.sort((a, b) => a.zMin - b.zMin || a.name.localeCompare(b.name))) {
       items.push({ prefab: chunk.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(rng() * 2 ** 31) });
       z += chunk.zSize;
     }

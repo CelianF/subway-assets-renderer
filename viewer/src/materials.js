@@ -119,6 +119,7 @@ varying vec3 vColor;
 #endif
 #include <clipping_planes_pars_vertex>
 #include <skinning_pars_vertex>
+#include <morphtarget_pars_vertex>
 
 void main() {
   // Unity applies tiling/offset (and scrolls) with V pointing up; glTF UVs have V
@@ -140,6 +141,15 @@ void main() {
 #include <skinning_vertex>
   p = transformed;
   n = objectNormal;
+#endif
+#ifdef USE_MORPHTARGETS
+  {
+    // Blend shapes (the Cosmic Crossroads monster's mouth)
+    vec3 transformed = p;
+#include <morphinstance_vertex>
+#include <morphtarget_vertex>
+    p = transformed;
+  }
 #endif
 #ifdef WAVE
   // SYBO VertexWave: a sine travelling across the wave plane (radians per unit, per second),
@@ -390,9 +400,14 @@ const SKY_FRAGMENT = /* glsl */ `
 uniform vec3 uTop;
 uniform vec3 uBottom;
 uniform float uPower;
+uniform sampler2D uMap;
+uniform vec2 uMapRange; // texel centers at the bottom and top: no repeat bleed
 varying float vY;
 void main() {
-  gl_FragColor = vec4(mix(uBottom, uTop, pow(clamp(vY, 0.0, 1.0), uPower)), 1.0);
+  float y = clamp(vY, 0.0, 1.0);
+  // TEXTURE_ENABLED: screen-space vertical gradient texture (flipY off: Unity's v = 1 - ours)
+  vec3 t = texture2D(uMap, vec2(0.5, 1.0 - mix(uMapRange.x, uMapRange.y, y))).rgb;
+  gl_FragColor = vec4(t * mix(uBottom, uTop, pow(y, uPower)), 1.0);
 }
 `;
 
@@ -405,6 +420,8 @@ export function createSky() {
       uTop: { value: new THREE.Color(0.6, 0.65, 0.7) },
       uBottom: { value: new THREE.Color(0.74, 0.83, 0.91) },
       uPower: { value: 3 },
+      uMap: { value: WHITE },
+      uMapRange: { value: new THREE.Vector2(0, 1) },
     },
     depthTest: false,
     depthWrite: false,
@@ -412,10 +429,19 @@ export function createSky() {
   const sky = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
   sky.frustumCulled = false;
   sky.renderOrder = -10000;
-  sky.setColors = ({ top, bottom, power } = {}) => {
+  /** @param textureUrl the sky's gradient texture (resolved url), if it has one */
+  sky.setColors = ({ top, bottom, power } = {}, textureUrl = null) => {
     if (top) mat.uniforms.uTop.value.setRGB(top[0], top[1], top[2]);
     if (bottom) mat.uniforms.uBottom.value.setRGB(bottom[0], bottom[1], bottom[2]);
     if (power) mat.uniforms.uPower.value = power;
+    const map = textureUrl ? loadTexture(textureUrl) : WHITE;
+    mat.uniforms.uMap.value = map;
+    const fit = () => {
+      const h = map.image?.height ?? 0;
+      mat.uniforms.uMapRange.value.set(h ? 0.5 / h : 0, h ? 1 - 0.5 / h : 1);
+    };
+    if (map.image) fit();
+    else map.onUpdate = fit; // first upload, once loaded
   };
   return sky;
 }

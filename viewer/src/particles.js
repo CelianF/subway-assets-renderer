@@ -65,6 +65,9 @@ function evalGradient(g, t, out) {
 
 const tmpA = new THREE.Vector4();
 const tmpB = new THREE.Vector4();
+const tmpCenter = new THREE.Vector3();
+const tmpRel = new THREE.Vector3();
+const tmpEuler = new THREE.Euler();
 /** MinMaxGradient at normalized time t with random r. */
 function sampleColor(c, t, r, out) {
   if (!c) return out.set(1, 1, 1, 1);
@@ -243,7 +246,11 @@ varying vec2 vUv;
 varying vec4 vColor;
 varying float vDepth;
 void main() {
+#ifdef VERTEX_COLORS
   vec4 c = texture2D(uMap, vUv) * vColor * uTint;
+#else
+  vec4 c = texture2D(uMap, vUv) * uTint;
+#endif
   float fog = uFogOn * clamp((vDepth - uFogRange.x) / max(uFogRange.y - uFogRange.x, 1.0), 0.0, 1.0);
 #if FADE_MODE == 2
   c.rgb *= 1.0 - fog; // additive fades to nothing
@@ -294,7 +301,9 @@ function particleLook(materials, name) {
   const fadeMode = src === 2 ? 3 : dst === 1 ? 2 : src === 1 && dst === 10 ? 4 : 1;
   // Legacy particle shaders double _TintColor (0.5 grey = unchanged)
   const tint = c._TintColor ? c._TintColor.map((v) => v * 2) : c._MainColor && /Additive/i.test(shader) ? [...c._MainColor.slice(0, 3), 1] : c._Color ?? [1, 1, 1, 1];
-  return { map: def ? materials.tex(def, '_MainTex') : null, src, dst, fadeMode, tint };
+  // Combined without VERTEX_COLORS ignores the particle color (3.60 Ireland seagulls: dark grey start color)
+  const vertexColors = shader !== 'SYBO/Bend/Combined' || !!f._HasVertexColors || !!def?.keywords?.includes('VERTEX_COLORS_ENABLED');
+  return { map: def ? materials.tex(def, '_MainTex') : null, src, dst, fadeMode, tint, vertexColors };
 }
 
 const BLEND = [
@@ -313,7 +322,7 @@ const BLEND = [
 
 function makeMaterial(look, vertexShader, extraUniforms) {
   return new THREE.ShaderMaterial({
-    defines: { FADE_MODE: look.fadeMode },
+    defines: { FADE_MODE: look.fadeMode, ...(look.vertexColors ? { VERTEX_COLORS: '' } : {}) },
     vertexShader,
     fragmentShader: FRAGMENT,
     uniforms: {
@@ -576,14 +585,35 @@ class Emitter {
         ez = sample(vel.z, lt, this.rand[i * 2 + 1]);
       }
       const pos = this.local.pos;
+      const x0 = pos[p];
+      const y0 = pos[p + 1];
+      const z0 = pos[p + 2];
       pos[p] += (v[p] + ex) * dt;
       pos[p + 1] += (v[p + 1] + ey) * dt;
       pos[p + 2] += (v[p + 2] + ez) * dt;
-      this.heading[p] = v[p] + ex;
-      this.heading[p + 1] = v[p + 1] + ey;
-      this.heading[p + 2] = v[p + 2] + ez;
+      if (vel?.orbital) this.orbit(i, lt, dt);
+      // Direction of travel from the actual move, orbits included
+      this.heading[p] = (pos[p] - x0) / dt;
+      this.heading[p + 1] = (pos[p + 1] - y0) / dt;
+      this.heading[p + 2] = (pos[p + 2] - z0) / dt;
       this.rot[i] += this.spin[i] * dt;
     }
+  }
+
+  /** Velocity module's orbital (radians/s about the system's axes) and radial speeds. */
+  orbit(i, lt, dt) {
+    const vel = this.def.velocity;
+    const r = this.rand[i * 2 + 1];
+    const o = vel.orbitalOffset ?? [0, 0, 0];
+    // Unity -> glb space mirrors X: rotations about Y and Z turn the other way
+    tmpCenter.set(-o[0], o[1], o[2]);
+    tmpRel.fromArray(this.local.pos, i * 3).sub(tmpCenter);
+    const radial = sample(vel.radial, lt, r);
+    const len = tmpRel.length();
+    if (radial && len > 1e-4) tmpRel.multiplyScalar(1 + (radial * dt) / len);
+    tmpEuler.set(sample(vel.orbital.x, lt, r) * dt, -sample(vel.orbital.y, lt, r) * dt, -sample(vel.orbital.z, lt, r) * dt);
+    tmpRel.applyEuler(tmpEuler).add(tmpCenter);
+    tmpRel.toArray(this.local.pos, i * 3);
   }
 
   upload() {
@@ -596,7 +626,8 @@ class Emitter {
       const axis = new THREE.Vector3();
       const facing = new THREE.Matrix4();
       const zero = new THREE.Vector3();
-      const up = new THREE.Vector3(0, 1, 0);
+      // World up in the emitter's frame (3.60 Ireland seagull emitters are turned 90° on X)
+      const up = this.gravityLocal ? this.gravityLocal.clone().negate().normalize() : new THREE.Vector3(0, 1, 0);
       const byVelocity = d.render.alignment === 4;
       for (let i = 0; i < this.count; i++) {
         const lt = this.age[i] / this.life[i];

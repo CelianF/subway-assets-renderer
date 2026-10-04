@@ -288,6 +288,16 @@ async function applySkinned(obj, list) {
     if (!holder) continue; // its variant wasn't picked
     // The bones: in the nearest subtree around the renderer that holds them all
     let bones = null;
+    if (sk.bonePaths) {
+      // Exact paths below the prefab root (rigs sharing bone names)
+      const walk = (path) => {
+        let node = obj;
+        for (const part of path.split('/')) node = node?.children.find((c) => c.name === key(part) || c.name.replace(/_\d+$/, '') === key(part));
+        return node;
+      };
+      const found = sk.bonePaths.map(walk);
+      if (found.every(Boolean)) bones = found;
+    }
     for (let scope = holder.parent; scope && !bones; scope = scope.parent) {
       const found = sk.bones.map((b) => findIn(scope, b));
       if (found.every(Boolean)) bones = found;
@@ -308,30 +318,135 @@ async function applySkinned(obj, list) {
   }
 }
 
+/** Blend-shape meshes rebuilt by the builder (the glb leaves them out): one mesh per renderer. */
+const morphMeshFiles = new Map();
+async function applyMorphMeshes(obj, list) {
+  for (const m of list) {
+    const holder = findNode(obj, m.node);
+    if (!holder) continue; // its variant wasn't picked
+    if (!morphMeshFiles.has(m.url)) morphMeshFiles.set(m.url, fetch(dataUrl(m.url)).then((r) => r.json()).catch(() => null));
+    const data = await morphMeshFiles.get(m.url);
+    if (!data) continue;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(data.uvs, 2));
+    if (data.colors) geometry.setAttribute('color', new THREE.Float32BufferAttribute(data.colors, 4));
+    geometry.setIndex(data.indices);
+    let start = 0;
+    data.groups.forEach((count, i) => (geometry.addGroup(start, count, i), (start += count)));
+    const count = data.positions.length / 3;
+    geometry.morphAttributes.position = data.morphs.map((shape) => {
+      const delta = new Float32Array(count * 3);
+      shape.indices.forEach((v, k) => delta.set(shape.deltas.slice(k * 3, k * 3 + 3), v * 3));
+      return new THREE.BufferAttribute(delta, 3);
+    });
+    geometry.morphTargetsRelative = true;
+    geometry.computeVertexNormals();
+    const materials = data.groups.map((_, i) => new THREE.MeshBasicMaterial({ name: m.materials[i] ?? m.materials[0] ?? 'DefaultMaterial' }));
+    const mesh = new THREE.Mesh(geometry, materials.length > 1 ? materials : materials[0]);
+    mesh.name = `${holder.name}_morph`;
+    mesh.frustumCulled = false; // bounds change with the shapes
+    mesh.morphTargetDictionary = Object.fromEntries(data.morphs.map((shape, i) => [shape.name, i]));
+    mesh.morphTargetInfluences = data.morphs.map(() => 0);
+    holder.add(mesh);
+  }
+}
+
 async function applyAnimators(obj, url, seed) {
   if (!animatorFiles.has(url)) animatorFiles.set(url, fetch(dataUrl(url)).then((r) => r.json()).catch(() => []));
   const rng = mulberry32(seed ^ 0x616e696d);
   for (const anim of await animatorFiles.get(url)) {
-    let root = null;
-    obj.traverse((o) => (root ??= o.name === THREE.PropertyBinding.sanitizeNodeName(anim.node) ? o : null));
-    if (!root) continue; // its variant wasn't picked
-    // Unity paths ("Armature/Bone/Bone.007") walked child by child from the Animator
-    const find = (path) => {
-      let node = root;
-      for (const part of path ? path.split('/') : []) {
-        const name = THREE.PropertyBinding.sanitizeNodeName(part);
-        node = node?.children.find((c) => c.name === name || c.name.replace(/_\d+$/, '') === name);
-      }
-      return node;
-    };
-    const Track = { quaternion: THREE.QuaternionKeyframeTrack, position: THREE.VectorKeyframeTrack, scale: THREE.VectorKeyframeTrack };
-    const tracks = anim.tracks.map((t) => (find(t.path) ? new Track[t.property](`${find(t.path).uuid}.${t.property}`, t.times, t.values) : null)).filter(Boolean);
-    if (!tracks.length) continue;
-    const mixer = new THREE.AnimationMixer(root);
-    const action = mixer.clipAction(new THREE.AnimationClip(anim.node, anim.duration, tracks));
-    action.play();
+    const mixer = animationMixer(obj, anim);
+    if (!mixer) continue;
     mixer.setTime(rng() * anim.duration);
     mixers.add({ root: obj, mixer });
+  }
+}
+
+/** A playing mixer for a baked clip ({ node, duration, tracks }) under obj, or null. */
+function animationMixer(obj, anim) {
+  const root = findNode(obj, anim.node);
+  if (!root) return null; // its variant wasn't picked
+  // Unity paths ("Armature/Bone/Bone.007") walked child by child from the Animator
+  const find = (path) => {
+    let node = root;
+    for (const part of path ? path.split('/') : []) {
+      const name = THREE.PropertyBinding.sanitizeNodeName(part);
+      node = node?.children.find((c) => c.name === name || c.name.replace(/_\d+$/, '') === name);
+    }
+    return node;
+  };
+  const Track = { quaternion: THREE.QuaternionKeyframeTrack, position: THREE.VectorKeyframeTrack, scale: THREE.VectorKeyframeTrack };
+  const tracks = anim.tracks.map((t) => {
+    const node = find(t.path);
+    if (!node) return null;
+    if (t.property === 'morph') {
+      // Blend shape weights go to the rebuilt mesh under the renderer's node
+      const mesh = node.morphTargetDictionary ? node : node.children.find((c) => c.morphTargetDictionary?.[t.name] != null);
+      return mesh ? new THREE.NumberKeyframeTrack(`${mesh.uuid}.morphTargetInfluences[${t.name}]`, t.times, t.values) : null;
+    }
+    return new Track[t.property](`${node.uuid}.${t.property}`, t.times, t.values);
+  }).filter(Boolean);
+  if (!tracks.length) return null;
+  const mixer = new THREE.AnimationMixer(root);
+  mixer.clipAction(new THREE.AnimationClip(anim.node, anim.duration, tracks)).play();
+  return mixer;
+}
+
+function findNode(obj, name) {
+  const key = THREE.PropertyBinding.sanitizeNodeName(name);
+  let found = null;
+  obj.traverse((o) => (found ??= o.name === key ? o : null));
+  return found;
+}
+
+/**
+ * Trails swept by a triggered clip (3.60 Ireland rainbow): the game draws them as the
+ * player passes; here the finished trail is laid down as a ribbon, and the clip is left
+ * on its last frame so what rides along (the rainbow's sparks) waits at the trail's end.
+ */
+function applyTrails(obj, trails) {
+  const v = new THREE.Vector3();
+  const inv = new THREE.Matrix4();
+  for (const trail of trails) {
+    const mixer = animationMixer(obj, trail.animation);
+    const node = findNode(obj, trail.node);
+    if (!mixer || !node) continue;
+    const points = [];
+    const steps = Math.max(2, Math.round(trail.animation.duration * 30));
+    for (let i = 0; i <= steps; i++) {
+      mixer.setTime((i / steps) * trail.animation.duration * 0.9999); // stop short of the wrap
+      obj.updateMatrixWorld(true);
+      inv.copy(obj.matrixWorld).invert();
+      points.push(node.getWorldPosition(v).applyMatrix4(inv).clone());
+    }
+    // Width across the trail, in the plane it sweeps (faces the run, like View alignment there)
+    const a = points[0];
+    const b = points[Math.floor(points.length / 2)];
+    const c = points[points.length - 1];
+    const normal = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a)).normalize();
+    if (normal.lengthSq() < 0.5) normal.set(0, 0, 1);
+    const pos = [];
+    const uv = [];
+    const index = [];
+    const tangent = new THREE.Vector3();
+    const side = new THREE.Vector3();
+    points.forEach((p, i) => {
+      tangent.subVectors(points[Math.min(i + 1, points.length - 1)], points[Math.max(i - 1, 0)]).normalize();
+      side.crossVectors(tangent, normal).multiplyScalar(trail.width / 2);
+      pos.push(p.x + side.x, p.y + side.y, p.z + side.z, p.x - side.x, p.y - side.y, p.z - side.z);
+      const u = 1 - i / (points.length - 1); // Stretch: 0 at the head
+      uv.push(u, 0, u, 1);
+      if (i) index.push(2 * i - 2, 2 * i - 1, 2 * i, 2 * i - 1, 2 * i + 1, 2 * i);
+    });
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geometry.setIndex(index);
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ name: trail.material }));
+    mesh.name = `${node.name}_trail`;
+    mesh.frustumCulled = false;
+    obj.add(mesh);
   }
 }
 
@@ -495,8 +610,10 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   removeLowLods(obj, prefab.lodHidden);
   if (prefab.randomizers) applyRandomizers(obj, prefab.randomizers, variantSeed, name, variants);
   if (prefab.skinned) await applySkinned(obj, prefab.skinned);
+  if (prefab.morphMeshes) await applyMorphMeshes(obj, prefab.morphMeshes);
   if (prefab.animators) await applyAnimators(obj, prefab.animators, variantSeed);
   if (prefab.meshAnimations) await applyMeshAnimations(obj, prefab.meshAnimations, variantSeed);
+  if (prefab.trails) applyTrails(obj, prefab.trails);
   obj.traverse((o) => {
     if (!o.isMesh) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -696,7 +813,7 @@ const state = {
   bend: Number(params.get('bend') ?? 0),
   bendVertical: Number(params.get('bendV') ?? 0),
   fov: 55,
-  gen: { ...structuredClone(DEFAULT_GEN), showcase: storedFlag('debug:showcase') },
+  gen: { ...structuredClone(DEFAULT_GEN), showcase: params.get('showcase') === '1' || storedFlag('debug:showcase') },
   studio: loadStudio(),
 };
 
@@ -904,7 +1021,7 @@ function applyThemeLook() {
   // No fog/skyline while inspecting: the camera frames pieces from far away
   // (nor in the studio's top view, 600 units above the run)
   setFog(cfg.fog, state.fog && !state.inspect && !studio?.active, state.fogScale);
-  sky.setColors(cfg.sky);
+  sky.setColors(cfg.sky, cfg.sky?.texture ? dataUrl(cfg.sky.texture) : null);
   if (skylineTheme !== state.theme) {
     skylineTheme = state.theme;
     skylineGroup.clear();
@@ -918,7 +1035,9 @@ function applyThemeLook() {
 
 /**
  * BackgroundLayer: a skyline silhouette kept at a fixed distance ahead of the camera,
- * colored with the config's vertical gradient (ColorMode 1) and unaffected by fog.
+ * unaffected by fog. ColorMode 0: flat tint; 1: the config's vertical gradient; 2: the
+ * mesh's vertex colors (decoded by the builder: the glb lost them). Older manifests have
+ * no mode: gradient, lightly tinted.
  */
 async function loadSkyline(bg) {
   const prefab = manifest.prefabs[bg.prefab];
@@ -934,17 +1053,62 @@ async function loadSkyline(bg) {
       ...skylineUniforms,
       ...globals, // fog color: a faded skyline melts into the haze
     },
-    vertexShader: `varying float vY; void main() { vY = position.y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-    fragmentShader: `uniform vec3 uA; uniform vec3 uB; uniform vec3 uTint; uniform vec2 uRange; uniform float uOpacity; varying float vY;
+    defines: { COLOR_MODE: bg.colorMode ?? -1 },
+    vertexColors: bg.colorMode === 2 && !!bg.mesh,
+    vertexShader: `varying float vY; varying vec3 vColor; void main() { vY = position.y;
+      #ifdef USE_COLOR
+        vColor = color.rgb;
+      #else
+        vColor = vec3(1.0);
+      #endif
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform vec3 uA; uniform vec3 uB; uniform vec3 uTint; uniform vec2 uRange; uniform float uOpacity; varying float vY; varying vec3 vColor;
       void main() { float t = clamp((vY - uRange.x) / max(uRange.y - uRange.x, 1.0), 0.0, 1.0);
-        gl_FragColor = vec4(mix(uB, uA, t) * mix(vec3(1.0), uTint, 0.35), uOpacity); }`,
+      #if COLOR_MODE == 0
+        vec3 c = uTint;
+      #elif COLOR_MODE == 1
+        vec3 c = mix(uB, uA, t);
+      #elif COLOR_MODE == 2
+        vec3 c = vColor;
+      #else
+        vec3 c = mix(uB, uA, t) * mix(vec3(1.0), uTint, 0.35);
+      #endif
+        gl_FragColor = vec4(c, uOpacity); }`,
     transparent: true,
     depthWrite: false,
     side: THREE.DoubleSide,
   });
+  let geometry = null;
+  if (bg.mesh) {
+    geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(bg.mesh.positions, 3));
+    if (bg.mesh.colors) geometry.setAttribute('color', new THREE.Float32BufferAttribute(bg.mesh.colors, 4));
+    geometry.setIndex(bg.mesh.indices);
+  }
+  // Only Multi Skyline meshes take the layer's coloring; the rest keep their own material,
+  // unfogged (3.68 Cosmic Crossroads: a whole dome of planets, glows and trims)
+  const vertexColored = mat.clone();
+  vertexColored.vertexColors = true;
+  vertexColored.uniforms = mat.uniforms;
+  const unfogged = new Map();
+  const own = (m) => {
+    if (!unfogged.has(m.name)) {
+      const base = materials.get(m.name, m);
+      const copy = base.clone();
+      if (base.uniforms) copy.uniforms = { ...base.uniforms, uFogOn: { value: 0 } };
+      unfogged.set(m.name, copy);
+    }
+    return unfogged.get(m.name);
+  };
+  const isSkyline = (m) => !manifest.materials[m.name] || /Skyline/.test(manifest.materials[m.name].shader);
   obj.traverse((o) => {
     if (o.isMesh) {
-      o.material = mat;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      if (mats.every(isSkyline) && geometry) o.geometry = geometry;
+      // Vertex color mode without a decoded mesh: the glb's own colors
+      const skylineMat = mat.vertexColors || !o.geometry.attributes.color || bg.colorMode !== 2 ? mat : vertexColored;
+      const out = mats.map((m) => (isSkyline(m) ? skylineMat : own(m)));
+      o.material = out.length === 1 ? out[0] : out;
       o.frustumCulled = false;
       o.renderOrder = -1000; // behind the level, in front of the sky
     }
@@ -1516,6 +1680,13 @@ addEventListener('keydown', (e) => {
 });
 
 applyCamera(state.camera);
+// Debug: start further down the run (?z=1800), e.g. to check a showcase chunk
+if (params.get('z')) {
+  const dz = Number(params.get('z')) || 0;
+  camera.position.z += dz;
+  orbit.target.z += dz;
+  camera.lookAt(orbit.target);
+}
 setControlMode(state.controls);
 window.__viewer = { fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, settings, enterStudio, exitStudio, rebuild };
 await rebuild();

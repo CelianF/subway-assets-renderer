@@ -211,6 +211,9 @@ function parseThemeConfig(file, guidIndex) {
     const mat = read(skybox);
     const power = mat.match(/_Power: ([\d.e-]+)/);
     out.sky = { top: color('_TopColor', mat, 3), bottom: color('_BottomColor', mat, 3), power: power ? num(power[1]) : 1 };
+    // TEXTURE_ENABLED (3.60 Ireland): a vertical gradient texture, times the colors
+    const texGuid = mat.match(/_MainTex:\n\s+m_Texture: \{fileID: \d+, guid: (\w+)/)?.[1];
+    if (/_HasTexture: 1\b/.test(mat) && texGuid && guidIndex.has(texGuid)) out.sky.texture = guidIndex.get(texGuid);
   }
   const bg = text.match(/BackgroundLayer:\n {4}Prefab: \{fileID: \d+, guid: (\w+)/);
   if (bg && guidIndex.has(bg[1])) {
@@ -220,7 +223,109 @@ function parseThemeConfig(file, guidIndex) {
       tint: color('    Tint'),
       gradientA: color('GradientA'),
       gradientB: color('GradientB'),
+      colorMode: Number(text.match(/BackgroundLayer:[\s\S]*?\n {4}ColorMode: (\d+)/)?.[1] ?? 1), // 0 tint, 1 gradient, 2 vertex colors
     };
+    // Vertex colors (3.60 Ireland): the glb lost them (compressed mesh), decoded from the asset
+    if (out.background.colorMode === 2) {
+      const meshes = [...read(guidIndex.get(bg[1])).matchAll(/MeshFilter:[\s\S]*?m_Mesh: \{fileID: \d+, guid: (\w+)/g)].map(([, g]) => guidIndex.get(g));
+      const mesh = meshes.length === 1 && meshes[0] && existsSync(meshes[0]) ? compressedMesh(read(meshes[0])) : null;
+      if (mesh?.colors) out.background.mesh = mesh;
+    }
+  }
+  return out;
+}
+
+/** Unity PackedBitVector: `count` values of `bits` bits, packed LSB first. */
+function unpackBits(hex, count, bits) {
+  const data = Buffer.from(hex, 'hex');
+  const out = new Array(count);
+  let byte = 0;
+  let bit = 0;
+  for (let i = 0; i < count; i++) {
+    let x = 0;
+    for (let got = 0; got < bits; ) {
+      x += ((data[byte] >> bit) & ((1 << Math.min(bits - got, 8 - bit)) - 1)) * 2 ** got;
+      const n = Math.min(bits - got, 8 - bit);
+      bit += n;
+      got += n;
+      if (bit === 8) (byte++, (bit = 0));
+    }
+    out[i] = x;
+  }
+  return out;
+}
+
+/**
+ * A mesh asset stored with m_MeshCompression (no vertex buffer): positions, RGBA colors
+ * and triangles in glb space (X mirrored, winding flipped), or null.
+ */
+function compressedMesh(text) {
+  const vector = (name) => {
+    const block = text.split(`\n    ${name}:\n`)[1]?.split(/\n {4}m_/)[0] ?? '';
+    const field = (key) => block.match(new RegExp(`${key}: ?(.*)`))?.[1].trim() ?? '';
+    const count = Number(field('m_NumItems'));
+    const bits = Number(field('m_BitSize'));
+    if (!count || !bits) return null;
+    const raw = unpackBits(field('m_Data'), count, bits);
+    if (!block.includes('m_Range')) return raw;
+    const range = Number(field('m_Range'));
+    const start = Number(field('m_Start'));
+    const max = 2 ** bits - 1;
+    return raw.map((x) => start + (x * range) / max);
+  };
+  const v = vector('m_Vertices');
+  const tris = vector('m_Triangles');
+  if (!v || !tris) return null;
+  const c = vector('m_FloatColors');
+  const count = v.length / 3;
+  // First UV channel (m_UVInfo: 4 bits per channel, dimension - 1 in the low 2); V flipped like glTF
+  const uvAll = vector('m_UV');
+  const info = Number(text.match(/m_UVInfo: (\d+)/)?.[1] ?? 0);
+  const uvDim = info ? (info & 3) + 1 : 2;
+  const uvs = uvAll && uvAll.length >= count * uvDim ? Array.from({ length: count * 2 }, (_, k) => round(k % 2 ? 1 - uvAll[(k >> 1) * uvDim + 1] : uvAll[(k >> 1) * uvDim], 5)) : null;
+  const groups = [...text.matchAll(/\n {4}indexCount: (\d+)/g)].map(([, n]) => Number(n));
+  const positions = [];
+  for (let i = 0; i < v.length; i += 3) positions.push(round(-v[i], 4), round(v[i + 1], 4), round(v[i + 2], 4));
+  const indices = [];
+  for (let i = 0; i + 2 < tris.length; i += 3) indices.push(tris[i], tris[i + 2], tris[i + 1]);
+  return { positions, indices, uvs, groups, colors: c && c.length === count * 4 ? c.map((x) => round(x, 4)) : null };
+}
+
+/** Mesh blend shapes at full weight (last frame of each channel): [{ name, indices, deltas }], glb space. */
+function blendShapes(text) {
+  const block = text.split('\n  m_Shapes:')[1]?.split(/\n  m_\w/)[0] ?? '';
+  const vertices = [...block.matchAll(/- vertex: \{x: ([^,]+), y: ([^,]+), z: ([^}]+)\}[\s\S]*?\n\s+index: (\d+)/g)].map(([, x, y, z, i]) => [Number(x), Number(y), Number(z), Number(i)]);
+  const shapes = [...(block.split('\n    shapes:')[1] ?? '').matchAll(/firstVertex: (\d+)\n\s+vertexCount: (\d+)/g)].map(([, f, n]) => [Number(f), Number(n)]);
+  const channels = [...(block.split('\n    channels:')[1] ?? '').matchAll(/name: (.*)\n\s+nameHash: \d+\n\s+frameIndex: (\d+)\n\s+frameCount: (\d+)/g)].map(([, name, f, n]) => ({ name: name.trim(), shape: Number(f) + Number(n) - 1 }));
+  return channels.filter((ch) => shapes[ch.shape]).map(({ name, shape }) => {
+    const [first, n] = shapes[shape];
+    const list = vertices.slice(first, first + n);
+    return { name, indices: list.map((v) => v[3]), deltas: list.flatMap(([x, y, z]) => [round(-x, 4), round(y, 4), round(z, 4)]) };
+  });
+}
+
+/**
+ * SkinnedMeshRenderers without bones, animated by blend shapes only (3.68 Cosmic
+ * Crossroads monster). The glb export has no morph targets and its vertex order drifts
+ * from Unity's at seams, so the whole mesh is rebuilt from the (compressed) asset.
+ * Returns [{ node, materials, data: { positions, uvs, colors, indices, groups, morphs } }].
+ */
+function parseMorphMeshes(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  for (const { doc, kind, fid } of docs) if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+  const out = [];
+  for (const { doc, kind } of docs) {
+    if (kind !== '137' || !/\n {2}m_Bones: \[\]/.test(doc)) continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    const meshFile = guidIndex.get(doc.match(/\n {2}m_Mesh: \{[^}]*guid: (\w+)/)?.[1]);
+    if (!names.has(go) || !meshFile || !existsSync(meshFile)) continue;
+    const text = read(meshFile);
+    const morphs = blendShapes(text);
+    const mesh = morphs.length ? compressedMesh(text) : null;
+    if (!mesh?.uvs) continue;
+    const materials = [...(doc.split('\n  m_Materials:')[1]?.split(/\n  \w/)[0] ?? '').matchAll(/guid: (\w+)/g)].map(([, g]) => guidIndex.get(g)).filter(Boolean).map((p) => stem(p));
+    out.push({ node: names.get(go), materials, data: { ...mesh, morphs } });
   }
   return out;
 }
@@ -635,45 +740,125 @@ function parseAnimators(file, guidIndex) {
       const text = read(clip);
       const stop = Number(text.match(/m_StopTime: ([\d.eE+-]+)/)?.[1] ?? 0);
       const length = stop < 0.1 ? HOLD : stop;
-      const frames = Math.max(1, Math.round(length * FPS));
-      for (const [section, property] of [['m_RotationCurves', 'quaternion'], ['m_PositionCurves', 'position'], ['m_ScaleCurves', 'scale']]) {
-        const block = text.split(`\n  ${section}:`)[1]?.split(/\n  \w/)[0] ?? '';
-        for (const item of block.split('\n  - curve:').slice(1)) {
-          const curvePath = item.match(/\n\s+path: (.*)/)?.[1].trim() ?? '';
-          const n = property === 'quaternion' ? 4 : 3;
-          const vec = (s) => {
-            const v = ['x', 'y', 'z', 'w'].slice(0, n).map((c) => Number(s.match(new RegExp(`${c}: ([^,}]+)`))?.[1]));
-            return v;
-          };
-          const keys = [...item.matchAll(/time: ([^\n]+)\n\s+value: (\{[^}]*\})\n\s+inSlope: (\{[^}]*\})\n\s+outSlope: (\{[^}]*\})/g)].map(([, t, v, i, o]) => ({ t: Number(t), v: vec(v), i: vec(i), o: vec(o) }));
-          if (!keys.length) continue;
-          const at = (time) => {
-            if (time <= keys[0].t) return keys[0].v;
-            const k = keys.findIndex((key) => key.t >= time);
-            if (k < 0) return keys[keys.length - 1].v;
-            const a = keys[k - 1];
-            const b = keys[k];
-            const dt = b.t - a.t;
-            const u = (time - a.t) / dt;
-            const [h00, h10, h01, h11] = [2 * u ** 3 - 3 * u ** 2 + 1, u ** 3 - 2 * u ** 2 + u, -2 * u ** 3 + 3 * u ** 2, u ** 3 - u ** 2];
-            // Infinite tangents are steps
-            return a.v.map((av, c) => (!Number.isFinite(a.o[c]) || !Number.isFinite(b.i[c]) ? av : h00 * av + h10 * dt * a.o[c] + h01 * b.v[c] + h11 * dt * b.i[c]));
-          };
-          const key = `${curvePath}|${property}`;
-          if (!tracks.has(key)) tracks.set(key, { path: curvePath, property, times: [], values: [] });
-          const track = tracks.get(key);
-          for (let f = 0; f <= frames; f++) {
-            const v = at(Math.min((f / frames) * stop, stop));
-            // Unity -> glb: X mirrored (position -x; rotation x, -y, -z, w)
-            const g = property === 'position' ? [-v[0], v[1], v[2]] : property === 'quaternion' ? [v[0], -v[1], -v[2], v[3]] : v;
-            track.times.push(round(start + (f / frames) * length, 4));
-            track.values.push(...g.map((x) => round(x, 5)));
-          }
-        }
-      }
+      sampleClipTracks(text, stop, length, start, tracks, FPS);
       start += length;
     }
     if (tracks.size) out.push({ node: names.get(go), duration: round(start, 4), tracks: [...tracks.values()] });
+  }
+  return out;
+}
+
+/**
+ * Samples a clip's transform curves (Unity Hermite) at `fps` into `tracks`
+ * (path|property -> { path, property, times, values }), in glb space, from `start` seconds.
+ */
+function sampleClipTracks(text, stop, length, start, tracks, fps = 30) {
+  const frames = Math.max(1, Math.round(length * fps));
+  for (const [section, property] of [['m_RotationCurves', 'quaternion'], ['m_PositionCurves', 'position'], ['m_ScaleCurves', 'scale']]) {
+    const block = text.split(`\n  ${section}:`)[1]?.split(/\n  \w/)[0] ?? '';
+    for (const item of block.split('\n  - curve:').slice(1)) {
+      const curvePath = item.match(/\n\s+path: (.*)/)?.[1].trim() ?? '';
+      const n = property === 'quaternion' ? 4 : 3;
+      const vec = (s) => {
+        const v = ['x', 'y', 'z', 'w'].slice(0, n).map((c) => Number(s.match(new RegExp(`${c}: ([^,}]+)`))?.[1]));
+        return v;
+      };
+      const keys = [...item.matchAll(/time: ([^\n]+)\n\s+value: (\{[^}]*\})\n\s+inSlope: (\{[^}]*\})\n\s+outSlope: (\{[^}]*\})/g)].map(([, t, v, i, o]) => ({ t: Number(t), v: vec(v), i: vec(i), o: vec(o) }));
+      if (!keys.length) continue;
+      const at = (time) => {
+        if (time <= keys[0].t) return keys[0].v;
+        const k = keys.findIndex((key) => key.t >= time);
+        if (k < 0) return keys[keys.length - 1].v;
+        const a = keys[k - 1];
+        const b = keys[k];
+        const dt = b.t - a.t;
+        const u = (time - a.t) / dt;
+        const [h00, h10, h01, h11] = [2 * u ** 3 - 3 * u ** 2 + 1, u ** 3 - 2 * u ** 2 + u, -2 * u ** 3 + 3 * u ** 2, u ** 3 - u ** 2];
+        // Infinite tangents are steps
+        return a.v.map((av, c) => (!Number.isFinite(a.o[c]) || !Number.isFinite(b.i[c]) ? av : h00 * av + h10 * dt * a.o[c] + h01 * b.v[c] + h11 * dt * b.i[c]));
+      };
+      const key = `${curvePath}|${property}`;
+      if (!tracks.has(key)) tracks.set(key, { path: curvePath, property, times: [], values: [] });
+      const track = tracks.get(key);
+      for (let f = 0; f <= frames; f++) {
+        const v = at(Math.min((f / frames) * stop, stop));
+        // Unity -> glb: X mirrored (position -x; rotation x, -y, -z, w)
+        const g = property === 'position' ? [-v[0], v[1], v[2]] : property === 'quaternion' ? [v[0], -v[1], -v[2], v[3]] : v;
+        track.times.push(round(start + (f / frames) * length, 4));
+        track.values.push(...g.map((x) => round(x, 5)));
+      }
+    }
+  }
+  // Blend shape weights (SkinnedMeshRenderer "blendShape.<name>", 0-100) -> morph influences
+  const floats = text.split('\n  m_FloatCurves:')[1]?.split(/\n  \w/)[0] ?? '';
+  for (const item of floats.split('\n  - serializedVersion: 2').slice(1)) {
+    const name = item.match(/\n\s+attribute: blendShape\.(.*)/)?.[1].trim();
+    if (!name || !/\n\s+classID: 137\b/.test(item)) continue;
+    const curvePath = item.match(/\n\s+path: (.*)/)?.[1].trim() ?? '';
+    const keys = [...item.matchAll(/time: ([^\n]+)\n\s+value: ([^\n]+)\n\s+inSlope: ([^\n]+)\n\s+outSlope: ([^\n]+)/g)].map(([, t, v, i, o]) => ({ t: Number(t), v: Number(v), i: Number(i), o: Number(o) }));
+    if (!keys.length) continue;
+    const at = (time) => {
+      if (time <= keys[0].t) return keys[0].v;
+      const k = keys.findIndex((key) => key.t >= time);
+      if (k < 0) return keys[keys.length - 1].v;
+      const a = keys[k - 1];
+      const b = keys[k];
+      const dt = b.t - a.t;
+      const u = (time - a.t) / dt;
+      if (!Number.isFinite(a.o) || !Number.isFinite(b.i)) return a.v;
+      return (2 * u ** 3 - 3 * u ** 2 + 1) * a.v + (u ** 3 - 2 * u ** 2 + u) * dt * a.o + (-2 * u ** 3 + 3 * u ** 2) * b.v + (u ** 3 - u ** 2) * dt * b.i;
+    };
+    const key = `${curvePath}|morph|${name}`;
+    if (!tracks.has(key)) tracks.set(key, { path: curvePath, property: 'morph', name, times: [], values: [] });
+    const track = tracks.get(key);
+    for (let f = 0; f <= frames; f++) {
+      track.times.push(round(start + (f / frames) * length, 4));
+      track.values.push(round(at(Math.min((f / frames) * stop, stop)) / 100, 5));
+    }
+  }
+}
+
+/**
+ * TrailRenderers swept by a legacy Animation clip (3.60 Ireland: the rainbow drawn over the
+ * sea when the player passes). Returns [{ node, material, width, animation: { node,
+ * duration, tracks } }] so the viewer can lay the finished trail down as a ribbon.
+ */
+function parseTrails(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  const transformOf = new Map(); // GameObject -> its Transform
+  const goOf = new Map(); // Transform -> GameObject
+  const fatherOf = new Map(); // Transform -> parent Transform
+  const clipOf = new Map(); // GameObject -> legacy clip file
+  for (const { doc, kind, fid } of docs) {
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+    if (kind === '4') {
+      transformOf.set(go, fid);
+      goOf.set(fid, go);
+      fatherOf.set(fid, doc.match(/m_Father: \{fileID: (\d+)/)?.[1]);
+    }
+    if (kind === '111') {
+      const clip = guidIndex.get(doc.match(/\n {2}m_Animation: \{[^}]*guid: (\w+)/)?.[1]);
+      if (clip && existsSync(clip)) clipOf.set(go, clip);
+    }
+  }
+  const out = [];
+  for (const { doc, kind } of docs) {
+    if (kind !== '96') continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    let animated = null;
+    for (let t = transformOf.get(go); t && t !== '0' && !animated; t = fatherOf.get(t)) if (clipOf.has(goOf.get(t))) animated = goOf.get(t);
+    const material = guidIndex.get(doc.match(/m_Materials:\n\s+- \{fileID: \d+, guid: (\w+)/)?.[1]);
+    if (!animated || !material) continue; // a still trail draws nothing
+    const text = read(clipOf.get(animated));
+    const lastKey = Math.max(0, ...[...text.matchAll(/\n\s+time: ([\d.eE+-]+)/g)].map(([, t]) => Number(t)));
+    const stop = Math.max(Number(text.match(/m_StopTime: ([\d.eE+-]+)/)?.[1] ?? 0), lastKey);
+    const tracks = new Map();
+    sampleClipTracks(text, stop, stop, 0, tracks);
+    if (!tracks.size) continue;
+    const width = Number(doc.match(/widthMultiplier: ([\d.eE+-]+)/)?.[1] ?? 1) * Number(doc.match(/widthCurve:\n\s+m_Curve:\n(?:.*\n)*?\s+value: ([\d.eE+-]+)/)?.[1] ?? 1);
+    out.push({ node: names.get(go), material: stem(material), width: round(width, 4), animation: { node: names.get(animated), duration: round(stop, 4), tracks: [...tracks.values()] } });
   }
   return out;
 }
@@ -688,10 +873,21 @@ function parseSkinnedMeshes(file, guidIndex) {
   const docs = yamlDocs(read(file));
   const names = new Map();
   const goOfTransform = new Map();
+  const fatherOf = new Map();
   for (const { doc, kind, fid } of docs) {
     if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
-    if (kind === '4') goOfTransform.set(fid, doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1]);
+    if (kind === '4') {
+      goOfTransform.set(fid, doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1]);
+      fatherOf.set(fid, doc.match(/m_Father: \{fileID: (\d+)/)?.[1]);
+    }
   }
+  // Path below the prefab root: rigs with the same bone names (3.62 Sakura Tokyo's dino and
+  // robot) are told apart by their parents
+  const pathOf = (fid) => {
+    const parts = [];
+    for (let t = fid; t && t !== '0' && fatherOf.get(t) !== '0'; t = fatherOf.get(t)) parts.unshift(names.get(goOfTransform.get(t)));
+    return parts.join('/');
+  };
   const out = [];
   for (const { doc, kind } of docs) {
     if (kind !== '137') continue;
@@ -700,6 +896,7 @@ function parseSkinnedMeshes(file, guidIndex) {
     if (!names.has(go) || !meshFile || !existsSync(meshFile)) continue;
     const list = (key) => [...(doc.split(`\n  ${key}:`)[1]?.split(/\n  \w/)[0] ?? '').matchAll(/- \{fileID: (\d+)(?:, guid: (\w+))?/g)];
     const bones = list('m_Bones').map(([, fid]) => names.get(goOfTransform.get(fid)) ?? null);
+    const bonePaths = list('m_Bones').map(([, fid]) => pathOf(fid));
     const materials = list('m_Materials').map(([, , guid]) => guidIndex.get(guid)).filter(Boolean).map((p) => stem(p));
     // Bind poses (row-major eRC) mirrored on X like the glb: entries in row 0 or column 0
     // (not both) change sign; stored column-major for THREE.Matrix4.fromArray
@@ -711,7 +908,7 @@ function parseSkinnedMeshes(file, guidIndex) {
       return col;
     });
     if (!bones.length || bones.includes(null) || poses.length !== bones.length) continue;
-    out.push({ node: names.get(go), mesh: stem(meshFile), bones, bindPoses: poses, materials });
+    out.push({ node: names.get(go), mesh: stem(meshFile), bones, bonePaths, bindPoses: poses, materials });
   }
   return out;
 }
@@ -1224,6 +1421,12 @@ function parseClassic(root, project, guidIndex, log) {
     const chunksNode = json.nodes[level].children.find((c) => json.nodes[c].name === 'Chunks');
     const introParent = json.nodes.findIndex((n) => n.children?.includes(introNode));
     for (const c of json.nodes[level].children) if (c !== chunksNode && c !== introParent) skip.add(c);
+    // Chunks outside the Chunks group (the jetpack landing set) aren't in the library: drop them
+    const under = (i, root) => i === root || (json.nodes[root].children ?? []).some((c) => under(i, c));
+    for (let k = chunks.length - 1; k >= 0; k--) {
+      const ni = [...rename].find(([, n]) => n === chunks[k].name)?.[0];
+      if (!chunks[k].chunk.intro && chunksNode != null && !under(ni, chunksNode)) chunks.splice(k, 1);
+    }
     const kept = new Set(chunks.filter((c) => !c.chunk.intro).map((c) => [...rename].find(([, n]) => n === c.name)[0]));
     const hasKept = (i) => kept.has(i) || (json.nodes[i].children ?? []).some(hasKept);
     for (const c of json.nodes[chunksNode].children ?? []) if (!hasKept(c)) skip.add(c); // empty groups
@@ -1519,7 +1722,18 @@ function parseParticles(file, guidIndex) {
       sizeOverLife: size ? minMaxCurve(size.curve, 1) : null,
       colorOverLife: color ? minMaxGradient(color.gradient) : null,
       rotationOverLife: rot ? minMaxCurve(rot.curve) : null,
-      velocity: vel ? { x: minMaxCurve(vel.x), y: minMaxCurve(vel.y), z: minMaxCurve(vel.z), world: vel.inWorldSpace === 1 } : null,
+      velocity: vel ? {
+        x: minMaxCurve(vel.x),
+        y: minMaxCurve(vel.y),
+        z: minMaxCurve(vel.z),
+        world: vel.inWorldSpace === 1,
+        // Orbital (radians/s around the system's axes) and radial: 3.60 Ireland seagulls circle this way
+        ...(vel.orbitalX ? {
+          orbital: { x: minMaxCurve(vel.orbitalX), y: minMaxCurve(vel.orbitalY), z: minMaxCurve(vel.orbitalZ) },
+          orbitalOffset: [minMaxCurve(vel.orbitalOffsetX), minMaxCurve(vel.orbitalOffsetY), minMaxCurve(vel.orbitalOffsetZ)].map((c) => c.max),
+          radial: minMaxCurve(vel.radial),
+        } : {}),
+      } : null,
       force: force ? { x: minMaxCurve(force.x), y: minMaxCurve(force.y), z: minMaxCurve(force.z), world: force.inWorldSpace === 1 } : null,
       sheet: uv && (uv.tilesX > 1 || uv.tilesY > 1) ? { x: uv.tilesX, y: uv.tilesY, frame: minMaxCurve(uv.frameOverTime), cycles: uv.cycles ?? 1, row: uv.animationType === 1 ? (uv.randomRow ? -1 : uv.rowIndex ?? 0) : null } : null,
       render: {
@@ -2068,11 +2282,25 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       info.skinned = skinned;
       info.materials = sortedStrings(new Set([...(info.materials ?? []), ...skinned.flatMap((sk) => sk.materials)]));
     }
+    const morphMeshes = parseMorphMeshes(prefabPath, guidIndex).map(({ node, materials: mats, data }) => {
+      const file = `mesh/${name}_${node.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`;
+      writeFileSync(path.join(out, file), JSON.stringify(data));
+      return { node, materials: mats, url: file };
+    });
+    if (morphMeshes.length) {
+      info.morphMeshes = morphMeshes;
+      info.materials = sortedStrings(new Set([...(info.materials ?? []), ...morphMeshes.flatMap((m) => m.materials)]));
+    }
     const animators = parseAnimators(prefabPath, guidIndex);
     if (animators.length) {
       mkdirSync(path.join(out, 'anim'), { recursive: true });
       writeFileSync(path.join(out, 'anim', `${name}.json`), JSON.stringify(animators));
       info.animators = `anim/${name}.json`;
+    }
+    const trails = parseTrails(prefabPath, guidIndex);
+    if (trails.length) {
+      info.trails = trails;
+      info.materials = sortedStrings(new Set([...(info.materials ?? []), ...trails.map((t) => t.material)]));
     }
     const animations = parseMeshAnimations(prefabPath, guidIndex);
     for (const anim of Object.values(animations)) {
@@ -2180,6 +2408,14 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       tex.url = `tex/${path.basename(src)}`;
     }
   }
+  for (const config of Object.values(themeConfigs)) {
+    const src = config.sky?.texture;
+    if (!src) continue;
+    if (['.png', '.jpg', '.jpeg'].includes(suffix(src).toLowerCase())) {
+      copyIfNewer(src, path.join(outTex, path.basename(src)));
+      config.sky.texture = `tex/${path.basename(src)}`;
+    } else delete config.sky.texture;
+  }
 
   const settings = path.join(root, 'ExportedProject', 'ProjectSettings', 'ProjectSettings.asset');
   const bundleVersion = existsSync(settings) ? read(settings).match(/bundleVersion: (.+)/)?.[1].trim() : null;
@@ -2251,7 +2487,9 @@ function splitByTheme(manifest, staging, out, log) {
       ...Object.values(prefabs).flatMap((p) => Object.values(p.particles ?? {}).map((e) => e.render.meshGlb)).filter(Boolean),
       ...Object.values(prefabs).map((p) => p.animators).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => (p.skinned ?? []).map((sk) => sk.mesh)),
+      ...Object.values(prefabs).flatMap((p) => (p.morphMeshes ?? []).map((m) => m.url)),
       ...Object.values(materials).flatMap((m) => Object.values(m.textures).map((t) => t.url)).filter(Boolean),
+      ...(config.sky?.texture ? [config.sky.texture] : []),
     ]);
     const dest = path.join(out, theme);
     rmSync(dest, { recursive: true, force: true });
