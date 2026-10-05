@@ -250,6 +250,17 @@ button.danger {
 
 /* ---------------------------------------------------------------- remote maps */
 
+.warn {
+  margin: 10px 0;
+  padding: 9px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--accent);
+  background: rgba(255, 204, 51, 0.1);
+  border: 1px solid rgba(255, 204, 51, 0.45);
+  border-radius: 8px;
+}
+
 .remote-row {
   display: flex;
   align-items: center;

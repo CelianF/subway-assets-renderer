@@ -403,6 +403,9 @@ async function openRemoteMaps() {
       version
         ? el('p', { class: 'muted' }, `${maps.length} cities the game (v${version}) downloads from SYBO when you play them. Each import downloads one file and extracts it like an APK.`)
         : el('p', { class: 'muted' }, 'Import an APK first: the list of downloadable maps comes from it (APKs imported before this version of the app need importing again).'),
+      // Cloud copies are the current version of each city: older looks (2.11's Space
+      // Station, its decorations) only come with an APK of their time
+      el('p', { class: 'warn' }, "⚠️ Cloud maps are SYBO's current version of each city. If an older map doesn't look as expected here, find the game version it's from and upload that version's APK instead."),
       version ? filter : null,
       list,
       el('div', { class: 'modal-actions' }, el('button', { onclick: close }, 'Close')),
