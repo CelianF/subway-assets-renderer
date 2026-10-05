@@ -1142,7 +1142,11 @@ function applyThemeLook() {
   // No fog/skyline while inspecting: the camera frames pieces from far away
   // (nor in the studio's top view, 600 units above the run)
   setFog(cfg.fog, state.fog && !state.inspect && !studio?.active, state.fogScale);
-  sky.setColors(cfg.sky, cfg.sky?.texture ? dataUrl(cfg.sky.texture) : null);
+  // A sky material that came without its colors (cloud Space Station: no shader, no
+  // properties) shows the fog color, as the sky behind the haze
+  const fogRGB = cfg.fog?.color?.slice(0, 3);
+  const skyCfg = cfg.sky?.top || cfg.sky?.bottom || !fogRGB ? cfg.sky : { top: fogRGB, bottom: fogRGB, power: 1 };
+  sky.setColors(skyCfg, skyCfg?.texture ? dataUrl(skyCfg.texture) : null);
   if (skylineTheme !== state.theme) {
     skylineTheme = state.theme;
     skylineGroup.clear();
@@ -1223,7 +1227,9 @@ async function loadSkyline(bg) {
     }
     return unfogged.get(m.name);
   };
-  const isSkyline = (m) => !manifest.materials[m.name] || /Skyline/.test(manifest.materials[m.name].shader);
+  // A plain city atlas (<Theme>_environment) stands in for the skyline material too: 2.11's
+  // Space Station skyline had no material at all, the cloud one got the atlas
+  const isSkyline = (m) => !manifest.materials[m.name] || /Skyline/.test(manifest.materials[m.name].shader) || /_environment$/.test(m.name);
   obj.traverse((o) => {
     if (o.isMesh) {
       const mats = Array.isArray(o.material) ? o.material : [o.material];
