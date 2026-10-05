@@ -365,7 +365,7 @@ async function applyAnimators(obj, url, seed) {
 
 /** A playing mixer for a baked clip ({ node, duration, tracks }) under obj, or null. */
 function animationMixer(obj, anim) {
-  const root = findNode(obj, anim.node);
+  const root = animatedNode(obj, anim.node);
   if (!root) return null; // its variant wasn't picked
   // Unity paths ("Armature/Bone/Bone.007") walked child by child from the Animator
   const find = (path) => {
@@ -377,15 +377,7 @@ function animationMixer(obj, anim) {
     return node;
   };
   const Track = { quaternion: THREE.QuaternionKeyframeTrack, position: THREE.VectorKeyframeTrack, scale: THREE.VectorKeyframeTrack };
-  // A constant position or rotation on the animated object itself (an Animator's root
-  // motion) would pin it to that value: 3.70 Ireland's idle sheep sat in the middle of the
-  // road (their clip holds them at 0, the building places them 44 to the side)
-  const constant = (t) => {
-    const n = t.values.length / t.times.length;
-    return t.values.every((v, i) => Math.abs(v - t.values[i % n]) < 1e-4);
-  };
   const tracks = anim.tracks.map((t) => {
-    if (!t.path && (t.property === 'position' || t.property === 'quaternion') && constant(t)) return null;
     const node = find(t.path);
     if (!node) return null;
     if (t.property === 'morph') {
@@ -415,6 +407,25 @@ async function nameRandomGroups() {
       }
     }),
   );
+}
+
+/**
+ * The node an Animator sits on. A prefab nested in another keeps its root's name, and
+ * three.js suffixes the copy ("Ireland_sheep_1"): the innermost match carries the Animator
+ * (3.70 Ireland: the outer sheep node places it 44 to the side, the inner one hops; animating
+ * the outer pulled the sheep onto the road).
+ */
+function animatedNode(obj, name) {
+  const key = THREE.PropertyBinding.sanitizeNodeName(name);
+  const matches = [];
+  obj.traverse((o) => (o.name === key || o.name.replace(/_\d+$/, '') === key) && matches.push(o));
+  const inside = (o, outer) => {
+    for (let p = o.parent; p; p = p.parent) if (p === outer) return true;
+    return false;
+  };
+  return matches.find((o) => o.name === key && !matches.some((m) => m !== o && inside(m, o)))
+    ?? matches.find((o) => !matches.some((m) => m !== o && inside(m, o)))
+    ?? null;
 }
 
 function findNode(obj, name) {
