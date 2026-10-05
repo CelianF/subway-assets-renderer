@@ -2115,6 +2115,11 @@ function parseParticles(file, guidIndex) {
         mode: r.m_RenderMode ?? 0,
         material: matGuid ? stem(guidIndex.get(matGuid)) : null,
         mesh: meshGuid && guidIndex.has(meshGuid) ? stem(guidIndex.get(meshGuid)) : null,
+        // Mesh particles pick one of up to four meshes (Paris Summer Games' balloon colors),
+        // uniformly (distribution 0) or by weight
+        variants: [r.m_Mesh, r.m_Mesh1, r.m_Mesh2, r.m_Mesh3]
+          .map((m, i) => ({ mesh: m?.guid && guidIndex.has(m.guid) ? stem(guidIndex.get(m.guid)) : null, weight: r.m_MeshDistribution === 1 ? r[`m_MeshWeighting${i || ''}`] ?? 1 : 1 }))
+          .filter((v) => v.mesh),
         lengthScale: r.m_LengthScale ?? 2,
         velocityScale: r.m_VelocityScale ?? 0,
         maxSize: r.m_MaxParticleSize ?? 0.5,
@@ -2712,6 +2717,15 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
           p.render.meshGlb = `mesh/${path.basename(src)}`;
         }
       }
+      // Several meshes: each with its glb (one alone needs no list)
+      const variants = (p.render.variants ?? []).filter((v) => meshGlbs.has(`${v.mesh}.glb`));
+      for (const v of variants) {
+        const src = meshGlbs.get(`${v.mesh}.glb`);
+        copyIfNewer(src, path.join(outMesh, path.basename(src)));
+        v.meshGlb = `mesh/${path.basename(src)}`;
+      }
+      if (variants.length > 1 && p.render.mode === 4) p.render.variants = variants;
+      else delete p.render.variants;
       if (p.render.material) info.materials = sortedStrings(new Set([...(info.materials ?? []), p.render.material]));
     }
     if (Object.keys(particles).length) info.particles = particles;
@@ -2868,7 +2882,7 @@ function splitByTheme(manifest, staging, out, log) {
       ...Object.values(prefabs).map((p) => p.glb).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => Object.values(p.trackConfigs ?? {}).map((c) => c.glb)).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => Object.values(p.meshAnimations ?? {}).flatMap((a) => a.frames)),
-      ...Object.values(prefabs).flatMap((p) => Object.values(p.particles ?? {}).map((e) => e.render.meshGlb)).filter(Boolean),
+      ...Object.values(prefabs).flatMap((p) => Object.values(p.particles ?? {}).flatMap((e) => [e.render.meshGlb, ...(e.render.variants ?? []).map((v) => v.meshGlb)])).filter(Boolean),
       ...Object.values(prefabs).map((p) => p.animators).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => (p.skinned ?? []).map((sk) => sk.mesh)),
       ...Object.values(prefabs).flatMap((p) => (p.morphMeshes ?? []).map((m) => m.url)),

@@ -346,6 +346,8 @@ function makeMaterial(look, vertexShader, extraUniforms) {
 
 // ---------------------------------------------------------------- emitters
 
+const UP = new THREE.Vector3(0, 1, 0);
+
 class Emitter {
   constructor(node, root, def, materials, meshGeometry) {
     this.root = root;
@@ -380,11 +382,24 @@ class Emitter {
     const look = particleLook(materials, def.render.material);
     if (this.mesh) {
       this.material = makeMaterial(look, MESH_VERTEX, {});
-      this.object = new THREE.InstancedMesh(meshGeometry, this.material, this.max);
-      this.colorAttr = new THREE.InstancedBufferAttribute(new Float32Array(this.max * 4), 4).setUsage(THREE.DynamicDrawUsage);
-      meshGeometry = meshGeometry.clone();
-      meshGeometry.setAttribute('iColor', this.colorAttr);
-      this.object.geometry = meshGeometry;
+      // One instanced mesh per mesh the system picks from (Paris Summer Games' balloon colors)
+      const geometries = Array.isArray(meshGeometry) ? meshGeometry : [meshGeometry];
+      this.parts = geometries.map((g, k) => {
+        const colorAttr = new THREE.InstancedBufferAttribute(new Float32Array(this.max * 4), 4).setUsage(THREE.DynamicDrawUsage);
+        const geometry = g.clone();
+        geometry.setAttribute('iColor', colorAttr);
+        geometry.computeBoundingBox();
+        const size = geometry.boundingBox.getSize(new THREE.Vector3());
+        return {
+          object: new THREE.InstancedMesh(geometry, this.material, this.max),
+          colorAttr,
+          weight: def.render.variants?.[k]?.weight ?? 1,
+          // Modeled standing up (balloons) rather than lengthwise (fish, lasers)
+          upright: size.y > 1.2 * Math.max(size.x, size.z),
+        };
+      });
+      this.object = this.parts[0].object;
+      this.colorAttr = this.parts[0].colorAttr;
     } else {
       const geo = new THREE.InstancedBufferGeometry();
       const quad = new THREE.PlaneGeometry(1, 1);
@@ -412,11 +427,13 @@ class Emitter {
       });
       this.object = new THREE.Mesh(geo, this.material);
     }
-    this.object.frustumCulled = false;
-    this.object.userData.particles = true;
-    this.object.renderOrder = 3000;
-    this.object.name = `${node.name}_particles`;
-    node.add(this.object);
+    for (const object of this.parts?.map((p) => p.object) ?? [this.object]) {
+      object.frustumCulled = false;
+      object.userData.particles = true;
+      object.renderOrder = 3000;
+      object.name = `${node.name}_particles`;
+      node.add(object);
+    }
     this.gravityLocal = null;
   }
 
@@ -633,25 +650,40 @@ class Emitter {
       // World up in the emitter's frame (3.60 Ireland seagull emitters are turned 90° on X)
       const up = this.gravityLocal ? this.gravityLocal.clone().negate().normalize() : new THREE.Vector3(0, 1, 0);
       const byVelocity = d.render.alignment === 4;
+      const counts = this.parts.map(() => 0);
+      const total = this.parts.reduce((n, p) => n + p.weight, 0);
       for (let i = 0; i < this.count; i++) {
         const lt = this.age[i] / this.life[i];
         const size = this.size0[i] * (d.sizeOverLife ? sample(d.sizeOverLife, lt, this.rand[i * 2]) : 1);
+        // Each particle keeps one mesh for its life (picked from its id)
+        let k = 0;
+        if (this.parts.length > 1) {
+          let r = (((Math.sin(this.ids[i] * 12.9898) * 43758.5453) % 1) + 1) % 1 * total;
+          k = this.parts.findIndex((p) => (r -= p.weight) < 0);
+          if (k < 0) k = 0;
+        }
+        const part = this.parts[k];
         axis.fromArray(this.heading, i * 3);
         if (byVelocity && axis.lengthSq() > 1e-6) {
-          // Velocity alignment: the mesh's +Z along the direction of travel (swimming fish)
-          q.setFromRotationMatrix(facing.lookAt(axis, zero, up));
+          // Velocity alignment: the mesh's +Z along the direction of travel (swimming fish,
+          // lasers); meshes modeled standing up (rising balloons) keep their top that way
+          if (part.upright) q.setFromUnitVectors(UP, axis.normalize());
+          else q.setFromRotationMatrix(facing.lookAt(axis, zero, up));
         } else {
           axis.fromArray(this.axis, i * 3);
           q.setFromAxisAngle(axis, this.rot[i]);
         }
         m.compose(new THREE.Vector3().fromArray(this.local.pos, i * 3), q, new THREE.Vector3(size, size, size));
-        this.object.setMatrixAt(i, m);
+        const n = counts[k]++;
+        part.object.setMatrixAt(n, m);
         this.color(i, lt, col, life);
-        this.colorAttr.setXYZW(i, col.x, col.y, col.z, col.w);
+        part.colorAttr.setXYZW(n, col.x, col.y, col.z, col.w);
       }
-      this.object.count = this.count;
-      this.object.instanceMatrix.needsUpdate = true;
-      this.colorAttr.needsUpdate = true;
+      this.parts.forEach((p, k) => {
+        p.object.count = counts[k];
+        p.object.instanceMatrix.needsUpdate = true;
+        p.colorAttr.needsUpdate = true;
+      });
       return;
     }
     const sheet = d.sheet;
@@ -703,8 +735,12 @@ export async function attachParticles(root, particles, materials, nodeKey, meshG
   });
   const made = [];
   for (const [node, def] of nodes) {
-    const geometry = def.render.mode === 4 && def.render.meshGlb ? await meshGeometry(def.render.meshGlb) : null;
+    let geometry = def.render.mode === 4 && def.render.meshGlb ? await meshGeometry(def.render.meshGlb) : null;
     if (def.render.mode === 4 && !geometry) continue; // mesh particles without their mesh
+    if (geometry && def.render.variants?.length > 1) {
+      const all = await Promise.all(def.render.variants.map((v) => meshGeometry(v.meshGlb)));
+      if (all.every(Boolean)) geometry = all;
+    }
     const emitter = new Emitter(node, root, def, materials, geometry);
     emitters.add(emitter);
     made.push(emitter);
@@ -781,14 +817,14 @@ export function updateParticles(dt, camera) {
     if (e.root.parent) e.attached = true;
     else if (!e.attached && (e.loadWait = (e.loadWait ?? 0) + dt) < 60) continue;
     if (!e.root.parent) {
-      e.object.geometry.dispose();
+      for (const part of e.parts ?? [e]) part.object.geometry.dispose();
       e.material.dispose();
       emitters.delete(e);
       continue;
     }
     e.object.getWorldPosition(at);
     const near = at.distanceTo(cam) < ACTIVE_DISTANCE;
-    e.object.visible = near;
+    for (const part of e.parts ?? [e]) part.object.visible = near;
     if (!near) continue;
     if (!e.warmed) {
       // Looping systems start full, as if they had been running (sub-emitters follow their parent)
