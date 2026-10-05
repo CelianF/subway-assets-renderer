@@ -5,6 +5,7 @@
 // bundles (~20 MB), so a remote map is one download plus the kit.
 //   <workspace>/remote/<version>/index.json   { version, savedAt, maps: [{ id, address (sybo://…), bundle }] }
 //   <workspace>/remote/<version>/bundles/…    shared bundles from the APK
+//   <workspace>/remote/<version>/downloads/…  remote bundles already downloaded
 import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -90,6 +91,14 @@ export async function prepareRemoteMap(root, version, id, dir, onProgress = () =
   if (!map) throw new Error(`Unknown map "${id}" for game version ${version}`);
   const input = path.join(dir, 'bundles');
   await mkdir(input, { recursive: true });
+  // Downloads are kept: the file name carries its content hash, so a re-import (after an
+  // app update) needs no new download
+  const cached = path.join(root, version, 'downloads', map.bundle);
+  if (existsSync(cached)) {
+    await copyFile(cached, path.join(input, map.bundle));
+    await copyKit(root, version, input);
+    return input;
+  }
   let res;
   // (kits saved before the address template was known kept a full url)
   const url = map.address ? remoteUrl(map.address) : map.url.includes('/bundle/') ? map.url : remoteUrl(map.url.replace(`${CDN_BASE}/`, 'sybo://'));
@@ -114,8 +123,14 @@ export async function prepareRemoteMap(root, version, id, dir, onProgress = () =
   const data = Buffer.concat(chunks);
   if (data.toString('latin1', 0, 7) !== 'UnityFS') throw new Error(`SYBO's server sent something that isn't a Unity bundle (${map.url})`);
   await writeFile(path.join(input, map.bundle), data);
+  await mkdir(path.dirname(cached), { recursive: true });
+  await writeFile(cached, data);
+  await copyKit(root, version, input);
+  return input;
+}
+
+async function copyKit(root, version, input) {
   for (const name of await readdir(path.join(root, version, 'bundles'))) {
     await copyFile(path.join(root, version, 'bundles', name), path.join(input, name));
   }
-  return input;
 }

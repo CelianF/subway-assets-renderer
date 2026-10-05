@@ -1990,14 +1990,18 @@ function parseUnityYaml(doc) {
 }
 
 const curveKeys = (c) => (Array.isArray(c?.m_Curve) ? c.m_Curve.map((k) => [k.time, k.value]) : []);
-/** MinMaxCurve -> { mode, min, max, curve, minCurve } (mode: 0 constant, 1 curve, 2 random between constants, 3 between curves) */
+/**
+ * MinMaxCurve -> { mode, min, max, curve, minCurve }. Modes as Unity's ParticleSystemCurveMode:
+ * 0 constant, 1 curve, 2 random between two curves (both scaled by max), 3 random between
+ * two constants (min, max).
+ */
 function minMaxCurve(c, fallback = 0) {
   if (c == null) return { mode: 0, min: fallback, max: fallback };
   if (typeof c === 'number') return { mode: 0, min: c, max: c }; // very old serializations
   const out = { mode: c.minMaxState ?? 0, min: c.minScalar ?? c.scalar ?? fallback, max: c.scalar ?? fallback };
-  if (out.mode === 1 || out.mode === 3) {
+  if (out.mode === 1 || out.mode === 2) {
     out.curve = curveKeys(c.maxCurve);
-    if (out.mode === 3) out.minCurve = curveKeys(c.minCurve);
+    if (out.mode === 2) out.minCurve = curveKeys(c.minCurve);
   }
   return out;
 }

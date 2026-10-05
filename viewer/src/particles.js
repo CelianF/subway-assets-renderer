@@ -33,11 +33,15 @@ function sample(c, t = 0, r = Math.random()) {
   switch (c.mode) {
     case 1:
       return c.curve?.length ? c.max * evalKeys(c.curve, t) : c.max;
-    case 2:
-      return c.min + (c.max - c.min) * r;
-    case 3:
+    case 2: {
+      // Random between two curves, one multiplier (maps built before curves were kept for
+      // this mode: random between the two values)
       if (!c.curve?.length) return c.min + (c.max - c.min) * r;
-      return c.min * evalKeys(c.minCurve, t) + (c.max * evalKeys(c.curve, t) - c.min * evalKeys(c.minCurve, t)) * r;
+      const lo = evalKeys(c.minCurve, t);
+      return c.max * (lo + (evalKeys(c.curve, t) - lo) * r);
+    }
+    case 3: // random between two constants
+      return c.min + (c.max - c.min) * r;
     default:
       return c.max;
   }
