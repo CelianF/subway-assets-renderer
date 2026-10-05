@@ -54,6 +54,7 @@ The app keeps its maps in a "Subway Assets Renderer" folder: `~/Library/Applicat
    - Drag to look, WASD to move, Space/Shift for up/down, Ctrl to sprint, −/= for fly speed, mouse wheel for field of view. **M** opens the settings menu, **Tab** hides the interface, P takes a screenshot, H shows help (add `?debug=true` to the URL for the piece browser, B).
    - **Settings menu**: generation (seed, sections, which section types, trains, obstacles, decorations and signals to generate, density), layers, rendering (fog, skyline opacity/distance, glass, bend), camera and screenshots.
    - **Studio**: a top view of the run with placement spots. Draw trains from a start cell to an end cell (the longest train that fits is used), drop obstacles, power boxes, pillars and signal lights, or remove them. It can start from the auto-generated run. Placements are saved per map in the browser.
+   - **Game modes** (maps from 3.70 on): *Generation → Game mode* lays the obstacles from a game mode's own route instead of the regular run: **Trick or Treat** (the chase mode's moving and vanishing obstacles), **Mystery Hurdles** (easy to impossible, with speed pads) and **Race**, with its **Showdown** (Brawl Stars) or Subway Race skin, from the start arch to the finish line. Mode runs go between buildings, like the game's. The studio has the same switch and a palette category with the mode's pieces. Maps imported before need their APK imported again to get the modes.
 
 ## Pipeline
 

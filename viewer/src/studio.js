@@ -42,6 +42,8 @@ const FIX_TITLES = {
   trainPlatform: 'Put back every train platform the auto run has',
 };
 const KIND_LABELS = { static: 'Parked', moving: 'Moving', falling: 'Lava' };
+/** Name of an obstacle tool: regular ones, else the game mode's piece names. */
+const labelOf = (key, cat) => LABELS[key] ?? cat?.modePieces?.[key] ?? key;
 const VARIANT_LABELS = { auto: 'Any', cargo: 'Cargo', passenger: 'Passenger', subway: 'Subway' };
 
 function el(tag, attrs = {}, ...children) {
@@ -201,7 +203,7 @@ export function createStudio(ctx) {
 
   function describeItem(it) {
     if (it.type === 'train') return describeTrain(it);
-    if (it.type === 'obstacle') return LABELS[it.key] ?? it.key;
+    if (it.type === 'obstacle') return labelOf(it.key, ctx.getCatalog());
     if (it.type === 'signal') return `Signal light (${it.color ?? 'green'})`;
     if (it.type === 'noTracks') return `No tracks zone, ${Math.round((it.z1 - it.z0) / CELL)} tiles`;
     return it.type;
@@ -220,7 +222,7 @@ export function createStudio(ctx) {
     const list = ctx.getList();
     const it = list[selected];
     const clash = list.some((o, i) => i !== selected && o.type === 'obstacle' && o.key === key && o.lane === it.lane && cellOf(o.z) === cellOf(it.z));
-    if (clash) return setInfo(`There is already a ${LABELS[key].toLowerCase()} on this tile`);
+    if (clash) return setInfo(`There is already a ${labelOf(key, ctx.getCatalog()).toLowerCase()} on this tile`);
     replaceSelected({ ...it, key });
   }
 
@@ -408,7 +410,7 @@ export function createStudio(ctx) {
     }
     // Obstacles: max one of each kind per tile
     const taken = list.some((it) => it.type === 'obstacle' && it.key === tool.key && it.lane === s.lane && cellOf(it.z) === s.cell);
-    if (taken) return setInfo(`There is already a ${LABELS[tool.key].toLowerCase()} on this tile`);
+    if (taken) return setInfo(`There is already a ${labelOf(tool.key, ctx.getCatalog()).toLowerCase()} on this tile`);
     list.push({ type: 'obstacle', key: tool.key, lane: s.lane, z: s.cellZ + CELL / 2 });
     commit(list);
   }
@@ -513,10 +515,13 @@ export function createStudio(ctx) {
     if (mode === 'place') {
       const isTool = (type, extra = {}) => tool.type === type && Object.entries(extra).every(([k, v]) => tool[k] === v);
       const variants = tool.type === 'train' ? cat.variants[tool.kind] ?? [] : [];
+      const modeKeys = Object.keys(cat.modePieces);
       const categories = [
         ['trains', '🚆 Trains', () => setTool({ type: 'train', kind: Object.keys(cat.trains)[0] ?? 'static', variant: 'auto', ramp: false })],
         ['obstacles', '🚧 Obstacles', () => setTool({ type: 'obstacle', key: Object.keys(cat.obstacles)[0] })],
         ...(cat.signal ? [['lights', '🚦 Lights', () => setTool({ type: 'signal', color: 'green' })]] : []),
+        // The game mode's own pieces (moving/vanishing obstacles, hurdles, speed pads…)
+        ...(modeKeys.length ? [['mode', cat.modeLabel, () => setTool({ type: 'obstacle', key: modeKeys[0] })]] : []),
       ];
       categoryRow = el(
         'div',
@@ -525,7 +530,8 @@ export function createStudio(ctx) {
           btn(label, category === key, () => {
             category = key;
             // Keep the asset already chosen in that family, else its first one
-            const keep = { trains: 'train', obstacles: 'obstacle', lights: 'signal' }[key] === placeTool.type;
+            const inFamily = { obstacles: cat.obstacles, mode: cat.modePieces }[key];
+            const keep = { trains: 'train', obstacles: 'obstacle', lights: 'signal', mode: 'obstacle' }[key] === placeTool.type && (!inFamily || placeTool.key in inFamily);
             if (keep) setTool(placeTool);
             else first();
           }),
@@ -548,6 +554,7 @@ export function createStudio(ctx) {
         ),
       );
       if (category === 'obstacles') rows.push(row('Obstacles', ...Object.keys(cat.obstacles).map((key) => btn(LABELS[key] ?? key, isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key })))));
+      if (category === 'mode') rows.push(row(cat.modeLabel, ...modeKeys.map((key) => btn(cat.modePieces[key], isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key })))));
       if (category === 'lights') rows.push(row('Lights', ...SIGNAL_TOOLS.map(([color, label]) => btn(label, isTool('signal', { color }), () => setTool({ type: 'signal', color })))));
     } else if (mode === 'edit' && selected >= 0) {
       rows.push(editRow(cat, btn, select));
@@ -575,6 +582,8 @@ export function createStudio(ctx) {
         ...MODES.filter(([m]) => m !== 'noTracks' || cat.tracks !== false).map(([m, label]) => btn(label, mode === m, () => setTool(m === 'place' ? placeTool : { type: m }), m === 'remove' ? 'danger' : '')),
         btn('💥 Wipe', false, () => confirm('Remove everything placed, including no-track zones?') && (setTool(tool), commit([], 'Wiped')), 'danger'),
         el('span', { class: 'studio-sep' }),
+        // Game mode (and skin): which pieces the run uses and the palette offers
+        ...modeSelects(select),
         // Obstacles the auto run has and the studio list may lack (pillars, platforms…)
         ...fixKeys.map((key) => el('button', { title: FIX_TITLES[key], onclick: () => { const n = ctx.fixMissing(key); setInfo(n ? `Put back ${n} ${LABELS[key].toLowerCase()}${n > 1 ? 's' : ''}` : `No ${LABELS[key].toLowerCase()} missing`); } }, FIX_LABELS[key])),
         el('button', { title: 'Replace everything with the auto-generated run', onclick: async () => commit(await ctx.fromRun(), 'Copied the auto-generated run') }, '⟳ Copy auto run'),
@@ -582,6 +591,21 @@ export function createStudio(ctx) {
       ),
       el('div', { class: 'studio-row studio-status' }, info, el('span', { class: 'studio-hint' }, 'Drag or wheel: scroll · Ctrl+wheel: zoom · Esc: cancel')),
     );
+  }
+
+  function modeSelects(select) {
+    const cat = ctx.getCatalog();
+    if (cat.modes.length < 2) return [];
+    const { mode, skin, skins } = ctx.getMode();
+    const busy = (e) => (e.target.disabled = true);
+    const modeSelect = select(mode, cat.modes.map((m) => [m.key, m.label]), (key) => ctx.setMode(key));
+    modeSelect.title = 'Game mode';
+    modeSelect.addEventListener('change', busy);
+    if (skins.length < 2) return [modeSelect];
+    const skinSelect = select(skin, skins, (s) => ctx.setMode(mode, s));
+    skinSelect.title = 'Skin';
+    skinSelect.addEventListener('change', busy);
+    return [modeSelect, skinSelect];
   }
 
   const SIGNAL_TOOLS = [
@@ -598,7 +622,9 @@ export function createStudio(ctx) {
     if (!it) return row(el('span', { class: 'studio-info' }, 'Click a train, obstacle or light to change it'));
 
     if (it.type === 'obstacle') {
-      return row(...Object.keys(cat.obstacles).map((key) => btn(LABELS[key] ?? key, it.key === key, () => editObstacle(key))), del);
+      // A mode piece turns into the mode's other pieces, a regular obstacle into the others
+      const family = it.key in cat.modePieces ? cat.modePieces : cat.obstacles;
+      return row(...Object.keys(family).map((key) => btn(labelOf(key, cat), it.key === key, () => editObstacle(key))), del);
     }
     if (it.type === 'signal') {
       return row(...SIGNAL_TOOLS.map(([color, label]) => btn(label, (it.color ?? 'green') === color, () => replaceSelected({ ...it, color }))), del);
@@ -648,6 +674,20 @@ export function createStudio(ctx) {
       renderer.clippingPlanes = [];
       pending = null;
       palette.classList.add('hidden');
+    },
+    /** Call after the game mode changed: its pieces and "Fix …" buttons. */
+    refresh() {
+      if (!active) return;
+      const cat = ctx.getCatalog();
+      const modeKeys = Object.keys(cat.modePieces);
+      const valid = tool.type !== 'obstacle' || tool.key in cat.obstacles || tool.key in cat.modePieces;
+      fixKeys = null;
+      if (category === 'mode' && modeKeys.length && !(placeTool.key in cat.modePieces)) setTool({ type: 'obstacle', key: modeKeys[0] });
+      else if (!valid || (category === 'mode' && !modeKeys.length)) {
+        category = 'trains';
+        setTool({ type: 'train', kind: Object.keys(cat.trains)[0] ?? 'static', variant: 'auto', ramp: false });
+      } else renderPalette();
+      drawFootprints();
     },
     /** Call after the run is regenerated (length may change). */
     relayout() {

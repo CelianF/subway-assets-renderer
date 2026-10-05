@@ -5,7 +5,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setReversedDepth, texturesReady } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, FIX_LABELS } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, FIX_LABELS } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI, prettyTheme } from './ui.js';
@@ -928,7 +928,13 @@ const state = {
   bend: Number(params.get('bend') ?? 0),
   bendVertical: Number(params.get('bendV') ?? 0),
   fov: 55,
-  gen: { ...structuredClone(DEFAULT_GEN), showcase: params.get('showcase') === '1' || storedFlag('debug:showcase') },
+  gen: {
+    ...structuredClone(DEFAULT_GEN),
+    showcase: params.get('showcase') === '1' || storedFlag('debug:showcase'),
+    // Game mode whose route lays the obstacles (?mode=chase|mysteryHurdles|race, &skin=)
+    mode: params.get('mode') in (manifest.modes ?? {}) ? params.get('mode') : 'normal',
+    skin: params.get('skin'),
+  },
   studio: loadStudio(),
 };
 
@@ -1427,7 +1433,8 @@ function fixSource(key) {
 
 /** Obstacle kinds the auto run has but the studio list lacks some of ("Fix …" buttons). */
 function fixables() {
-  return FIXABLE.filter((key) => (key === 'pillar' ? hasSlot('boundary_pillars_mid') && hasSlot('obstacle_pillar') : fixSource(key).some((it) => it.type === 'obstacle' && it.key === key)));
+  // (game modes run between buildings: no pillar halls)
+  return FIXABLE.filter((key) => (key === 'pillar' ? isNormal() && hasSlot('boundary_pillars_mid') && hasSlot('obstacle_pillar') : fixSource(key).some((it) => it.type === 'obstacle' && it.key === key)));
 }
 
 /**
@@ -1448,7 +1455,18 @@ function fixMissing(key) {
   rebuild({ dynamicOnly: true });
   return missing.length;
 }
-const catalog = () => studioCatalog(manifest, state.theme, trainTheme());
+const catalog = () => studioCatalog(manifest, state.theme, trainTheme(), state.gen);
+const modes = gameModes(manifest);
+const isNormal = () => !manifest.modes?.[state.gen.mode];
+const skinsOf = () => modes.find((m) => m.key === state.gen.mode)?.skins ?? [];
+if (!skinsOf().some(([key]) => key === state.gen.skin)) state.gen.skin = skinsOf()[0]?.[0] ?? null;
+/** Switches the game mode (generation panel and studio): its pieces, route and scenery. */
+function setGameMode(key, skin = null) {
+  state.gen.mode = key;
+  state.gen.skin = skin ?? skinsOf()[0]?.[0] ?? null;
+  generation.refresh();
+  return rebuild().then(() => studio.refresh());
+}
 // "low_01" -> "Low 01" ("med" pieces read as "Medium")
 const pieceLabel = (key) => key.replace(/^med_/, 'medium_').replace(/^(\w)/, (c) => c.toUpperCase()).replace('_', ' ');
 for (const piece of buildingPieces(manifest, state.theme)) state.gen.pieces[piece.key] ??= true;
@@ -1473,11 +1491,31 @@ const generation = createSettings(
             { type: 'slider', label: 'Seed', obj: state, key: 'seed', min: 1, max: 9999, step: 1, lazy: true, onChange: regen },
             { type: 'button', label: '🎲 Shuffle', action: shuffle },
             { type: 'slider', label: 'Sections', obj: state, key: 'sections', min: 1, max: 40, step: 1, lazy: true, onChange: regen },
+            {
+              type: 'select',
+              label: 'Game mode',
+              obj: state.gen,
+              key: 'mode',
+              options: Object.fromEntries(modes.map((m) => [m.label, m.key])),
+              visible: () => modes.length > 1,
+              onChange: (key) => setGameMode(key),
+            },
+            {
+              type: 'select',
+              label: 'Skin',
+              obj: state.gen,
+              key: 'skin',
+              options: () => Object.fromEntries(skinsOf().map(([key, label]) => [label, key])),
+              visible: () => skinsOf().length > 1,
+              onChange: (skin) => setGameMode(state.gen.mode, skin),
+            },
+            { type: 'note', label: 'Game modes lay the obstacles of their own route, between buildings', visible: () => !isNormal() },
             { type: 'select', label: 'Trains from', obj: state, key: 'trainEnv', options: trainOptions, onChange: async (id) => (id !== 'same' && (await mergeEnvironment(id)), regen()) },
           ],
         },
         {
           title: 'Map sections',
+          visible: isNormal,
           controls: toggles(state.gen.sections, [
             ['buildings', 'Buildings'],
             ['station', 'Stations', hasSlot('boundary_station_mid')],
@@ -1503,12 +1541,12 @@ const generation = createSettings(
         },
         {
           title: 'Fix',
-          visible: () => hasSlot('boundary_pillars_mid') && hasSlot('obstacle_pillar'),
+          visible: () => isNormal() && hasSlot('boundary_pillars_mid') && hasSlot('obstacle_pillar'),
           controls: [{ type: 'button', label: FIX_LABELS.pillar, title: 'Put a pillar back in every pillar hall spot that has none', action: () => fixMissing('pillar') }],
         },
         {
           title: 'Landmark',
-          visible: () => state.gen.sections.epic !== false && landmarkVariants(manifest, state.theme).length > 0,
+          visible: () => isNormal() && state.gen.sections.epic !== false && landmarkVariants(manifest, state.theme).length > 0,
           controls: landmarkVariants(manifest, state.theme).map((v) => ({
             type: 'toggle',
             label: v.label,
@@ -1668,6 +1706,8 @@ const studio = createStudio({
     rebuild({ dynamicOnly: true });
   },
   fromRun: () => runToStudio(),
+  getMode: () => ({ mode: state.gen.mode, skin: state.gen.skin ?? skinsOf()[0]?.[0] ?? null, skins: skinsOf() }),
+  setMode: (key, skin) => setGameMode(key, skin),
   fixables: () => fixables(),
   fixMissing: (key) => fixMissing(key),
   // Skin of a train placed with "Any" before skins were fixed at placement

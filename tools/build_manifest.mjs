@@ -440,8 +440,9 @@ const CHUNK_SLOT_ALIASES = {
 };
 
 /** Chase chunk prefab: ChunkAssetPlacer components (slot + position) with the
- * RandomChildRandomizer / MirrorRandomizer structure above them, and its length. */
-function parseChunk(file, guidIndex) {
+ * RandomChildRandomizer / MirrorRandomizer structure above them, and its length.
+ * `aliases`: mode slots become their regular look-alikes (game modes keep them raw). */
+function parseChunk(file, guidIndex, { aliases = true } = {}) {
   const text = read(file);
   const transforms = new Map(); // fid -> [pos, father, scale]
   const goTransform = new Map();
@@ -490,7 +491,7 @@ function parseChunk(file, guidIndex) {
 
   const placements = [];
   for (const [go, rawSlot] of placers) {
-    const slot = CHUNK_SLOT_ALIASES[rawSlot] ?? rawSlot;
+    const slot = (aliases && CHUNK_SLOT_ALIASES[rawSlot]) || rawSlot;
     if (slot.startsWith('track_') || slot.startsWith('boundary_')) continue; // rails/boundaries come from the run generator
     const tid = goTransform.get(go);
     const [x, y, z] = world(tid);
@@ -517,6 +518,120 @@ function parseChunk(file, guidIndex) {
   }
   const exitZ = text.match(/ExitAnchorOffset:\s*\n\s*x: [-\d.]+\s*\n\s*y: [-\d.]+\s*\n\s*z: ([-\d.]+)/);
   return { length: exitZ ? num(exitZ[1]) * 11.25 : 540.0, placements };
+}
+
+/**
+ * Clip a legacy Animation component shows at rest: its default clip, unless it doesn't play
+ * on its own and lists an idle one. The chase mode's vanishing objects idle until the runner
+ * comes near, then play their dissolve (the component's default); its moving blockers have
+ * an empty idle and stand where their drop ends: `hold` keeps the default clip's last pose.
+ */
+function legacyClip(doc, guidIndex) {
+  const fallback = guidIndex.get(doc.match(/\n {2}m_Animation: \{[^}]*guid: (\w+)/)?.[1]);
+  if (!/m_PlayAutomatically: 0/.test(doc)) return { clip: fallback, hold: false };
+  const list = doc.match(/\n {2}m_Animations:\n((?:\s+- .*\n)*)/)?.[1] ?? '';
+  const idle = [...list.matchAll(GUID_RE_G)].map((g) => guidIndex.get(g[1])).find((p) => p && /idle/i.test(stem(p)));
+  if (idle && existsSync(idle) && /\n\s+path: /.test(read(idle))) return { clip: idle, hold: false };
+  return { clip: fallback, hold: !!idle };
+}
+
+// Game modes: a RouteConfig whose scheduler strings sections of chunks together, and
+// ThemedAssetOverrides that swap the mode's own pieces into slots (the race has one set
+// per skin, picked by the live event)
+const GAME_MODES = {
+  chase: { route: 'ChaseTargetRouteConfig', overrides: { default: 'ChaseTargetAssetOverrides' } },
+  mysteryHurdles: { route: 'MysteryHurdlesRouteConfig', overrides: { default: 'MysteryHurdlesAssetOverrides' } },
+  race: { route: 'RaceRouteConfig', overrides: { subway: 'SubwayRace_RaceAssetOverrides', brawlStars: 'BsRace_RaceAssetOverrides' } },
+};
+// Section config script -> how the viewer expands it
+const SECTION_KINDS = {
+  SectionSequentialConfig: 'sequential', // every chunk, in order
+  SectionRandomOneConfig: 'one', // one chunk at random
+  SectionRandomRollingConfig: 'rolling', // one chunk at random, not the last one picked
+  SectionRandomAllConfig: 'all', // every chunk, shuffled
+  SectionAlternatingOneConfig: 'alternating', // one chunk, the next one each time
+  SectionCompositeConfig: 'composite', // every sub-section, in order
+  CompositeSectionRandomOneConfig: 'compositeOne', // one sub-section at random
+};
+
+/** guids of a YAML list that starts after `key:` (stops at the next less-indented key). */
+function listGuids(text, key) {
+  const m = text.match(new RegExp(`\\n(\\s*)${key}:\\n((?:\\1[ -].*\\n)*)`));
+  return m ? [...m[2].matchAll(GUID_RE_G)].map((g) => g[1]) : [];
+}
+
+/** Every prefab the modes' overrides swap in. */
+const modePrefabs = (modes = {}) => Object.values(modes).flatMap((m) => Object.values(m.overrides).flatMap((slots) => Object.values(slots).flat()));
+
+/**
+ * The game modes this export ships: { [mode]: { route, sections, chunks, overrides } }.
+ * route: { type: 'sequential', intro, entries: [{ section, repeats }], circular }
+ *      | { type: 'weighted', intro, entries: [{ section, weight, minZ, maxZ }], repeatDistance }
+ * sections: name -> { type, chunks | sections }; chunks: name -> parseChunk (raw slots);
+ * overrides: skin -> slot -> prefab names.
+ */
+function parseModes(find, guidIndex, log) {
+  const scriptOf = (text) => {
+    const g = text.match(/m_Script: \{[^}]*guid: (\w+)/)?.[1];
+    return g && guidIndex.has(g) ? stem(guidIndex.get(g)) : null;
+  };
+  const nameOf = (guid) => (guidIndex.has(guid) ? stem(guidIndex.get(guid)) : null);
+  const modes = {};
+  for (const [mode, spec] of Object.entries(GAME_MODES)) {
+    const routeFile = find(`${spec.route}.asset`);
+    const schedulerGuid = routeFile && read(routeFile).match(/_scheduler: \{[^}]*guid: (\w+)/)?.[1];
+    const schedulerFile = schedulerGuid && guidIndex.get(schedulerGuid);
+    if (!schedulerFile || !existsSync(schedulerFile)) continue;
+    const sections = {};
+    const chunks = {};
+    const addSection = (guid) => {
+      const name = nameOf(guid);
+      if (!name || name in sections) return name;
+      const text = read(guidIndex.get(guid));
+      const type = SECTION_KINDS[scriptOf(text)];
+      if (!type) return null;
+      sections[name] = { type }; // registered first: sections can repeat themselves
+      if (type.startsWith('composite')) {
+        sections[name].sections = listGuids(text, 'Sections').map(addSection).filter(Boolean);
+      } else {
+        sections[name].chunks = listGuids(text, 'Chunks').map((g) => {
+          const chunk = nameOf(g);
+          const file = guidIndex.get(g);
+          if (chunk && !(chunk in chunks) && file?.endsWith('.prefab')) chunks[chunk] = parseChunk(file, guidIndex, { aliases: false });
+          return chunk;
+        }).filter((c) => c in chunks);
+      }
+      return name;
+    };
+    const text = read(schedulerFile);
+    const intro = text.match(/_introSection: \{[^}]*guid: (\w+)/)?.[1];
+    const entries = [...text.matchAll(/- Section: \{[^}]*guid: (\w+)[^\n]*\n((?:\s{4}\w+: .*\n)*)/g)].map(([, guid, fields]) => {
+      const field = (k) => num(fields.match(new RegExp(`${k}: ([-\\d.]+)`))?.[1] ?? '0');
+      return { section: addSection(guid), weight: field('Weight'), minZ: field('MinimumZ'), maxZ: field('MaximumZ'), repeats: field('Repeats') };
+    }).filter((e) => e.section);
+    const weighted = scriptOf(text) === 'WeightedScheduler';
+    const route = weighted
+      ? { type: 'weighted', entries: entries.map(({ section, weight, minZ, maxZ }) => ({ section, weight, minZ, maxZ })), repeatDistance: num(text.match(/_minimumRepeatDistance: ([\d.]+)/)?.[1] ?? '0') }
+      : { type: 'sequential', entries: entries.map(({ section, repeats }) => ({ section, repeats })), circular: /_circular: 1/.test(text) };
+    if (intro) route.intro = addSection(intro);
+    // Override prefabs per skin
+    const overrides = {};
+    for (const [skin, file] of Object.entries(spec.overrides)) {
+      const p = find(`${file}.asset`);
+      if (!p) continue;
+      const slots = {};
+      for (const [, typeGuid, assets] of read(p).matchAll(/Type: \{[^}]*guid: (\w+)[^\n]*\n\s*Assets:\n((?:\s*- \{.*\}\n)*)/g)) {
+        const slot = nameOf(typeGuid);
+        const prefabs = [...assets.matchAll(GUID_RE_G)].map((g) => guidIndex.get(g[1])).filter((f) => f?.endsWith('.prefab')).map(stem);
+        if (slot && prefabs.length) slots[slot] = prefabs;
+      }
+      if (Object.keys(slots).length) overrides[skin] = slots;
+    }
+    if (!Object.keys(chunks).length) continue;
+    modes[mode] = { route, sections, chunks, overrides };
+    log(`Mode ${mode}: ${Object.keys(sections).length} sections, ${Object.keys(chunks).length} chunks, skins ${Object.keys(overrides).join(', ') || 'none'}`);
+  }
+  return modes;
 }
 
 /** ThemeConfig.ThemeEffects entry: segmented ground effects (Floor Is Lava's lava)
@@ -862,7 +977,7 @@ function parseAnimators(file, guidIndex) {
   for (const { doc, kind } of docs) {
     if (kind !== '111') continue;
     const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
-    const clip = guidIndex.get(doc.match(/\n {2}m_Animation: \{[^}]*guid: (\w+)/)?.[1]);
+    const { clip, hold } = legacyClip(doc, guidIndex);
     if (!names.has(go) || trailed.has(names.get(go)) || !clip || !existsSync(clip)) continue;
     const text = read(clip);
     const lastKey = Math.max(0, ...[...text.matchAll(/\n\s+time: ([\d.eE+-]+)/g)].map(([, t]) => Number(t)));
@@ -871,6 +986,16 @@ function parseAnimators(file, guidIndex) {
     const tracks = new Map();
     sampleClipTracks(text, stop, stop, 0, tracks, FPS);
     if (!tracks.size) continue;
+    if (hold) {
+      // A still pose: each track's last value
+      for (const t of tracks.values()) {
+        const n = t.values.length / t.times.length;
+        t.values = t.values.slice(-n).concat(t.values.slice(-n));
+        t.times = [0, 1];
+      }
+      out.push({ node: names.get(go), duration: 1, tracks: [...tracks.values()] });
+      continue;
+    }
     const looping = /m_LoopTime: 1/.test(text) || /m_WrapMode: 2/.test(doc);
     const duration = looping ? stop : stop + HOLD;
     for (const t of tracks.values()) {
@@ -1085,8 +1210,8 @@ function parseTrails(file, guidIndex) {
       fatherOf.set(fid, doc.match(/m_Father: \{fileID: (\d+)/)?.[1]);
     }
     if (kind === '111') {
-      const clip = guidIndex.get(doc.match(/\n {2}m_Animation: \{[^}]*guid: (\w+)/)?.[1]);
-      if (clip && existsSync(clip)) clipOf.set(go, clip);
+      const { clip, hold } = legacyClip(doc, guidIndex);
+      if (clip && !hold && existsSync(clip)) clipOf.set(go, clip); // a held pose sweeps nothing
     }
   }
   const out = [];
@@ -2363,6 +2488,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   }
   const placementCount = Object.values(chunks).reduce((n, c) => n + c.placements.length, 0);
   log(`Chunks: ${Object.keys(chunks).length} (${placementCount} placements)`);
+  const modes = parseModes(find, guidIndex, log);
 
   // Configs point at their theme; match on that, as names differ in old games
   // (theme "1.65_Amsterdam", config "Amsterdam_Config")
@@ -2412,6 +2538,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   let empty = [];
   const transitionPrefabs = Object.values(boundaries).map((b) => b.transitions.map((t) => t.prefab));
   transitionPrefabs.push(EXTRA_PREFABS);
+  transitionPrefabs.push(modePrefabs(modes));
   transitionPrefabs.push(Object.values(themeConfigs).filter((c) => c.background).map((c) => c.background.prefab));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.effects ?? []).map((e) => e.prefab)));
   // 1.x: skyline layers, and the cars / short pieces composites are built from
@@ -2688,6 +2815,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     themeConfigs,
     slotDepths,
     chunks,
+    modes,
     prefabs,
     materials,
   };
@@ -2719,6 +2847,7 @@ function splitByTheme(manifest, staging, out, log) {
     const names = new Set(Object.values(manifest.themes[theme]).flatMap((slots) => Object.values(slots).flat()));
     for (const t of manifest.boundaries[theme]?.transitions ?? []) names.add(t.prefab);
     for (const n of EXTRA_PREFABS) names.add(n);
+    for (const n of modePrefabs(manifest.modes)) names.add(n);
     if (config.background) names.add(config.background.prefab);
     for (const e of config.effects ?? []) names.add(e.prefab);
     for (const l of config.skylineLayers?.layers ?? []) for (const n of [...l.fill, ...l.singles]) names.add(n);

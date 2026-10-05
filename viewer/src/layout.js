@@ -83,7 +83,144 @@ export const DEFAULT_GEN = {
   showcase: false, // debug: no randomness, every piece and landmark variant laid out once
   density: 1, // obstacles per distance (gaps shrink as it grows)
   trainShare: 0.55, // chance a spot gets a train rather than an obstacle
+  mode: 'normal', // game mode whose route lays the obstacles (manifest.modes key)
+  skin: null, // the mode's override set (race: subway / brawlStars); null: its first
 };
+
+// ---------------------------------------------------------------- game modes
+
+const MODE_LABELS = { normal: 'Normal', chase: 'Chase', mysteryHurdles: 'Mystery Hurdles', race: 'Race' };
+// The Brawl Stars race skin is Showdown (its start arch says so)
+const SKIN_LABELS = { default: 'Default', subway: 'Subway Race', brawlStars: 'Showdown' };
+const SKIN_ORDER = ['brawlStars']; // listed (and picked by default) first
+// Studio names of the modes' own pieces (other slots: their name, tidied)
+const MODE_PIECE_LABELS = {
+  ct_moving_obstacle_standard: 'Moving barrier',
+  ct_moving_obstacle_jump: 'Moving jump barrier',
+  ct_moving_obstacle_roll: 'Moving roll barrier',
+  ct_moving_obstacle_full: 'Moving full barrier',
+  ct_moving_obstacle_train_platform: 'Moving train platform',
+  ct_vanish_obstacles_standard: 'Vanishing barrier',
+  ct_vanish_obstacles_jump: 'Vanishing jump barrier',
+  ct_vanish_obstacles_roll: 'Vanishing roll barrier',
+  ct_vanish_obstacles_full: 'Vanishing full barrier',
+  ct_vanish_obstacles_train_platform: 'Vanishing train platform',
+  ct_vanish_obstacles_train: 'Vanishing train (1 car)',
+  ct_vanish_obstacles_train_3: 'Vanishing train (3 cars)',
+  ct_vanish_obstacles_train_5: 'Vanishing train (5 cars)',
+  ct_vanish_obstacles_moving_train_3: 'Vanishing moving train (3)',
+  ct_vanish_obstacles_moving_train_5: 'Vanishing moving train (5)',
+  hurdle_jump_easy: 'Mystery hurdle (easy)',
+  hurdle_jump_medium: 'Mystery hurdle (medium)',
+  hurdle_jump_hard: 'Mystery hurdle (hard)',
+  hurdle_malfuntioning: 'Broken hurdle',
+  speedpad_boost: 'Speed pad (boost)',
+  speedpad_slow: 'Speed pad (slow)',
+  race_start_line: 'Start line',
+  race_finish_line: 'Finish line',
+  race_start_line_backdrop: 'Start line backdrop',
+};
+// A vanishing piece is only its ghost effect: the game's chunks put the regular piece at the
+// same spot, which it dissolves when the runner comes near. Studio items carry both.
+const VANISH_BASE = {
+  ct_vanish_obstacles_train: 'train_static_1',
+  ct_vanish_obstacles_train_3: 'train_static_3',
+  ct_vanish_obstacles_train_5: 'train_static_5',
+  ct_vanish_obstacles_moving_train_3: 'train_moving_3',
+  ct_vanish_obstacles_moving_train_5: 'train_moving_5',
+  ct_vanish_obstacles_standard: 'obstacle_barrier_standard',
+  ct_vanish_obstacles_jump: 'obstacle_barrier_jump',
+  ct_vanish_obstacles_roll: 'obstacle_barrier_roll',
+  ct_vanish_obstacles_full: 'obstacle_barrier_full',
+  ct_vanish_obstacles_train_platform: 'obstacle_train_platform',
+};
+const tidy = (s) => s.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+
+/** Game modes of this map for the mode pickers: [{ key, label, skins: [[key, label]] }], Normal first. */
+export function gameModes(manifest) {
+  const out = [{ key: 'normal', label: MODE_LABELS.normal, skins: [] }];
+  for (const [key, mode] of Object.entries(manifest.modes ?? {})) {
+    const prefabs = Object.values(mode.overrides).flatMap((slots) => Object.values(slots).flat());
+    // The chase mode is dressed for the event running at the time: Halloween's is Trick or Treat
+    const label = key === 'chase' && prefabs.some((n) => /_TOT_/.test(n)) ? '🎃 Trick or Treat' : MODE_LABELS[key] ?? tidy(key);
+    const skins = Object.keys(mode.overrides).sort((a, b) => (SKIN_ORDER.includes(b) ? 1 : 0) - (SKIN_ORDER.includes(a) ? 1 : 0));
+    out.push({ key, label, skins: skins.map((s) => [s, SKIN_LABELS[s] ?? tidy(s)]) });
+  }
+  return out;
+}
+
+/** The active mode's data and its override slots (skin as chosen, else the first). */
+function activeMode(manifest, gen) {
+  const mode = manifest.modes?.[gen?.mode];
+  if (!mode) return { mode: null, overrides: {} };
+  const skin = gen.skin in mode.overrides ? gen.skin : SKIN_ORDER.find((s) => s in mode.overrides) ?? Object.keys(mode.overrides)[0];
+  return { mode, overrides: mode.overrides[skin] ?? {} };
+}
+
+/** Layer a chunk slot goes on: train-shaped pieces hide with the trains. */
+const layerOf = (slot) =>
+  slot === 'obstacle_lightSignal' ? 'signal' : /^(train_|ct_vanish_obstacles_(moving_)?train(_\d)?$)/.test(slot) ? 'train' : 'obstacle';
+
+/**
+ * Chunk names a mode's route lays, as the game's scheduler would: the intro section, then
+ * (sequential) every entry in order, `repeats` times, or (weighted) picks by weight among
+ * the entries whose [minZ, maxZ) window holds the distance, none again within repeatDistance.
+ * `target`: distance a weighted route fills (a sequential one lays one pass).
+ */
+function routeChunks(mode, rng, target) {
+  const { route, sections, chunks } = mode;
+  const last = new Map(); // rolling sections: last pick
+  const turns = new Map(); // alternating sections: next index
+  const out = [];
+  let z = 0;
+  const push = (name) => {
+    out.push(name);
+    z += chunks[name].length;
+  };
+  const expand = (name, depth = 0) => {
+    const s = sections[name];
+    if (!s || depth > 12) return;
+    const list = s.chunks ?? s.sections ?? [];
+    if (!list.length) return;
+    if (s.type === 'sequential') for (const c of list) push(c);
+    else if (s.type === 'all') for (const c of [...list].sort(() => rng() - 0.5)) push(c);
+    else if (s.type === 'one') push(pick(rng, list));
+    else if (s.type === 'rolling') {
+      // (a section can list one chunk twice: the race's Powers1)
+      const others = list.filter((c) => c !== last.get(name));
+      last.set(name, pick(rng, others.length ? others : list));
+      push(last.get(name));
+    } else if (s.type === 'alternating') {
+      const i = turns.get(name) ?? 0;
+      turns.set(name, i + 1);
+      push(list[i % list.length]);
+    } else if (s.type === 'composite') for (const sub of list) expand(sub, depth + 1);
+    else if (s.type === 'compositeOne') expand(pick(rng, list), depth + 1);
+  };
+  if (route.intro) expand(route.intro);
+  if (route.type === 'sequential') {
+    for (const e of route.entries) for (let i = 0; i < Math.max(1, e.repeats); i++) expand(e.section);
+    return out;
+  }
+  const used = new Map(); // section -> distance it was last laid at
+  while (z < (target ?? 0)) {
+    const open = route.entries.filter((e) => e.minZ <= z && (!e.maxZ || z < e.maxZ));
+    const fresh = open.filter((e) => !used.has(e.section) || z - used.get(e.section) >= route.repeatDistance);
+    const pool = fresh.length ? fresh : open;
+    if (!pool.length) break;
+    const total = pool.reduce((n, e) => n + e.weight, 0);
+    let r = rng() * total;
+    const entry = total > 0 ? pool.find((e) => (r -= e.weight) < 0) ?? pool[0] : pick(rng, pool);
+    used.set(entry.section, z);
+    const before = out.length;
+    expand(entry.section);
+    if (out.length === before) break;
+  }
+  return out;
+}
+
+// One pass of a sequential route stretches the run to fit, up to this length
+const MAX_ROUTE_LENGTH = 30000;
 const OBSTACLE_SLOTS = {
   jump: 'obstacle_barrier_jump',
   roll: 'obstacle_barrier_roll',
@@ -208,21 +345,31 @@ export function buildingPieces(manifest, themeName) {
 
 const hashString = (str) => [...str].reduce((h, c) => (Math.imul(h, 31) + c.charCodeAt(0)) | 0, 7) >>> 0;
 
-/** Slots of a theme (optionally with another theme's trains). */
-function themeSlots(manifest, themeName, trainTheme) {
+/** Slots of a theme (optionally with another theme's trains), with the game mode's own pieces. */
+function themeSlots(manifest, themeName, trainTheme, gen = null) {
   const slots = Object.assign({}, ...Object.values(manifest.themes[themeName]));
   if (trainTheme && trainTheme !== themeName && manifest.themes[trainTheme]) {
     Object.assign(slots, manifest.themes[trainTheme].train);
   }
-  return slots;
+  return Object.assign(slots, activeMode(manifest, gen).overrides);
 }
 
 // Train skins share a slot: <Theme>_Train_Static_3_Cargo / _Standard / _Subway
 export const TRAIN_VARIANTS = { cargo: /_Cargo$/i, passenger: /_Standard$/i, subway: /_Subway$/i };
 
 /** What the studio can place for this theme: obstacle tools and train kinds with their wagon counts. */
-export function studioCatalog(manifest, themeName, trainTheme = null) {
-  const slots = themeSlots(manifest, themeName, trainTheme);
+export function studioCatalog(manifest, themeName, trainTheme = null, gen = null) {
+  const slots = themeSlots(manifest, themeName, trainTheme, gen);
+  // The mode's own pieces (one tool per distinct piece: hurdle slots share their models)
+  const modeLabel = gameModes(manifest).find((m) => m.key === gen?.mode && m.key !== 'normal')?.label ?? null;
+  const modePieces = {};
+  const seenPieces = new Set();
+  for (const [slot, prefabs] of Object.entries(activeMode(manifest, gen).overrides)) {
+    const key = prefabs.join('|');
+    if (Object.values(OBSTACLE_SLOTS).includes(slot) || seenPieces.has(key) || !prefabs.some((n) => manifest.prefabs[n]?.bbox)) continue;
+    seenPieces.add(key);
+    modePieces[slot] = MODE_PIECE_LABELS[slot] ?? tidy(slot);
+  }
   const has = (slot) => slots[slot]?.some((n) => manifest.prefabs[n]?.bbox);
   const trains = {};
   for (const kind of TRAIN_KINDS) {
@@ -242,6 +389,9 @@ export function studioCatalog(manifest, themeName, trainTheme = null) {
     pillars: has('boundary_pillars_mid') && has('obstacle_pillar'),
     // Classic maps model their rails into the chunks: no track to take out
     tracks: !slots.classic_chunk?.length,
+    modeLabel,
+    modePieces,
+    modes: gameModes(manifest),
   };
 }
 
@@ -257,8 +407,13 @@ export function generateLayout(
   { seed = 1, sections = 12, trainTheme = null, obstacleMode = 'random', gen = DEFAULT_GEN, studio = [] } = {},
 ) {
   gen = { ...DEFAULT_GEN, ...gen };
-  // Trains (and ramps) can come from another theme
-  const slots = themeSlots(manifest, themeName, trainTheme);
+  // Trains (and ramps) can come from another theme; a game mode brings its own pieces
+  const slots = themeSlots(manifest, themeName, trainTheme, gen);
+  const { mode, overrides: modeSlots } = activeMode(manifest, gen);
+  // A game mode's run: its scenery (in the studio too, so both views match), and its
+  // route lays the obstacles unless the studio places them
+  const modeRun = !!mode && !slots.classic_chunk?.length;
+  const routed = modeRun && obstacleMode !== 'studio';
   const has = (slot) => slots[slot]?.length > 0;
   const rng = mulberry32(seed);
   const items = [];
@@ -287,8 +442,9 @@ export function generateLayout(
     const list = named.length ? named : slots[slot];
     const key = `${slot}|${nameFilter ?? ''}`;
     const { prefab, variants } = gen.showcase ? choose(key, showcaseList(list)) : { prefab: choose(key, list), variants: null };
-    // Per-instance seed for the prefab's random variant groups
-    items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(placeRng() * 2 ** 31), ...(variants ? { variants } : {}), ...extra });
+    // Per-instance seed for the prefab's random variant groups ("mode": a game mode's own piece)
+    const own = slot in modeSlots ? { mode: true } : {};
+    items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(placeRng() * 2 ** 31), ...(variants ? { variants } : {}), ...own, ...extra });
     return prefab;
   };
   // ≤ 1.43: the game's hand-built chunks; in the studio, hand-placed trains and obstacles
@@ -320,7 +476,8 @@ export function generateLayout(
     { name: 'pillars', weight: 1, ok: () => has('boundary_pillars_mid'), build: pillars },
     { name: 'gate', weight: 0.5, ok: () => has('boundary_gate') && has('track_gates'), build: gate },
     { name: 'epic', weight: 0.4, ok: () => has('boundary_epic_start'), build: epic },
-  ].filter((s) => s.ok() && gen.sections[s.name] !== false);
+    // Game modes run between buildings: their sections ask for building boundaries
+  ].filter((s) => s.ok() && gen.sections[s.name] !== false && (!modeRun || s.name === 'buildings'));
   // Nothing enabled (or available): plain buildings
   if (!sectionTypes.length) sectionTypes.push({ name: 'buildings', weight: 1, build: buildings });
   const buildingsType = sectionTypes.find((t) => t.name === 'buildings');
@@ -546,6 +703,14 @@ export function generateLayout(
     finalPlan.push(section);
   }
   if (!gen.showcase) for (const section of finalPlan) section.build();
+  // A sequential route (race, mystery hurdles) runs from its start to its end: more
+  // buildings until it fits
+  const routeRng = mulberry32(seed ^ 0x5bd1e995);
+  const pass = modeRun && mode.route.type === 'sequential' ? routeChunks(mode, routeRng, null) : null;
+  if (pass && buildingsType) {
+    const passLength = pass.reduce((n, c) => n + mode.chunks[c].length, 0);
+    while (z < Math.min(passLength, MAX_ROUTE_LENGTH) + 2 * SEGMENT) buildings();
+  }
   const length = z;
   placeTransitions();
 
@@ -616,6 +781,7 @@ export function generateLayout(
 
   // Older game versions ship no chase chunks: fall back to random obstacles
   if (obstacleMode === 'studio') placeStudio();
+  else if (routed) placeRoute();
   else if (obstacleMode === 'chunks' && Object.keys(manifest.chunks ?? {}).length) placeChunks();
   else placeObstacles();
 
@@ -637,9 +803,15 @@ export function generateLayout(
       } else if (it.type === 'signal') {
         place('obstacle_lightSignal', [it.x, 0, it.z], 'signal', { signalSeed: Math.floor(placeRng() * 2 ** 31), signalColor: it.color });
       } else if (it.type === 'obstacle') {
+        // Regular obstacles by tool key, a game mode's pieces by slot
+        const slot = OBSTACLE_SLOTS[it.key] ?? it.key;
+        const layer = layerOf(slot);
+        const extra = { ...(it.scale ? { scale: it.scale } : {}), ...(layer === 'train' ? { group: `studio${it.lane}@${it.z}` } : {}) };
+        const base = VANISH_BASE[slot];
         if (it.key === 'powerBox') powerBoxCluster(it.lane, it.z);
         // Height and scale kept from the game's chunks (a barrier on a train roof, small bushes)
-        else place(OBSTACLE_SLOTS[it.key], [it.lane, it.y ?? 0, it.z], 'obstacle', it.scale ? { scale: it.scale } : {});
+        else place(slot, [it.lane, it.y ?? 0, it.z], layer, extra);
+        if (base) place(base, [it.lane, it.y ?? 0, it.z], layerOf(base), { ...extra, ...(layerOf(base) === 'train' ? { group: `studio${it.lane}@${it.z}` } : {}) });
       }
     }
     placeRng = rng;
@@ -661,30 +833,52 @@ export function generateLayout(
         cz += 90;
         continue;
       }
-      const choice = new Map(); // group -> chosen option (or null)
-      const mirrored = new Map(); // mirror node -> flip?
-      for (const pl of chunk.placements) {
-        if (pl.group && !choice.has(pl.group)) {
-          const options = [...new Set(chunk.placements.filter((q) => q.group === pl.group).map((q) => q.option))];
-          choice.set(pl.group, rng() < pl.groupProbability ? pick(rng, options) : null);
-        }
-        if (pl.mirror && !mirrored.has(pl.mirror)) mirrored.set(pl.mirror, rng() < pl.mirrorProbability);
-      }
-      for (const pl of chunk.placements) {
-        if (pl.group && choice.get(pl.group) !== pl.option) continue;
-        if (pl.slot.startsWith('special_gate')) continue; // gate walls need a gate section around them
-        let [x, y, pz] = pl.pos;
-        if (pl.mirror && mirrored.get(pl.mirror)) x = 2 * pl.mirrorX - x;
-        const key = `${pl.slot}@${x},${pz + cz}`;
-        if (seen.has(key)) continue; // a chase entity and its themed child share a spot
-        seen.add(key);
-        const layer = pl.slot.startsWith('train_') ? 'train' : 'obstacle';
-        // Trains in one lane of a chunk hide together in the cutaway
-        const extra = layer === 'train' ? { group: `chunk${cz}x${x}` } : {};
-        if (pl.scale) extra.scale = pl.scale;
-        place(pl.slot, [x, y, pz + cz], layer, extra);
-      }
+      placeChunk(chunk, cz, seen);
       cz += chunk.length;
+    }
+  }
+
+  // A game mode's route: its scheduler's chunks back to back from the start of the run.
+  // Weighted routes (chase) fill the run; sequential ones lay one pass, start to finish
+  // (the race would loop into a second start line after its finish)
+  function placeRoute() {
+    const names = pass ?? routeChunks(mode, routeRng, length - 2 * SEGMENT);
+    const seen = new Set();
+    let cz = SEGMENT;
+    for (const name of names) {
+      const chunk = mode.chunks[name];
+      if (cz + chunk.length > length - SEGMENT / 2) break;
+      placeChunk(chunk, cz, seen);
+      cz += chunk.length;
+    }
+  }
+
+  /** One chunk's placements at cz: one option per random group, mirrored subtrees flipped. */
+  function placeChunk(chunk, cz, seen) {
+    const choice = new Map(); // group -> chosen option (or null)
+    const mirrored = new Map(); // mirror node -> flip?
+    for (const pl of chunk.placements) {
+      if (pl.group && !choice.has(pl.group)) {
+        const options = [...new Set(chunk.placements.filter((q) => q.group === pl.group).map((q) => q.option))];
+        choice.set(pl.group, rng() < pl.groupProbability ? pick(rng, options) : null);
+      }
+      if (pl.mirror && !mirrored.has(pl.mirror)) mirrored.set(pl.mirror, rng() < pl.mirrorProbability);
+    }
+    for (const pl of chunk.placements) {
+      if (pl.group && choice.get(pl.group) !== pl.option) continue;
+      if (pl.slot.startsWith('special_gate')) continue; // gate walls need a gate section around them
+      let [x, y, pz] = pl.pos;
+      // (never pushed off the tracks: the race's Ramps1 has a ramp under a mirror node one
+      // lane over; pieces modeled beside the tracks, like bushes, still swap sides)
+      if (pl.mirror && mirrored.get(pl.mirror) && Math.abs(2 * pl.mirrorX - x) <= Math.max(20.5, Math.abs(x))) x = 2 * pl.mirrorX - x;
+      const key = `${pl.slot}@${x},${pz + cz}`;
+      if (seen.has(key)) continue; // a chase entity and its themed child share a spot
+      seen.add(key);
+      const layer = layerOf(pl.slot);
+      // Trains in one lane of a chunk hide together in the cutaway
+      const extra = layer === 'train' ? { group: `chunk${cz}x${x}` } : layer === 'signal' ? { signalSeed: Math.floor(rng() * 2 ** 31) } : {};
+      if (pl.scale) extra.scale = pl.scale;
+      place(pl.slot, [x, y, pz + cz], layer, extra);
     }
   }
 
@@ -762,21 +956,29 @@ export function generateLayout(
 /** Converts generated obstacle items into an editable studio list ("start from this run"). */
 export function itemsToStudio(items) {
   const out = [];
-  const ramps = new Map(items.filter((i) => i.slot === 'train_ramp').map((i) => [i.group, i]));
+  // Regular pieces under a vanishing effect come back with it
+  const at = (slot, pos) => `${slot}@${pos[0]},${pos[1]},${pos[2]}`;
+  const underVanish = new Set(items.filter((i) => VANISH_BASE[i.slot]).map((i) => at(VANISH_BASE[i.slot], i.pos)));
+  // A ramp sits 40 in front of its train's origin (the game's chunks: 26 to 35); chunk
+  // trains share a group per lane, so it's found by position
+  const ramps = items.filter((i) => i.slot === 'train_ramp');
+  const rampOf = (it) => ramps.find((r) => r.group === it.group && r.pos[0] === it.pos[0] && it.pos[2] - r.pos[2] > 24 && it.pos[2] - r.pos[2] < 42);
   for (const it of items) {
     const [x, , z] = it.pos;
+    if (underVanish.has(at(it.slot, it.pos))) continue;
     const m = it.slot.match(/^train_(static|moving|falling)_(\d)$/);
     if (m) {
-      const ramp = ramps.get(it.group);
-      const z0 = ramp ? ramp.pos[2] - 36 : z;
+      const ramp = rampOf(it);
+      const z0 = ramp ? z - RAMP_LENGTH : z; // the train stays put, its ramp comes with it
       const variant = Object.keys(TRAIN_VARIANTS).find((v) => TRAIN_VARIANTS[v].test(it.prefab)) ?? 'auto';
       out.push({ type: 'train', lane: x, z0, z1: z + trainLength(Number(m[2])), kind: m[1], variant, ramp: !!ramp });
     } else if (it.slot === 'prop_train_start') {
       out.push({ type: 'startTrain', lane: x, z });
     } else if (it.slot === 'obstacle_lightSignal') {
       out.push({ type: 'signal', x, z, color: mulberry32(it.signalSeed)() < 0.5 ? 'green' : 'red' });
-    } else if (it.layer === 'obstacle') {
-      const key = Object.entries(OBSTACLE_SLOTS).find(([, slot]) => slot === it.slot)?.[0];
+    } else if (it.layer === 'obstacle' || it.mode) {
+      // A game mode's own pieces (vanishing trains included) keep their slot as tool key
+      const key = Object.entries(OBSTACLE_SLOTS).find(([, slot]) => slot === it.slot)?.[0] ?? (it.mode ? it.slot : null);
       // A power box brings its two small bushes back itself
       const ofPowerBox = it.scale && it.slot === 'obstacle_bush' && items.some((p) => p.slot === 'obstacle_powerBox' && Math.abs(p.pos[0] - x) < 6 && Math.abs(p.pos[2] - z) < 6);
       if (!key || ofPowerBox) continue;
