@@ -545,7 +545,10 @@ function applyMotions(obj, list, seed, bbox = null) {
   // One clock per piece: flicker patterns play in step (2.34 Copenhagen's gate frames take
   // turns, its tunnel LEDs chase right to left), each piece at its own time
   const phase = rng() * 100;
-  for (const m of list) {
+  for (let m of list) {
+    // A ride at speed 0 is a dead script: 3.70 Copenhagen Sci-Fi's lift lost its speed when
+    // moved to the newer format (2.34: 0.5, from its floor up): played as in 2.34
+    if (m.type === 'offset' && !m.frequency) m = { ...m, frequency: 0.5, oneSided: true };
     const node = resolveMotionNode(obj, m);
     if (!node) continue; // its variant wasn't picked
     motions.add({
