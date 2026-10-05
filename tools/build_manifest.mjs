@@ -305,6 +305,98 @@ function blendShapes(text) {
 }
 
 /**
+ * AssetRipper writes all-zero vertex colors for compressed meshes (m_MeshCompression), so
+ * additive vertex-colored glows vanish (3.70 Transylvania's window light on the tube floor)
+ * and colored meshes go black. Puts the real colors back into the glb: each node's
+ * renderer mesh is decoded from its asset and matched to the glb primitives, by vertex
+ * order where it lines up, else vertex by vertex on position. Returns the primitives fixed.
+ */
+function fixZeroColors(glbFile, prefabFile, guidIndex) {
+  const docs = yamlDocs(read(prefabFile));
+  const names = new Map();
+  for (const { doc, kind, fid } of docs) if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+  const meshOfNode = new Map(); // GameObject name -> mesh asset (MeshFilter)
+  for (const { doc, kind } of docs) {
+    if (kind !== '33') continue;
+    const go = names.get(doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1]);
+    const mesh = guidIndex.get(doc.match(/m_Mesh: \{[^}]*guid: (\w+)/)?.[1]);
+    if (go && mesh && existsSync(mesh)) meshOfNode.set(go, mesh);
+  }
+  if (!meshOfNode.size) return 0;
+  const data = readFileSync(glbFile);
+  const jsonLen = data.readUInt32LE(12);
+  const json = JSON.parse(data.toString('utf8', 20, 20 + jsonLen));
+  const binStart = 20 + jsonLen + 8;
+  const view = (ai) => {
+    const a = json.accessors[ai];
+    const bv = json.bufferViews[a.bufferView];
+    const size = { 5126: 4, 5123: 2, 5121: 1 }[a.componentType];
+    const n = { VEC3: 3, VEC4: 4 }[a.type];
+    return { a, n, size, stride: bv.byteStride ?? size * n, start: binStart + (bv.byteOffset ?? 0) + (a.byteOffset ?? 0) };
+  };
+  const readComp = (v, i, c) => {
+    const o = v.start + i * v.stride + c * v.size;
+    if (v.a.componentType === 5126) return data.readFloatLE(o);
+    const raw = v.size === 1 ? data.readUInt8(o) : data.readUInt16LE(o);
+    return v.a.normalized ? raw / (v.size === 1 ? 255 : 65535) : raw;
+  };
+  const writeComp = (v, i, c, x) => {
+    const o = v.start + i * v.stride + c * v.size;
+    if (v.a.componentType === 5126) data.writeFloatLE(x, o);
+    else if (v.size === 1) data.writeUInt8(Math.round(Math.min(Math.max(x, 0), 1) * 255), o);
+    else data.writeUInt16LE(Math.round(Math.min(Math.max(x, 0), 1) * 65535), o);
+  };
+  const decoded = new Map();
+  let fixed = 0;
+  for (const node of json.nodes ?? []) {
+    if (node.mesh == null) continue;
+    // Multi-material renderers: AssetRipper names the node's primitives after the GameObject
+    const file = meshOfNode.get(node.name) ?? meshOfNode.get(node.name?.replace(/_\d+$/, ''));
+    if (!file) continue;
+    if (!decoded.has(file)) {
+      const text = read(file);
+      const mesh = /m_MeshCompression: [1-9]/.test(text) ? compressedMesh(text) : null;
+      const subs = [...text.matchAll(/\n {4}firstVertex: (\d+)\n {4}vertexCount: (\d+)/g)].map(([, f, n]) => [Number(f), Number(n)]);
+      decoded.set(file, mesh?.colors ? { ...mesh, subs } : null);
+    }
+    const mesh = decoded.get(file);
+    if (!mesh) continue;
+    const count = mesh.positions.length / 3;
+    // Unity vertices by rounded position (glb space), for primitives in another order
+    let byPos = null;
+    const key = (x, y, z) => `${Math.round(x * 100)},${Math.round(y * 100)},${Math.round(z * 100)}`;
+    json.meshes[node.mesh].primitives.forEach((prim, k) => {
+      if (prim.attributes.COLOR_0 == null || prim.attributes.POSITION == null) return;
+      const col = view(prim.attributes.COLOR_0);
+      const pos = view(prim.attributes.POSITION);
+      for (let i = 0; i < col.a.count; i++) for (let c = 0; c < col.n; c++) if (readComp(col, i, c) !== 0) return; // has colors
+      const [first, n] = mesh.subs[k] ?? [0, count];
+      const near = (i, u) => [0, 1, 2].every((c) => Math.abs(readComp(pos, i, c) - mesh.positions[u * 3 + c]) < 0.05);
+      let map = null;
+      if (n === pos.a.count && Array.from({ length: Math.min(n, 64) }, (_, i) => i).every((i) => near(i, first + i))) {
+        map = (i) => first + i;
+      } else {
+        if (!byPos) {
+          byPos = new Map();
+          for (let u = count - 1; u >= 0; u--) byPos.set(key(mesh.positions[u * 3], mesh.positions[u * 3 + 1], mesh.positions[u * 3 + 2]), u);
+        }
+        map = (i) => byPos.get(key(readComp(pos, i, 0), readComp(pos, i, 1), readComp(pos, i, 2)));
+      }
+      let hits = 0;
+      for (let i = 0; i < col.a.count; i++) {
+        const u = map(i);
+        if (u == null) continue;
+        hits++;
+        for (let c = 0; c < col.n; c++) writeComp(col, i, c, mesh.colors[u * 4 + c] ?? 1);
+      }
+      if (hits) fixed++;
+    });
+  }
+  if (fixed) writeFileSync(glbFile, data);
+  return fixed;
+}
+
+/**
  * SkinnedMeshRenderers without bones, animated by blend shapes only (3.68 Cosmic
  * Crossroads monster). The glb export has no morph targets and its vertex order drifts
  * from Unity's at seams, so the whole mesh is rebuilt from the (compressed) asset.
@@ -791,22 +883,80 @@ function parseAnimators(file, guidIndex) {
   return out;
 }
 
-/** RotationEffect scripts (spinning UFO lights): [{ node, axis (glb space), speed (degrees/s) }]. */
-function parseSpinners(file, guidIndex) {
+/**
+ * Script-driven motion on scenery: RotationEffect (spin), OffsetEffect (bob), ScaleEffect
+ * (pulse), RotateAndScaleTransform (sway / breathe: candle glows), MeshFlickering (on/off
+ * pattern). Each names its node by path below the prefab root, "name#k" the k-th sibling
+ * of that name, so identical copies (three candle glows) all move. glb space (X mirrored).
+ */
+function parseMotions(file, guidIndex) {
   const docs = yamlDocs(read(file));
   const names = new Map();
-  for (const { doc, kind, fid } of docs) if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+  const goOfTransform = new Map();
+  const transformOf = new Map();
+  const fatherOf = new Map();
+  const childrenOf = new Map();
+  const goOfComponent = new Map();
+  for (const { doc, kind, fid } of docs) {
+    if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    if (go) goOfComponent.set(fid, go);
+    if (kind === '4' || kind === '224') {
+      goOfTransform.set(fid, go);
+      transformOf.set(go, fid);
+      fatherOf.set(fid, doc.match(/m_Father: \{fileID: (\d+)/)?.[1]);
+      childrenOf.set(fid, [...(doc.split('m_Children:')[1]?.split('m_Father')[0] ?? '').matchAll(/fileID: (\d+)/g)].map(([, t]) => t));
+    }
+  }
+  const pathOf = (go) => {
+    const parts = [];
+    for (let t = transformOf.get(go); t && fatherOf.get(t) && fatherOf.get(t) !== '0'; t = fatherOf.get(t)) {
+      const name = names.get(goOfTransform.get(t));
+      const same = (childrenOf.get(fatherOf.get(t)) ?? []).filter((c) => names.get(goOfTransform.get(c)) === name);
+      parts.unshift(`${name}#${Math.max(0, same.indexOf(t))}`);
+    }
+    return parts.join('/');
+  };
+  const vec = (doc, key) => {
+    const m = doc.match(new RegExp(`${key}: \\{x: ([^,]+), y: ([^,]+), z: ([^}]+)\\}`));
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const num = (doc, key, fallback = 0) => Number(doc.match(new RegExp(`\\n\\s+${key}: ([\\d.eE+-]+)`))?.[1] ?? fallback);
+  const axis = ([x, y, z]) => [x, -y, -z]; // rotation axes: as quaternions convert
   const out = [];
   for (const { doc } of docs) {
     if (!doc.startsWith('!u!114')) continue;
-    const script = doc.match(/m_Script: .*guid: (\w+)/)?.[1];
-    if (!script || stem(guidIndex.get(script) ?? '') !== 'RotationEffect') continue;
+    const kind = stem(guidIndex.get(doc.match(/m_Script: .*guid: (\w+)/)?.[1]) ?? '');
     const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
-    const axis = doc.match(/_axis: \{x: ([^,]+), y: ([^,]+), z: ([^}]+)\}/);
-    const speed = Number(doc.match(/_speed: ([\d.eE+-]+)/)?.[1] ?? 0);
-    if (!names.has(go) || !axis || !speed) continue;
-    // Unity -> glb: X mirrored, so rotations keep x and flip y, z (as quaternions do)
-    out.push({ node: names.get(go), axis: [Number(axis[1]), -Number(axis[2]), -Number(axis[3])], speed });
+    if (!names.has(go)) continue;
+    let motion = null;
+    let target = go;
+    if (kind === 'RotationEffect') {
+      const a = vec(doc, '_axis');
+      if (a && num(doc, '_speed')) motion = { type: 'spin', axis: axis(a), speed: num(doc, '_speed') };
+    } else if (kind === 'OffsetEffect') {
+      const d = vec(doc, '_direction');
+      if (d) motion = { type: 'offset', direction: [-d[0], d[1], d[2]], frequency: num(doc, '_frequency', 2) };
+    } else if (kind === 'ScaleEffect') {
+      motion = {
+        type: 'scale',
+        additive: num(doc, '_additiveScale') === 1,
+        offset: num(doc, '_amplitudeOffset'),
+        amount: ['X', 'Y', 'Z'].map((c) => (num(doc, `_scaleIn${c}`) === 1 ? num(doc, `_scaleAmount${c}`) : 0)),
+        frequency: num(doc, '_frequency', 2),
+      };
+    } else if (kind === 'RotateAndScaleTransform') {
+      target = goOfTransform.get(doc.match(/_transform: \{fileID: (\d+)/)?.[1]) ?? go;
+      motion = { type: 'sway' };
+      if (num(doc, '_enableRotation') === 1) motion.rotation = { axis: axis(vec(doc, '_rotationAxis') ?? [0, 1, 0]), min: num(doc, '_minRotationRange'), max: num(doc, '_maxRotationRange'), speed: num(doc, '_rotationSpeed') };
+      if (num(doc, '_enableScaling') === 1) motion.scale = { axis: (vec(doc, '_scaleAxis') ?? [0, 1, 0]).map(Math.abs), min: num(doc, '_minScale', 1), max: num(doc, '_maxScale', 1), speed: num(doc, '_scaleSpeed') };
+      if (!motion.rotation && !motion.scale) motion = null;
+    } else if (kind === 'MeshFlickering') {
+      target = goOfComponent.get(doc.match(/_Mesh: \{fileID: (\d+)/)?.[1]) ?? go;
+      const pattern = doc.match(/_FlickerPattern: (.*)/)?.[1].trim().replace(/^'|'$/g, '');
+      if (pattern) motion = { type: 'flicker', speed: num(doc, '_FlickerSpeed', 1), pattern };
+    }
+    if (motion && names.has(target)) out.push({ path: pathOf(target), node: names.get(target), ...motion });
   }
   return out;
 }
@@ -850,6 +1000,39 @@ function sampleClipTracks(text, stop, length, start, tracks, fps = 30) {
         track.times.push(round(start + (f / frames) * length, 4));
         track.values.push(...g.map((x) => round(x, 5)));
       }
+    }
+  }
+  // Rotation keyed as Euler angles (degrees, Unity's Z, X, Y order): converted per frame to
+  // quaternions, unless the clip also has the quaternion curve for that path
+  const eulerBlock = text.split('\n  m_EulerCurves:')[1]?.split(/\n  \w/)[0] ?? '';
+  for (const item of eulerBlock.split('\n  - curve:').slice(1)) {
+    const curvePath = item.match(/\n\s+path: (.*)/)?.[1].trim() ?? '';
+    const key = `${curvePath}|quaternion`;
+    if (tracks.has(key)) continue;
+    const vec = (str) => ['x', 'y', 'z'].map((c) => Number(str.match(new RegExp(`${c}: ([^,}]+)`))?.[1]));
+    const keys = [...item.matchAll(/time: ([^\n]+)\n\s+value: (\{[^}]*\})\n\s+inSlope: (\{[^}]*\})\n\s+outSlope: (\{[^}]*\})/g)].map(([, t, v, i, o]) => ({ t: Number(t), v: vec(v), i: vec(i), o: vec(o) }));
+    if (!keys.length) continue;
+    const at = (time) => {
+      if (time <= keys[0].t) return keys[0].v;
+      const k = keys.findIndex((kk) => kk.t >= time);
+      if (k < 0) return keys[keys.length - 1].v;
+      const a = keys[k - 1];
+      const b = keys[k];
+      const dt = b.t - a.t;
+      const u = (time - a.t) / dt;
+      return a.v.map((av, c) => (!Number.isFinite(a.o[c]) || !Number.isFinite(b.i[c]) ? av : (2 * u ** 3 - 3 * u ** 2 + 1) * av + (u ** 3 - 2 * u ** 2 + u) * dt * a.o[c] + (-2 * u ** 3 + 3 * u ** 2) * b.v[c] + (u ** 3 - u ** 2) * dt * b.i[c]));
+    };
+    const track = { path: curvePath, property: 'quaternion', times: [], values: [] };
+    tracks.set(key, track);
+    for (let f = 0; f <= frames; f++) {
+      const [ex, ey, ez] = at(Math.min((f / frames) * stop, stop)).map((d) => (d * Math.PI) / 360); // half angles
+      const qx = [Math.sin(ex), 0, 0, Math.cos(ex)];
+      const qy = [0, Math.sin(ey), 0, Math.cos(ey)];
+      const qz = [0, 0, Math.sin(ez), Math.cos(ez)];
+      const mul = ([ax, ay, az, aw], [bx, by, bz, bw]) => [aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz];
+      const q = mul(mul(qy, qx), qz); // Unity: Z first, then X, then Y
+      track.times.push(round(start + (f / frames) * length, 4));
+      track.values.push(...[q[0], -q[1], -q[2], q[3]].map((x) => round(x, 5))); // X mirrored, as above
     }
   }
   // Blend shape weights (SkinnedMeshRenderer "blendShape.<name>", 0-100) -> morph influences
@@ -2327,9 +2510,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   // Random variant groups (only one child is active in game), LODs, mesh flipbooks
   const outMesh = path.join(out, 'mesh');
   mkdirSync(outMesh, { recursive: true });
+  let colorFixes = 0;
   for (const [name, info] of Object.entries(prefabs)) {
     const prefabPath = prefabFile(name);
     if (!prefabPath || !info.glb) continue;
+    colorFixes += fixZeroColors(path.join(out, info.glb), prefabPath, guidIndex);
     const randomizers = parseRandomizers(prefabPath, guidIndex);
     if (Object.keys(randomizers).length) info.randomizers = randomizers;
     const lodHidden = parseLodGroups(prefabPath);
@@ -2345,8 +2530,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       info.skinned = skinned;
       info.materials = sortedStrings(new Set([...(info.materials ?? []), ...skinned.flatMap((sk) => sk.materials)]));
     }
-    const spinners = parseSpinners(prefabPath, guidIndex);
-    if (spinners.length) info.spinners = spinners;
+    const motions = parseMotions(prefabPath, guidIndex);
+    if (motions.length) info.motions = motions;
     const morphMeshes = parseMorphMeshes(prefabPath, guidIndex).map(({ node, materials: mats, data }) => {
       const file = `mesh/${name}_${node.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`;
       writeFileSync(path.join(out, file), JSON.stringify(data));
@@ -2520,6 +2705,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   log(`Particle systems: ${sumKeys('particles')} in ${withKey('particles').length} prefabs`);
   log(`Prefabs: ${Object.keys(prefabs).length} (${empty.length} without geometry, ${missing.length} missing glb)`);
   log(`Materials: ${Object.keys(materials).length}/${usedMats.size} resolved; shaders: ${JSON.stringify(shaders)}`);
+  if (colorFixes) log(`  vertex colors restored: ${colorFixes} mesh parts (compressed meshes)`);
   if (empty.length) log(`  no geometry: ${sortedStrings(empty).join(', ')}`);
   if (missing.length) log(`  missing glb: ${sortedStrings(missing).join(', ')}`);
   log(`Wrote ${path.join(out, 'manifest.json')}`);

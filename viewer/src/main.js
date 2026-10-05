@@ -292,12 +292,7 @@ async function applySkinned(obj, list) {
     let bones = null;
     if (sk.bonePaths) {
       // Exact paths below the prefab root (rigs sharing bone names)
-      const walk = (path) => {
-        let node = obj;
-        for (const part of path.split('/')) node = node?.children.find((c) => c.name === key(part) || c.name.replace(/_\d+$/, '') === key(part));
-        return node;
-      };
-      const found = sk.bonePaths.map(walk);
+      const found = sk.bonePaths.map((path) => nodeByPath(obj, path));
       if (found.every(Boolean)) bones = found;
     }
     for (let scope = holder.parent; scope && !bones; scope = scope.parent) {
@@ -471,20 +466,99 @@ function applyTrails(obj, trails) {
   }
 }
 
-// RotationEffect: nodes spinning about an axis (Haunted Hood's UFO lights)
-const spinners = new Set(); // { root, node, axis, speed (radians/s) }
-function applySpinners(obj, list) {
-  for (const sp of list) {
-    const node = findNode(obj, sp.node);
-    if (node) spinners.add({ root: obj, node, axis: new THREE.Vector3(...sp.axis).normalize(), speed: (sp.speed * Math.PI) / 180 });
+/**
+ * Script-driven scenery motion (manifest "motions"): spin, bob (offset), pulse (scale), sway
+ * and breathe (candle glows), flicker. Nodes by path below the prefab root ("name#k": the
+ * k-th sibling of that name), so every copy moves; older manifests name the node only.
+ */
+const motions = new Set(); // { root, node, m, base…, state }
+/**
+ * A node by its path below the prefab root ("a/b#1/c": "#k" the k-th sibling of that name,
+ * default the first). obj is the instance: the glb's root node sits under its wrapper.
+ */
+function nodeByPath(obj, path) {
+  const walk = (start) => {
+    let node = start;
+    for (const part of path.split('/')) {
+      const cut = part.lastIndexOf('#');
+      const name = THREE.PropertyBinding.sanitizeNodeName(cut < 0 ? part : part.slice(0, cut));
+      const k = cut < 0 ? 0 : Number(part.slice(cut + 1));
+      node = node?.children.filter((c) => c.name === name || c.name.replace(/_\d+$/, '') === name)[k];
+    }
+    return node ?? null;
+  };
+  return walk(obj) ?? (obj.children.length === 1 ? walk(obj.children[0]) : null);
+}
+function resolveMotionNode(obj, m) {
+  return m.path ? nodeByPath(obj, m.path) : findNode(obj, m.node);
+}
+function applyMotions(obj, list, seed) {
+  const rng = mulberry32(seed ^ 0x6d6f7665);
+  for (const m of list) {
+    const node = resolveMotionNode(obj, m);
+    if (!node) continue; // its variant wasn't picked
+    motions.add({
+      root: obj,
+      node,
+      m,
+      phase: rng() * 100,
+      pos: node.position.clone(),
+      scale: node.scale.clone(),
+      quat: node.quaternion.clone(),
+      axis: m.axis ? new THREE.Vector3(...m.axis).normalize() : m.rotation ? new THREE.Vector3(...m.rotation.axis).normalize() : null,
+      angle: 0,
+      target: null,
+      sign: rng() < 0.5 ? 1 : -1,
+      grow: rng() < 0.5,
+      size: m.scale ? m.scale.min + rng() * (m.scale.max - m.scale.min) : 1,
+    });
+  }
+}
+const motionQuat = new THREE.Quaternion();
+function updateMotion(mo, dt, time) {
+  const { m, node } = mo;
+  const t = time + mo.phase;
+  if (m.type === 'spin') node.rotateOnAxis(mo.axis, ((m.speed * Math.PI) / 180) * dt);
+  else if (m.type === 'offset') {
+    // SinUtils: sin(time × frequency)
+    const s = Math.sin(t * m.frequency);
+    node.position.set(mo.pos.x + m.direction[0] * s, mo.pos.y + m.direction[1] * s, mo.pos.z + m.direction[2] * s);
+  } else if (m.type === 'scale') {
+    const s = Math.sin(t * m.frequency) + m.offset;
+    const f = (c, i) => (m.additive ? mo.scale.getComponent(i) + m.amount[i] * s : mo.scale.getComponent(i) * (1 + m.amount[i] * s));
+    node.scale.set(f('x', 0), f('y', 1), f('z', 2));
+  } else if (m.type === 'sway') {
+    if (m.rotation && mo.axis) {
+      // Toward a random angle in [min, max], alternating sides, at speed degrees a second
+      if (mo.target == null || Math.abs(mo.target - mo.angle) < 1e-3) {
+        mo.sign = -mo.sign;
+        mo.target = mo.sign * (m.rotation.min + Math.random() * (m.rotation.max - m.rotation.min));
+      }
+      const step = m.rotation.speed * dt;
+      mo.angle += Math.max(-step, Math.min(step, mo.target - mo.angle));
+      node.quaternion.copy(mo.quat).multiply(motionQuat.setFromAxisAngle(mo.axis, (mo.angle * Math.PI) / 180));
+    }
+    if (m.scale) {
+      // Back and forth between min and max at speed units a second, on the scale axis
+      mo.size += (mo.grow ? 1 : -1) * m.scale.speed * dt * 0.1;
+      if (mo.size >= m.scale.max) (mo.size = m.scale.max), (mo.grow = false);
+      if (mo.size <= m.scale.min) (mo.size = m.scale.min), (mo.grow = true);
+      const a = m.scale.axis;
+      node.scale.set(mo.scale.x * (a[0] ? mo.size : 1), mo.scale.y * (a[1] ? mo.size : 1), mo.scale.z * (a[2] ? mo.size : 1));
+    }
+  } else if (m.type === 'flicker') {
+    const i = Math.floor(t * m.speed) % m.pattern.length;
+    node.visible = m.pattern[i] !== '0';
   }
 }
 
+let motionTime = 0;
 function updateAnimators(dt) {
-  for (const sp of spinners) {
+  motionTime += dt;
+  for (const mo of motions) {
     // Same lifetime rule as the mixers: gone once its piece left the scene
-    if (sp.root.parent) (sp.attached = true), sp.node.rotateOnAxis(sp.axis, sp.speed * dt);
-    else if (sp.attached || (sp.loadWait = (sp.loadWait ?? 0) + dt) > 60) spinners.delete(sp);
+    if (mo.root.parent) (mo.attached = true), updateMotion(mo, dt, motionTime);
+    else if (mo.attached || (mo.loadWait = (mo.loadWait ?? 0) + dt) > 60) motions.delete(mo);
   }
   for (const m of mixers) {
     // A run's pieces join the scene only once all are loaded: gone means removed after that
@@ -573,7 +647,11 @@ async function applySignalColor(obj, seed, color = null) {
     if (o.name.startsWith('_Common_LightSignal_Light_Red')) red ??= o;
     if (o.name.startsWith('_Common_LightSignal_Light_Green')) green ??= o;
   });
-  const wantGreen = color ? color === 'green' : rng() < 0.5;
+  // Only the standard single-lamp housing (red lamp at y -13.4) has a slot for the common
+  // green lamp; themed housings (Transylvania, Cosmic Crossroads) stay red
+  const standard = red && Math.abs(red.position.x) < 0.1 && Math.abs(red.position.y + 13.4) < 0.5 && Math.abs(red.position.z + 0.06) < 0.5;
+  const canGreen = !!green || standard;
+  const wantGreen = canGreen && (color ? color === 'green' : rng() < 0.5);
   if (color === 'off') {
     red?.removeFromParent();
     green?.removeFromParent();
@@ -581,7 +659,7 @@ async function applySignalColor(obj, seed, color = null) {
   }
   if (red && green) {
     (wantGreen ? red : green).removeFromParent();
-  } else if (red && wantGreen && manifest.prefabs._Common_LightSignal_Light_Green?.glb) {
+  } else if (red && wantGreen && standard && manifest.prefabs._Common_LightSignal_Light_Green?.glb) {
     const light = (await loadGlb(manifest.prefabs._Common_LightSignal_Light_Green.glb)).clone();
     light.position.copy(red.position);
     light.position.y -= 11.3; // red lamp -> green lamp in the single-light housing
@@ -648,7 +726,8 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   if (prefab.morphMeshes) await applyMorphMeshes(obj, prefab.morphMeshes);
   if (prefab.animators) await applyAnimators(obj, prefab.animators, variantSeed);
   if (prefab.meshAnimations) await applyMeshAnimations(obj, prefab.meshAnimations, variantSeed);
-  if (prefab.spinners) applySpinners(obj, prefab.spinners);
+  if (prefab.motions) applyMotions(obj, prefab.motions, variantSeed);
+  else if (prefab.spinners) applyMotions(obj, prefab.spinners.map((sp) => ({ type: 'spin', ...sp })), variantSeed); // 0.1.7 manifests
   if (prefab.trails) applyTrails(obj, prefab.trails);
   obj.traverse((o) => {
     if (!o.isMesh) return;
@@ -1752,7 +1831,7 @@ if (params.get('z')) {
   camera.lookAt(orbit.target);
 }
 setControlMode(state.controls);
-window.__viewer = { fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, settings, enterStudio, exitStudio, rebuild };
+window.__viewer = { motions, fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, settings, enterStudio, exitStudio, rebuild };
 await rebuild();
 
 const clock = new THREE.Clock();
