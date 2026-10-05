@@ -1134,7 +1134,10 @@ function parseMotions(file, guidIndex) {
       if (a && num(doc, '_speed')) motion = { type: 'spin', axis: axis(a), speed: num(doc, '_speed') };
     } else if (kind === 'OffsetEffect') {
       const d = vec(doc, '_direction');
+      // 2.x: _offsets, a ride from the start up to it and back (2.34 Copenhagen's lift)
+      const o = d ? null : vec(doc, '_offsets');
       if (d) motion = { type: 'offset', direction: [-d[0], d[1], d[2]], frequency: num(doc, '_frequency', 2) };
+      else if (o) motion = { type: 'offset', direction: [-o[0], o[1], o[2]], frequency: num(doc, '_frequency', 2), oneSided: true };
     } else if (kind === 'ScaleEffect') {
       motion = {
         type: 'scale',

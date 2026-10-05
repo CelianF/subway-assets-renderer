@@ -522,11 +522,29 @@ function addBuiltinMeshes(obj, list) {
   }
 }
 
+/**
+ * A one-sided offset (2.x OffsetEffect, 2.34 Copenhagen's lift) rides from its start
+ * towards its offset, kept within the piece: the fraction of the offset it may travel.
+ */
+function rideReach(obj, node, direction, bbox) {
+  const len = Math.hypot(...direction);
+  if (!bbox || !len) return 1;
+  obj.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(node);
+  if (box.isEmpty()) return 1;
+  const room = [0, 1, 2].map((i) => (direction[i] > 0 ? bbox[1][i] - box.max.getComponent(i) : direction[i] < 0 ? box.min.getComponent(i) - bbox[0][i] : Infinity));
+  const limit = Math.min(...room.map((r, i) => (direction[i] ? Math.max(r, 0) / Math.abs(direction[i]) : Infinity)));
+  return Math.min(1, limit);
+}
+
 function resolveMotionNode(obj, m) {
   return m.path ? nodeByPath(obj, m.path) : findNode(obj, m.node);
 }
-function applyMotions(obj, list, seed) {
+function applyMotions(obj, list, seed, bbox = null) {
   const rng = mulberry32(seed ^ 0x6d6f7665);
+  // One clock per piece: flicker patterns play in step (2.34 Copenhagen's gate frames take
+  // turns, its tunnel LEDs chase right to left), each piece at its own time
+  const phase = rng() * 100;
   for (const m of list) {
     const node = resolveMotionNode(obj, m);
     if (!node) continue; // its variant wasn't picked
@@ -534,7 +552,8 @@ function applyMotions(obj, list, seed) {
       root: obj,
       node,
       m,
-      phase: rng() * 100,
+      phase,
+      reach: m.oneSided ? rideReach(obj, node, m.direction, bbox) : 1,
       pos: node.position.clone(),
       scale: node.scale.clone(),
       quat: node.quaternion.clone(),
@@ -553,8 +572,8 @@ function updateMotion(mo, dt, time) {
   const t = time + mo.phase;
   if (m.type === 'spin') node.rotateOnAxis(mo.axis, ((m.speed * Math.PI) / 180) * dt);
   else if (m.type === 'offset') {
-    // SinUtils: sin(time × frequency)
-    const s = Math.sin(t * m.frequency);
+    // SinUtils: sin(time × frequency); 2.x offsets ride from the start and back
+    const s = m.oneSided ? ((1 - Math.cos(t * m.frequency)) / 2) * mo.reach : Math.sin(t * m.frequency);
     node.position.set(mo.pos.x + m.direction[0] * s, mo.pos.y + m.direction[1] * s, mo.pos.z + m.direction[2] * s);
   } else if (m.type === 'scale') {
     const s = Math.sin(t * m.frequency) + m.offset;
@@ -759,7 +778,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   if (prefab.morphMeshes) await applyMorphMeshes(obj, prefab.morphMeshes);
   if (prefab.animators) await applyAnimators(obj, prefab.animators, variantSeed);
   if (prefab.meshAnimations) await applyMeshAnimations(obj, prefab.meshAnimations, variantSeed);
-  if (prefab.motions) applyMotions(obj, prefab.motions, variantSeed);
+  if (prefab.motions) applyMotions(obj, prefab.motions, variantSeed, prefab.bbox);
   else if (prefab.spinners) applyMotions(obj, prefab.spinners.map((sp) => ({ type: 'spin', ...sp })), variantSeed); // 0.1.7 manifests
   if (prefab.trails) applyTrails(obj, prefab.trails);
   if (prefab.builtinMeshes) addBuiltinMeshes(obj, prefab.builtinMeshes);
