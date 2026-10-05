@@ -199,7 +199,13 @@ function routeChunks(mode, rng, target) {
   };
   if (route.intro) expand(route.intro);
   if (route.type === 'sequential') {
-    for (const e of route.entries) for (let i = 0; i < Math.max(1, e.repeats); i++) expand(e.section);
+    // Where each entry runs (route distance), for the scenery it asks for
+    out.spans = [];
+    route.entries.forEach((e, index) => {
+      const z0 = z;
+      for (let i = 0; i < Math.max(1, e.repeats); i++) expand(e.section);
+      out.spans.push({ index, section: e.section, z0, z1: z });
+    });
     return out;
   }
   const used = new Map(); // section -> distance it was last laid at
@@ -507,9 +513,9 @@ export function generateLayout(
   if (!sectionTypes.length) sectionTypes.push({ name: 'buildings', weight: 1, build: buildings });
   const buildingsType = sectionTypes.find((t) => t.name === 'buildings');
 
-  function buildings() {
+  function buildings(count = null) {
     if (gen.showcase) return showcaseBuildings();
-    const n = randInt(rng, 2, 5);
+    const n = count ?? randInt(rng, 2, 5);
     // Heights that still have an allowed piece on both sides ("map sections" picker)
     const allowed = (slot) => (slots[slot] ?? []).filter((nm) => gen.pieces[buildingPieceKey(roleOf(manifest, nm))] !== false);
     let heights = ['low', 'medium', 'high'].filter((h) => allowed(`boundary_${h}_left`).length && allowed(`boundary_${h}_right`).length);
@@ -727,16 +733,54 @@ export function generateLayout(
     if (buildingsType && prev && prev !== buildingsType && section !== buildingsType) finalPlan.push(buildingsType);
     finalPlan.push(section);
   }
-  if (!gen.showcase) for (const section of finalPlan) section.build();
-  // A sequential route (race, mystery hurdles) runs from its start to its end: more
-  // buildings until it fits
   const routeRng = mulberry32(seed ^ 0x5bd1e995);
   const pass = modeRun && mode.route.type === 'sequential' ? routeChunks(mode, routeRng, null) : null;
+  // Race arenas (Subway PvP) fill the race's start and finish stretches with one big piece
+  // each (boundary_super_epic_*, 2880 long): the route's first and last stretches ask for them
+  const arenaSpans = pass && buildingsType ? superEpicSpans(pass.spans) : [];
+  let routeStart = SEGMENT;
+  if (arenaSpans.length) {
+    // Shift the route so those stretches start on a building segment
+    routeStart += (SEGMENT - ((SEGMENT + arenaSpans[0].z0) % SEGMENT)) % SEGMENT;
+    for (const span of arenaSpans) {
+      fillBuildings(routeStart + span.z0);
+      const at = z;
+      place(`boundary_super_epic_${span.kind}_left`, [0, 0, at]);
+      place(`boundary_super_epic_${span.kind}_right`, [0, 0, at]);
+      z += slotLength(manifest, `boundary_super_epic_${span.kind}_right`, null);
+      addRun('left', `boundary_super_epic_${span.kind}_left`, at, z);
+      addRun('right', `boundary_super_epic_${span.kind}_right`, at, z);
+    }
+  } else if (!gen.showcase) for (const section of finalPlan) section.build();
+  // A sequential route (race, mystery hurdles) runs from its start to its end: more
+  // buildings until it fits
   if (pass && buildingsType) {
     const passLength = pass.reduce((n, c) => n + mode.chunks[c].length, 0);
-    while (z < Math.min(passLength, MAX_ROUTE_LENGTH) + 2 * SEGMENT) buildings();
+    fillBuildings(routeStart + Math.min(passLength, MAX_ROUTE_LENGTH) + SEGMENT);
   }
   const length = z;
+
+  /** Buildings up to `until` (whole segments): runs of 2 to 5, as the buildings section. */
+  function fillBuildings(until) {
+    while (until - z >= SEGMENT) buildings(Math.min(randInt(rng, 2, 5), Math.floor((until - z) / SEGMENT)));
+  }
+
+  /**
+   * Route stretches that ask for the super epic pieces: from the sections' constraints, or
+   * (maps built before they were kept) the race's first and last stretches.
+   */
+  function superEpicSpans(spans) {
+    if (!['start', 'end'].every((k) => has(`boundary_super_epic_${k}_right`) || has(`boundary_super_epic_${k}_left`))) return [];
+    const out = [];
+    for (const span of spans ?? []) {
+      const constraints = mode.sections[span.section]?.constraints;
+      const kind = constraints
+        ? ['start', 'end'].find((k) => constraints.length && constraints.every((c) => c.includes(`super_epic_${k}`)))
+        : gen.mode === 'race' && (span.index === 0 ? 'start' : span.index === spans.length - 1 ? 'end' : null);
+      if (kind) out.push({ ...span, kind });
+    }
+    return out;
+  }
   placeTransitions();
 
   // <Theme>_Boundaries TransitionInfo: pieces at the start/end of a run of one boundary
@@ -869,7 +913,7 @@ export function generateLayout(
   function placeRoute() {
     const names = pass ?? routeChunks(mode, routeRng, length - 2 * SEGMENT);
     const seen = new Set();
-    let cz = SEGMENT;
+    let cz = routeStart;
     for (const name of names) {
       const chunk = mode.chunks[name];
       if (cz + chunk.length > length - SEGMENT / 2) break;

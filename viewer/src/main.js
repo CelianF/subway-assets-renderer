@@ -902,8 +902,15 @@ function applyEffectPlayers(obj, players, seed) {
 
 // ---------------------------------------------------------------- run
 
+// Race arenas (Subway PvP): maps that fill the race's start and finish pieces. Their
+// stations and gates are unfinished placeholders the race never shows
+const startTheme = manifest.theme ?? Object.keys(manifest.themes)[0];
+const isArena = ['boundary_super_epic_start_right', 'boundary_super_epic_start_left'].some((slot) =>
+  Object.values(manifest.themes[startTheme] ?? {}).some((c) => c[slot]?.some((n) => manifest.prefabs[n]?.bbox)),
+);
+
 const state = {
-  theme: manifest.theme ?? Object.keys(manifest.themes)[0],
+  theme: startTheme,
   seed: Number(params.get('seed') ?? 1),
   sections: Number(params.get('sections') ?? 12),
   obstacles: params.get('obstacles') !== '0',
@@ -930,9 +937,11 @@ const state = {
   fov: 55,
   gen: {
     ...structuredClone(DEFAULT_GEN),
+    ...(isArena ? { sections: { ...DEFAULT_GEN.sections, station: false, gate: false } } : {}),
     showcase: params.get('showcase') === '1' || storedFlag('debug:showcase'),
-    // Game mode whose route lays the obstacles (?mode=chase|mysteryHurdles|race, &skin=)
-    mode: params.get('mode') in (manifest.modes ?? {}) ? params.get('mode') : 'normal',
+    // Game mode whose route lays the obstacles (?mode=chase|mysteryHurdles|race, &skin=);
+    // race arenas open as a race
+    mode: params.get('mode') in (manifest.modes ?? {}) ? params.get('mode') : isArena && manifest.modes?.race ? 'race' : 'normal',
     skin: params.get('skin'),
   },
   studio: loadStudio(),

@@ -591,6 +591,11 @@ function parseModes(find, guidIndex, log) {
       const type = SECTION_KINDS[scriptOf(text)];
       if (!type) return null;
       sections[name] = { type }; // registered first: sections can repeat themselves
+      // Boundaries the section runs between (left side of each allowed pair): the race's
+      // start and finish stretches ask for the arena's super epic pieces
+      const block = text.match(/\n {2}_constraints:\n((?: {2}[- ] .*\n)*)/)?.[1] ?? '';
+      const constraints = [...block.matchAll(/Left: \{[^}]*guid: (\w+)/g)].map(([, g]) => nameOf(g)).filter(Boolean);
+      if (constraints.length) sections[name].constraints = constraints;
       if (type.startsWith('composite')) {
         sections[name].sections = listGuids(text, 'Sections').map(addSection).filter(Boolean);
       } else {
