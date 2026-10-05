@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { fitTrain, trainLength, RAMP_LENGTH } from './layout.js';
+import { fitTrain, trainLength, RAMP_LENGTH, FIX_LABELS } from './layout.js';
 
 // Studio mode: a slightly tilted top view of the run with placement spots. Trains are
 // drawn from a start cell to an end cell on one track and snap to the longest train
@@ -31,6 +31,15 @@ const LABELS = {
   dumpster: 'Dumpster',
   powerBox: 'Power box',
   pillar: 'Pillar',
+  platform: 'Station platform',
+  full: 'Full barrier',
+  trainPlatform: 'Train platform',
+};
+const FIX_TITLES = {
+  pillar: 'Put a pillar back in every pillar hall spot that has none',
+  platform: 'Put back every station platform the auto run has',
+  full: 'Put back every full barrier the auto run has',
+  trainPlatform: 'Put back every train platform the auto run has',
 };
 const KIND_LABELS = { static: 'Parked', moving: 'Moving', falling: 'Lava' };
 const VARIANT_LABELS = { auto: 'Any', cargo: 'Cargo', passenger: 'Passenger', subway: 'Subway' };
@@ -487,8 +496,10 @@ export function createStudio(ctx) {
   ];
   const modeOf = (t) => (['edit', 'remove', 'noTracks'].includes(t.type) ? t.type : 'place');
 
+  let fixKeys = null; // "Fix …" buttons for this map (the auto run's layout, worked out once)
   function renderPalette() {
     const cat = ctx.getCatalog();
+    fixKeys ??= ctx.fixables();
     const mode = modeOf(tool);
     const btn = (label, on, onclick, cls = '') => el('button', { class: `tool ${cls} ${on ? 'active' : ''}`, onclick }, label);
     const select = (value, options, onchange) =>
@@ -564,7 +575,8 @@ export function createStudio(ctx) {
         ...MODES.filter(([m]) => m !== 'noTracks' || cat.tracks !== false).map(([m, label]) => btn(label, mode === m, () => setTool(m === 'place' ? placeTool : { type: m }), m === 'remove' ? 'danger' : '')),
         btn('💥 Wipe', false, () => confirm('Remove everything placed, including no-track zones?') && (setTool(tool), commit([], 'Wiped')), 'danger'),
         el('span', { class: 'studio-sep' }),
-        ...(cat.pillars ? [el('button', { title: 'Put a pillar back in every pillar hall spot that has none', onclick: () => ctx.fixPillars() }, '🏛 Fix pillars')] : []),
+        // Obstacles the auto run has and the studio list may lack (pillars, platforms…)
+        ...fixKeys.map((key) => el('button', { title: FIX_TITLES[key], onclick: () => { const n = ctx.fixMissing(key); setInfo(n ? `Put back ${n} ${LABELS[key].toLowerCase()}${n > 1 ? 's' : ''}` : `No ${LABELS[key].toLowerCase()} missing`); } }, FIX_LABELS[key])),
         el('button', { title: 'Replace everything with the auto-generated run', onclick: async () => commit(await ctx.fromRun(), 'Copied the auto-generated run') }, '⟳ Copy auto run'),
         el('button', { class: 'primary', onclick: () => ctx.onExit() }, 'Done'),
       ),

@@ -5,7 +5,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setReversedDepth, texturesReady } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, FIX_LABELS } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI, prettyTheme } from './ui.js';
@@ -89,7 +89,9 @@ const CAMERA_PRESETS = {
 };
 
 function applyCamera(name) {
-  const p = CAMERA_PRESETS[name];
+  // Debug: ?cam=x,y,z,tx,ty,tz places the camera anywhere
+  const custom = /^-?[\d.]+(,-?[\d.]+){5}$/.test(name) ? name.split(',').map(Number) : null;
+  const p = custom ? { pos: custom.slice(0, 3), target: custom.slice(3) } : CAMERA_PRESETS[name] ?? CAMERA_PRESETS.game;
   // Side view starts inside the left-hand buildings: cut them away
   state.cutaway = name === 'side';
   camera.position.set(...p.pos);
@@ -348,6 +350,9 @@ async function applyMorphMeshes(obj, list) {
     mesh.frustumCulled = false; // bounds change with the shapes
     mesh.morphTargetDictionary = Object.fromEntries(data.morphs.map((shape, i) => [shape.name, i]));
     mesh.morphTargetInfluences = data.morphs.map(() => 0);
+    // The glb may keep the renderer's static mesh (bone-less renderers): replaced, not doubled
+    for (const c of [...holder.children]) if (c.isMesh && c.children.every((k) => k.userData.cutaway)) c.removeFromParent(); // (with their cutaway copies)
+    if (holder.isMesh) holder.visible = false;
     holder.add(mesh);
   }
 }
@@ -391,6 +396,22 @@ function animationMixer(obj, anim) {
   const mixer = new THREE.AnimationMixer(root);
   mixer.clipAction(new THREE.AnimationClip(anim.node, anim.duration, tracks)).play();
   return mixer;
+}
+
+async function nameRandomGroups() {
+  const used = new Set(Object.values(manifest.themes[state.theme] ?? {}).flatMap((slots) => Object.values(slots).flat()));
+  await Promise.all(
+    [...used].map(async (name) => {
+      const prefab = manifest.prefabs[name];
+      const unnamed = Object.entries(prefab?.randomizers ?? {}).filter(([, entry]) => typeof entry !== 'object');
+      if (!unnamed.length || !prefab.glb) return;
+      const scene = await loadGlb(prefab.glb).catch(() => null);
+      for (const [group, probability] of unnamed) {
+        const kids = findNode(scene ?? new THREE.Group(), group)?.children.map((c) => c.name) ?? [];
+        if (kids.length) prefab.randomizers[group] = { probability, weights: Object.fromEntries(kids.map((k) => [k, 1])) };
+      }
+    }),
+  );
 }
 
 function findNode(obj, name) {
@@ -450,7 +471,21 @@ function applyTrails(obj, trails) {
   }
 }
 
+// RotationEffect: nodes spinning about an axis (Haunted Hood's UFO lights)
+const spinners = new Set(); // { root, node, axis, speed (radians/s) }
+function applySpinners(obj, list) {
+  for (const sp of list) {
+    const node = findNode(obj, sp.node);
+    if (node) spinners.add({ root: obj, node, axis: new THREE.Vector3(...sp.axis).normalize(), speed: (sp.speed * Math.PI) / 180 });
+  }
+}
+
 function updateAnimators(dt) {
+  for (const sp of spinners) {
+    // Same lifetime rule as the mixers: gone once its piece left the scene
+    if (sp.root.parent) (sp.attached = true), sp.node.rotateOnAxis(sp.axis, sp.speed * dt);
+    else if (sp.attached || (sp.loadWait = (sp.loadWait ?? 0) + dt) > 60) spinners.delete(sp);
+  }
   for (const m of mixers) {
     // A run's pieces join the scene only once all are loaded: gone means removed after that
     if (m.root.parent) m.attached = true;
@@ -613,6 +648,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   if (prefab.morphMeshes) await applyMorphMeshes(obj, prefab.morphMeshes);
   if (prefab.animators) await applyAnimators(obj, prefab.animators, variantSeed);
   if (prefab.meshAnimations) await applyMeshAnimations(obj, prefab.meshAnimations, variantSeed);
+  if (prefab.spinners) applySpinners(obj, prefab.spinners);
   if (prefab.trails) applyTrails(obj, prefab.trails);
   obj.traverse((o) => {
     if (!o.isMesh) return;
@@ -1096,6 +1132,8 @@ async function loadSkyline(bg) {
       const base = materials.get(m.name, m);
       const copy = base.clone();
       if (base.uniforms) copy.uniforms = { ...base.uniforms, uFogOn: { value: 0 } };
+      // Same pass as the sky layer so the render order below applies (blending is custom)
+      copy.transparent = true;
       unfogged.set(m.name, copy);
     }
     return unfogged.get(m.name);
@@ -1110,7 +1148,11 @@ async function loadSkyline(bg) {
       const out = mats.map((m) => (isSkyline(m) ? skylineMat : own(m)));
       o.material = out.length === 1 ? out[0] : out;
       o.frustumCulled = false;
-      o.renderOrder = -1000; // behind the level, in front of the sky
+      // Behind the level, in front of the sky. The skyline sky goes first, then its other
+      // objects in Unity queue order: Cosmic Crossroads' planets don't write depth and
+      // would otherwise vanish behind the sky dome
+      const queue = Math.min(...mats.map((m) => (isSkyline(m) ? 0 : manifest.materials[m.name]?.renderQueue ?? 2000)));
+      o.renderOrder = queue ? -1000 + (queue - 2000) / 1000 : -1500;
     }
   });
   obj.userData.distance = bg.distance ?? 1000;
@@ -1294,25 +1336,46 @@ const shuffle = () => {
 };
 const regen = () => rebuild();
 
-/** Puts the middle-lane pillars back in every pillar hall: as studio items, or by turning pillar obstacles on. */
-function fixPillars() {
-  if (state.obstacleMode !== 'studio') {
+/** Where the auto run gets an obstacle kind: pillars from pillar halls, the rest from the game's chunks. */
+function fixSource(key) {
+  if (key === 'pillar') {
+    const gen = { ...state.gen, obstacles: { ...state.gen.obstacles, pillar: true } };
+    return itemsToStudio(generateLayout(manifest, state.theme, { ...state, obstacleMode: 'random', gen, trainTheme: trainTheme() }).items);
+  }
+  const mode = Object.keys(manifest.chunks ?? {}).length ? 'chunks' : 'random';
+  return itemsToStudio(currentLayout(mode).items);
+}
+
+/** Obstacle kinds the auto run has but the studio list lacks some of ("Fix …" buttons). */
+function fixables() {
+  return FIXABLE.filter((key) => (key === 'pillar' ? hasSlot('boundary_pillars_mid') && hasSlot('obstacle_pillar') : fixSource(key).some((it) => it.type === 'obstacle' && it.key === key)));
+}
+
+/**
+ * Puts back every obstacle of one kind (pillars, station platforms…) the auto run has at a
+ * spot where the studio has none: as studio items, or (pillars, outside the studio) by
+ * turning pillar obstacles on.
+ */
+function fixMissing(key) {
+  if (key === 'pillar' && state.obstacleMode !== 'studio') {
     state.gen.obstacles.pillar = true;
     generation.refresh();
     return regen();
   }
-  const gen = { ...state.gen, obstacles: { ...state.gen.obstacles, pillar: true } };
-  const spots = generateLayout(manifest, state.theme, { ...state, obstacleMode: 'random', gen, trainTheme: trainTheme() }).items.filter((it) => it.slot === 'obstacle_pillar');
-  const has = (z) => state.studio.some((it) => it.type === 'obstacle' && it.key === 'pillar' && it.lane === 0 && Math.abs(it.z - z) < 1);
-  const missing = spots.filter((p) => !has(p.pos[2]));
-  state.studio = [...state.studio, ...missing.map((p) => ({ type: 'obstacle', key: 'pillar', lane: 0, z: p.pos[2] }))];
+  const has = (o) => state.studio.some((it) => it.type === 'obstacle' && it.key === key && Math.abs(it.lane - o.lane) < 1 && Math.abs(it.z - o.z) < 1);
+  const missing = fixSource(key).filter((it) => it.type === 'obstacle' && it.key === key && !has(it));
+  state.studio = [...state.studio, ...missing];
   saveStudio();
   rebuild({ dynamicOnly: true });
+  return missing.length;
 }
 const catalog = () => studioCatalog(manifest, state.theme, trainTheme());
 // "low_01" -> "Low 01" ("med" pieces read as "Medium")
 const pieceLabel = (key) => key.replace(/^med_/, 'medium_').replace(/^(\w)/, (c) => c.toUpperCase()).replace('_', ' ');
 for (const piece of buildingPieces(manifest, state.theme)) state.gen.pieces[piece.key] ??= true;
+// Manifests built before random groups carried their children's names (any map imported
+// before 3.68 support): read the names from the glbs, so pickers and the showcase see them
+await nameRandomGroups();
 for (const v of landmarkVariants(manifest, state.theme)) state.gen.variants[v.key] ??= true;
 const toggles = (obj, entries, onChange = regen) => entries.filter(([, , show = true]) => show).map(([key, label]) => ({ type: 'toggle', label, obj, key, onChange }));
 const hasSlot = (slot) => Object.values(manifest.themes[state.theme]).some((c) => c[slot]?.length);
@@ -1360,9 +1423,9 @@ const generation = createSettings(
           ],
         },
         {
-          title: 'Pillars',
+          title: 'Fix',
           visible: () => hasSlot('boundary_pillars_mid') && hasSlot('obstacle_pillar'),
-          controls: [{ type: 'button', label: '🏛 Fix pillars', title: 'Put a pillar back in every pillar hall spot that has none', action: () => fixPillars() }],
+          controls: [{ type: 'button', label: FIX_LABELS.pillar, title: 'Put a pillar back in every pillar hall spot that has none', action: () => fixMissing('pillar') }],
         },
         {
           title: 'Landmark',
@@ -1526,7 +1589,8 @@ const studio = createStudio({
     rebuild({ dynamicOnly: true });
   },
   fromRun: () => runToStudio(),
-  fixPillars: () => fixPillars(),
+  fixables: () => fixables(),
+  fixMissing: (key) => fixMissing(key),
   // Skin of a train placed with "Any" before skins were fixed at placement
   actualVariant: (it) => {
     const shown = window.__viewer?.items?.find((i) => i.group === `studio${it.lane}@${it.z0}` && i.slot.startsWith('train_') && i.slot !== 'train_ramp');

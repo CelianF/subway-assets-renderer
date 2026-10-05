@@ -673,11 +673,19 @@ function parseTrackConfigs(file, guidIndex) {
 function parseRandomizers(file, guidIndex) {
   const docs = yamlDocs(read(file));
   const names = new Map();
+  const childrenOf = new Map(); // GameObject -> child GameObjects (Transform order)
+  const goOfTransform = new Map();
   for (const { doc, kind, fid } of docs) {
     if (kind === '1') {
       const nm = doc.match(/m_Name: (.*)/);
       names.set(fid, nm ? nm[1].trim() : '');
     }
+    if (kind === '4') goOfTransform.set(fid, doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1]);
+  }
+  for (const { doc, kind } of docs) {
+    if (kind !== '4') continue;
+    const kids = [...(doc.split('m_Children:')[1]?.split('m_Father')[0] ?? '').matchAll(/fileID: (\d+)/g)].map(([, t]) => goOfTransform.get(t));
+    childrenOf.set(doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1], kids.filter(Boolean));
   }
   const out = {};
   for (const { doc } of docs) {
@@ -685,14 +693,24 @@ function parseRandomizers(file, guidIndex) {
     const script = doc.match(/m_Script: .*guid: (\w+)/);
     if (!script || !guidIndex.has(script[1])) continue;
     const kind = stem(guidIndex.get(script[1]));
-    if (kind !== 'RandomChildRandomizer' && kind !== 'WeightedChildRandomizer') continue;
+    // Every "pick one child" randomizer, future ones included (*ChildRandomizer), plus the
+    // distance one; ActivationRandomizer (on/off) and TransformRandomizer (jitter) leave
+    // everything shown
+    if (!/ChildRandomizer$/.test(kind)) continue;
     const go = doc.match(/m_GameObject: \{fileID: (\d+)/);
     const prob = doc.match(/_activationProbability: ([\d.]+)/);
     if (!go || !names.has(go[1])) continue;
     const probability = prob ? num(prob[1]) : 1.0;
     // WeightedChildRandomizer (3.x): children picked by weight ("static" kraken 2, "active" 2, "active_animated" 1)
     const weighted = [...doc.matchAll(/- GameObject: \{fileID: (\d+)\}\n\s+Weight: ([\d.]+)/g)].filter(([, fid]) => names.has(fid));
-    out[names.get(go[1])] = weighted.length ? { probability, weights: Object.fromEntries(weighted.map(([, fid, w]) => [names.get(fid), num(w)])) } : probability;
+    // RandomChildRandomizer: any child, equally (named, so the showcase can lay each one)
+    // DistanceRequiredChildRandomizer (3.68): a unique filler at most every _minimumDistance,
+    // the fallback filler otherwise (here: the fallback twice as often)
+    const filler = (key) => names.get(doc.match(new RegExp(`${key}: \\{fileID: (\\d+)`))?.[1]);
+    const distance = kind === 'DistanceRequiredChildRandomizer' ? [[filler('_uniqueFiller'), 1], [filler('_fallbackFiller'), 2]].filter(([n]) => n) : [];
+    const kids = (childrenOf.get(go[1]) ?? []).filter((fid) => names.has(fid));
+    const weights = distance.length ? distance : weighted.length ? weighted.map(([, fid, w]) => [names.get(fid), num(w)]) : kids.map((fid) => [names.get(fid), 1]);
+    out[names.get(go[1])] = weights.length ? { probability, weights: Object.fromEntries(weights) } : probability;
   }
   return out;
 }
@@ -744,6 +762,51 @@ function parseAnimators(file, guidIndex) {
       start += length;
     }
     if (tracks.size) out.push({ node: names.get(go), duration: round(start, 4), tracks: [...tracks.values()] });
+  }
+  // Legacy Animation components (3.70 Haunted Hood's sheep beamed up into the UFO): the game
+  // plays them on a trigger or at spawn; here they loop, holding the last frame a moment.
+  // Clips that sweep a trail are laid down by parseTrails instead.
+  const trailed = new Set(parseTrails(file, guidIndex).map((t) => t.animation.node));
+  for (const { doc, kind } of docs) {
+    if (kind !== '111') continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    const clip = guidIndex.get(doc.match(/\n {2}m_Animation: \{[^}]*guid: (\w+)/)?.[1]);
+    if (!names.has(go) || trailed.has(names.get(go)) || !clip || !existsSync(clip)) continue;
+    const text = read(clip);
+    const lastKey = Math.max(0, ...[...text.matchAll(/\n\s+time: ([\d.eE+-]+)/g)].map(([, t]) => Number(t)));
+    const stop = Math.max(Number(text.match(/m_StopTime: ([\d.eE+-]+)/)?.[1] ?? 0), lastKey);
+    if (stop <= 0) continue;
+    const tracks = new Map();
+    sampleClipTracks(text, stop, stop, 0, tracks, FPS);
+    if (!tracks.size) continue;
+    const looping = /m_LoopTime: 1/.test(text) || /m_WrapMode: 2/.test(doc);
+    const duration = looping ? stop : stop + HOLD;
+    for (const t of tracks.values()) {
+      const n = t.values.length / t.times.length;
+      t.times.push(round(duration, 4));
+      t.values.push(...t.values.slice(-n));
+    }
+    out.push({ node: names.get(go), duration: round(duration, 4), tracks: [...tracks.values()] });
+  }
+  return out;
+}
+
+/** RotationEffect scripts (spinning UFO lights): [{ node, axis (glb space), speed (degrees/s) }]. */
+function parseSpinners(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  for (const { doc, kind, fid } of docs) if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+  const out = [];
+  for (const { doc } of docs) {
+    if (!doc.startsWith('!u!114')) continue;
+    const script = doc.match(/m_Script: .*guid: (\w+)/)?.[1];
+    if (!script || stem(guidIndex.get(script) ?? '') !== 'RotationEffect') continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    const axis = doc.match(/_axis: \{x: ([^,]+), y: ([^,]+), z: ([^}]+)\}/);
+    const speed = Number(doc.match(/_speed: ([\d.eE+-]+)/)?.[1] ?? 0);
+    if (!names.has(go) || !axis || !speed) continue;
+    // Unity -> glb: X mirrored, so rotations keep x and flip y, z (as quaternions do)
+    out.push({ node: names.get(go), axis: [Number(axis[1]), -Number(axis[2]), -Number(axis[3])], speed });
   }
   return out;
 }
@@ -2282,6 +2345,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       info.skinned = skinned;
       info.materials = sortedStrings(new Set([...(info.materials ?? []), ...skinned.flatMap((sk) => sk.materials)]));
     }
+    const spinners = parseSpinners(prefabPath, guidIndex);
+    if (spinners.length) info.spinners = spinners;
     const morphMeshes = parseMorphMeshes(prefabPath, guidIndex).map(({ node, materials: mats, data }) => {
       const file = `mesh/${name}_${node.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`;
       writeFileSync(path.join(out, file), JSON.stringify(data));

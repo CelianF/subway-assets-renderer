@@ -92,7 +92,14 @@ const OBSTACLE_SLOTS = {
   dumpster: 'obstacle_dumpster',
   powerBox: 'obstacle_powerBox',
   pillar: 'obstacle_pillar',
+  // Placed by the game's obstacle chunks only (no auto-run tool otherwise)
+  platform: 'special_station_platform',
+  full: 'obstacle_barrier_full',
+  trainPlatform: 'obstacle_train_platform',
 };
+/** Studio obstacles the "Fix …" buttons put back from the auto run (pillars: their halls). */
+export const FIXABLE = ['pillar', 'platform', 'full', 'trainPlatform'];
+export const FIX_LABELS = { pillar: '🏛 Fix pillars', platform: '🚉 Fix platforms', full: '🚧 Fix full barriers', trainPlatform: '🛤 Fix train platforms' };
 
 /**
  * ≤ 1.43: hand-built chunks laid end to end, as Track/TrackChunkCollection do: the chunks
@@ -149,6 +156,19 @@ export { RAMP_LENGTH };
 export const buildingPieceKey = (name) => name.match(/(?:^|_)((?:low|med|medium|high)_\d+)_(?:left|right)$/i)?.[1]?.toLowerCase() ?? null;
 /** Name to apply name rules to: 1.x pieces carry their generic role ("high_01_left_hawaiihd_2017" -> "high_01_left"). */
 const roleOf = (manifest, name) => manifest.prefabs[name]?.role ?? name;
+
+/**
+ * Showcase: one forced pick per variant of a prefab's random groups ([null] without any),
+ * so "show everything" lays every variant of every piece.
+ */
+export function prefabVariants(manifest, prefab) {
+  const groups = Object.entries(manifest.prefabs[prefab]?.randomizers ?? {})
+    .map(([g, e]) => [g, Object.keys((e && typeof e === 'object' && e.weights) || {})])
+    .filter(([, kids]) => kids.length > 1);
+  if (!groups.length) return [null];
+  const n = Math.max(...groups.map(([, kids]) => kids.length));
+  return Array.from({ length: n }, (_, i) => Object.fromEntries(groups.map(([g, kids]) => [g, kids[i % kids.length]])));
+}
 
 /**
  * Landmark variants a theme's game randomizer picks between (Underwater's kraken: static,
@@ -257,13 +277,18 @@ export function generateLayout(
     turns.set(key, n + 1);
     return list[n % list.length];
   };
-  const count = (slot, lo, hi) => (gen.showcase ? Math.max(slots[slot]?.length ?? 1, 1) : randInt(rng, lo, hi));
+  // Showcase: each prefab once per variant of its random groups
+  const showcaseList = (list) => list.flatMap((prefab) => prefabVariants(manifest, prefab).map((variants) => ({ prefab, variants })));
+  const showcaseCount = (slot) => showcaseList(slots[slot] ?? []).length;
+  const count = (slot, lo, hi) => (gen.showcase ? Math.max(showcaseCount(slot), 1) : randInt(rng, lo, hi));
   const place = (slot, pos, layer = 'environment', extra = {}, nameFilter = null) => {
     if (!has(slot)) return null;
     const named = nameFilter ? slots[slot].filter((n) => nameFilter.test(roleOf(manifest, n))) : [];
-    const prefab = choose(`${slot}|${nameFilter ?? ''}`, named.length ? named : slots[slot]);
+    const list = named.length ? named : slots[slot];
+    const key = `${slot}|${nameFilter ?? ''}`;
+    const { prefab, variants } = gen.showcase ? choose(key, showcaseList(list)) : { prefab: choose(key, list), variants: null };
     // Per-instance seed for the prefab's random variant groups
-    items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(placeRng() * 2 ** 31), ...extra });
+    items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(placeRng() * 2 ** 31), ...(variants ? { variants } : {}), ...extra });
     return prefab;
   };
   // ≤ 1.43: the game's hand-built chunks; in the studio, hand-placed trains and obstacles
@@ -326,7 +351,7 @@ export function generateLayout(
   /** Showcase: every building piece of each height, both sides, then the ad slots. */
   function showcaseBuildings() {
     for (const height of ['low', 'medium', 'high']) {
-      const n = Math.max(slots[`boundary_${height}_left`]?.length ?? 0, slots[`boundary_${height}_right`]?.length ?? 0);
+      const n = Math.max(showcaseCount(`boundary_${height}_left`), showcaseCount(`boundary_${height}_right`));
       for (let i = 0; i < n; i++) {
         place(`boundary_${height}_left`, [0, 0, z]);
         place(`boundary_${height}_right`, [0, 0, z]);
@@ -337,7 +362,7 @@ export function generateLayout(
       }
     }
     for (const ad of ['boundary_sponsored_right_front', 'boundary_sponsored_right_back'].filter(has)) {
-      for (let i = 0; i < slots[ad].length; i++) {
+      for (let i = 0; i < showcaseCount(ad); i++) {
         place('boundary_low_left', [0, 0, z]);
         place(ad, [0, 0, z]);
         addRun('left', 'boundary_low_left', z, z + SEGMENT);
@@ -367,7 +392,7 @@ export function generateLayout(
   }
   function tube() {
     const start = z;
-    for (let i = gen.showcase ? Math.max(slots.boundary_tube.length, 2) : randInt(rng, 2, 4); i > 0; i--) placeRun('boundary_tube');
+    for (let i = gen.showcase ? Math.max(showcaseCount('boundary_tube'), 2) : randInt(rng, 2, 4); i > 0; i--) placeRun('boundary_tube');
     // Old games list the tube entrance/exit as event decorations instead of transitions
     const transitions = manifest.boundaries?.[themeName]?.transitions ?? [];
     if (!transitions.some((t) => t.slot === 'boundary_tube')) {
@@ -448,12 +473,19 @@ export function generateLayout(
   // Landmark (Tower Bridge, …): start/mid/end are 360 each. Some themes model the
   // whole landmark in epic_start and keep mid/end as empty placeholders, which still
   // reserve their length.
+  // When epic_start already spans the three slots, mid/end only keep their length: 3.62
+  // Aloha Hawaii's still hold the template's blockout ("EPIC" letters in the canyon)
   function epic(variants = null) {
+    let whole = false;
     for (const slot of ['boundary_epic_start', 'boundary_epic_mid', 'boundary_epic_end']) {
       const before = items.length;
+      const z0 = z;
       placeRun(slot);
-      // Showcase: the landmark's random groups set to one variant each time
-      if (variants && slot === 'boundary_epic_start' && items.length > before) items[before].variants = variants;
+      if (slot === 'boundary_epic_start' && items.length > before) {
+        // Showcase: the landmark's random groups set to one variant each time
+        if (variants) items[before].variants = variants;
+        whole = (manifest.prefabs[items[before].prefab]?.bbox?.[1][2] ?? 0) > 2.5 * (z - z0);
+      } else if (whole) items.splice(before);
     }
   }
 
@@ -606,7 +638,8 @@ export function generateLayout(
         place('obstacle_lightSignal', [it.x, 0, it.z], 'signal', { signalSeed: Math.floor(placeRng() * 2 ** 31), signalColor: it.color });
       } else if (it.type === 'obstacle') {
         if (it.key === 'powerBox') powerBoxCluster(it.lane, it.z);
-        else place(OBSTACLE_SLOTS[it.key], [it.lane, 0, it.z], 'obstacle');
+        // Height and scale kept from the game's chunks (a barrier on a train roof, small bushes)
+        else place(OBSTACLE_SLOTS[it.key], [it.lane, it.y ?? 0, it.z], 'obstacle', it.scale ? { scale: it.scale } : {});
       }
     }
     placeRng = rng;
@@ -742,9 +775,13 @@ export function itemsToStudio(items) {
       out.push({ type: 'startTrain', lane: x, z });
     } else if (it.slot === 'obstacle_lightSignal') {
       out.push({ type: 'signal', x, z, color: mulberry32(it.signalSeed)() < 0.5 ? 'green' : 'red' });
-    } else if (it.layer === 'obstacle' && !it.scale) {
+    } else if (it.layer === 'obstacle') {
       const key = Object.entries(OBSTACLE_SLOTS).find(([, slot]) => slot === it.slot)?.[0];
-      if (key) out.push({ type: 'obstacle', key, lane: x, z });
+      // A power box brings its two small bushes back itself
+      const ofPowerBox = it.scale && it.slot === 'obstacle_bush' && items.some((p) => p.slot === 'obstacle_powerBox' && Math.abs(p.pos[0] - x) < 6 && Math.abs(p.pos[2] - z) < 6);
+      if (!key || ofPowerBox) continue;
+      const y = it.pos[1];
+      out.push({ type: 'obstacle', key, lane: x, z, ...(y ? { y } : {}), ...(it.scale ? { scale: it.scale } : {}) });
     }
   }
   return out;
