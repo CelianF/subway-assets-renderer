@@ -9,7 +9,11 @@ const prettyTheme = (t) => t.replace(/^\d+\.\d+_/, '').replace(/([a-z])([A-Z0-9]
 
 addCredit();
 
-const STAGE_ORDER = ['upload', 'load', 'export-project', 'export-content', 'build', 'install', 'done'];
+const STAGE_ORDER = ['upload', 'download', 'load', 'export-project', 'export-content', 'build', 'install', 'done'];
+// Remote map ids are the catalog's lowercase names: known word breaks for the list
+const REMOTE_NAMES = { subwaypvp: 'Subway PvP', newyork: 'New York', sanfrancisco: 'San Francisco', buenosaires: 'Buenos Aires', lasvegas: 'Las Vegas', stpetersburg: 'St Petersburg', thenorthpole: 'The North Pole', underwaterworld: 'Underwater World', spacestation: 'Space Station', brawlstars: 'Brawl Stars', crossyroads: 'Crossy Roads', venicebeach: 'Venice Beach', neworleans: 'New Orleans', subwaycity: 'Subway City', subwayclassic: 'Subway Classic', alohahawaii: 'Aloha Hawaii', sakuratokyo: 'Sakura Tokyo', cosmiccrossroads: 'Cosmic Crossroads', journeytotheeast: 'Journey to the East', fantasyfest: 'Fantasy Fest', winterxtreme: 'Winter Xtreme',
+  copenhagenscifi: 'Copenhagen Sci-Fi', copenhagensuperrunner: 'Copenhagen Super Runner', copenhagenviking: 'Copenhagen Viking', greecevalentines: 'Greece Valentines', irelandspring: 'Ireland Spring', london2026: 'London 2026', lunarnewyear: 'Lunar New Year', luoyanglny: 'Luoyang LNY', mumbaiholi: 'Mumbai Holi', newyorkplay2plant: 'New York Play2Plant', newyorkthanksgiving: 'New York Thanksgiving', oxfordeaster: 'Oxford Easter', parissummergames: 'Paris Summer Games', riocarnival: 'Rio Carnival', shenzhenshowdown: 'Shenzhen Showdown', subwaycityxmas: 'Subway City Xmas', vancouverautumn: 'Vancouver Autumn', vancouverspring: 'Vancouver Spring', cambridgehalloween: 'Cambridge Halloween' };
+const remoteName = (id) => REMOTE_NAMES[id] ?? id.replace(/^\w/, (c) => c.toUpperCase());
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -340,6 +344,71 @@ async function showResult(jobId) {
   }
   loadEnvs(); // new maps show up while the rest of the queue runs
 }
+
+// ---------------------------------------------------------------- remote maps
+
+/**
+ * "Import map": the cities the newest imported game version downloads at runtime. Picking
+ * one queues a job that downloads its bundle from SYBO and extracts it like an APK.
+ */
+async function openRemoteMaps() {
+  const { version, maps } = await (await fetch('/api/remote')).json();
+  const list = el('div', { class: 'remote-list' });
+  const filter = el('input', { class: 'note-input', type: 'search', placeholder: 'Search', oninput: () => render() });
+  const close = () => overlay.remove();
+  function render() {
+    const q = filter.value.trim().toLowerCase();
+    const shown = maps.filter((m) => !q || m.id.includes(q.replace(/\s+/g, '')) || remoteName(m.id).toLowerCase().includes(q));
+    list.replaceChildren(
+      ...shown.map((m) =>
+        el(
+          'div',
+          { class: 'conflict-row remote-item' },
+          el(
+            'div',
+            { class: 'conflict-main' },
+            el('div', {}, el('strong', {}, remoteName(m.id)), m.installed ? el('small', {}, 'Already installed') : null),
+            el(
+              'button',
+              {
+                class: m.pending ? '' : 'primary',
+                disabled: m.pending,
+                onclick: async (e) => {
+                  e.target.disabled = true;
+                  e.target.textContent = 'Queued';
+                  m.pending = true;
+                  const res = await fetch(`/api/remote/${encodeURIComponent(version)}/${encodeURIComponent(m.id)}`, { method: 'POST' });
+                  if (!res.ok) alert((await res.json().catch(() => ({}))).error ?? 'Could not queue it');
+                  watchJobs();
+                },
+              },
+              m.pending ? 'Queued' : m.installed ? 'Import again' : 'Import',
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  const overlay = el(
+    'div',
+    { class: 'modal-overlay', onclick: (e) => e.target === overlay && close() },
+    el(
+      'div',
+      { class: 'modal' },
+      el('h3', {}, 'Import a map'),
+      version
+        ? el('p', { class: 'muted' }, `${maps.length} cities the game (v${version}) downloads from SYBO when you play them. Each import downloads one file and extracts it like an APK.`)
+        : el('p', { class: 'muted' }, 'Import an APK first: the list of downloadable maps comes from it (APKs imported before this version of the app need importing again).'),
+      version ? filter : null,
+      list,
+      el('div', { class: 'modal-actions' }, el('button', { onclick: close }, 'Close')),
+    ),
+  );
+  render();
+  document.body.append(overlay);
+  filter.focus();
+}
+$('remote-open').addEventListener('click', () => openRemoteMaps());
 
 const drop = $('drop');
 drop.addEventListener('click', () => $('file').click());

@@ -248,6 +248,25 @@ button.danger {
   color: var(--muted);
 }
 
+/* ---------------------------------------------------------------- remote maps */
+
+.remote-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.remote-list {
+  margin-top: 10px;
+}
+.remote-item {
+  padding: 8px 0;
+}
+.modal input[type='search'] {
+  width: 100%;
+  box-sizing: border-box;
+}
+
 /* ---------------------------------------------------------------- conflict dialog */
 
 .modal-overlay {

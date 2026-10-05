@@ -64,8 +64,11 @@ export function writeZip(entries) {
   return Buffer.concat([...locals, ...centrals, end]);
 }
 
-/** @returns Array<{ name: string, data: Buffer }> */
-export function readZip(buf) {
+/**
+ * @param filter  (name) => bool: only these entries are unpacked (an APK holds hundreds of MB)
+ * @returns Array<{ name: string, data: Buffer }>
+ */
+export function readZip(buf, filter = null) {
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
     if (buf.readUInt32LE(i) === 0x06054b50) {
@@ -88,7 +91,7 @@ export function readZip(buf) {
     const localOffset = buf.readUInt32LE(p + 42);
     const name = buf.toString('utf8', p + 46, p + 46 + nameLen);
     p += 46 + nameLen + extraLen + commentLen;
-    if (name.endsWith('/')) continue; // directory entry
+    if (name.endsWith('/') || (filter && !filter(name))) continue; // directory entry, or not wanted
     const lNameLen = buf.readUInt16LE(localOffset + 26);
     const lExtraLen = buf.readUInt16LE(localOffset + 28);
     const start = localOffset + 30 + lNameLen + lExtraLen;

@@ -10,12 +10,14 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
+import { latestKit, prepareRemoteMap, saveRemoteKit } from './remote.js';
 import { readZip, writeZip } from './zip.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORKSPACE = process.env.SUBWAY_WORKSPACE ? path.resolve(process.env.SUBWAY_WORKSPACE) : path.join(ROOT, 'workspace');
 const ENVS = path.join(WORKSPACE, 'envs');
 const JOBS = path.join(WORKSPACE, 'jobs');
+const REMOTE = path.join(WORKSPACE, 'remote'); // per game version: remote maps + shared bundles (server/remote.js)
 const IS_WIN = process.platform === 'win32';
 
 const MIME = {
@@ -218,6 +220,7 @@ async function installPackage(entries, header, id, staging, sourceName, policy, 
 const STAGES = {
   queued: 'Waiting in queue',
   upload: 'Receiving game package',
+  download: 'Downloading from SYBO',
   load: 'Reading game files',
   'export-project': 'Exporting Unity project',
   'export-content': 'Exporting models and textures',
@@ -268,17 +271,32 @@ async function runJob(job, apkPath, sourceName) {
     job.stage = s;
     job.label = STAGES[s] ?? s;
   };
-  setStage('load');
+  setStage(job.remote ? 'download' : 'load');
   try {
-    // An APK/XAPK is a zip: catch HTML/XML error pages saved as .apk (expired download links)
-    const head = Buffer.alloc(4);
-    const fh = await open(apkPath, 'r');
-    await fh.read(head, 0, 4, 0);
-    await fh.close();
-    if (head.toString('latin1', 0, 2) !== 'PK') {
-      throw new Error('This file is not an APK (it looks like a web page or an error message). Download the APK again.');
+    if (job.remote) {
+      // A map the game downloads: its bundle from SYBO + the shared bundles kept from its APK
+      const { version, id } = job.remote;
+      apkPath = await prepareRemoteMap(REMOTE, version, id, dir, (f, bytes) => (job.label = `${STAGES.download} (${f != null ? `${Math.round(f * 100)}%` : `${(bytes / 1048576).toFixed(1)} MB`})`));
+      sourceName = `SYBO download ${version}`; // the builder reads the game version from the name
+      setStage('load');
+    } else {
+      // An APK/XAPK is a zip: catch HTML/XML error pages saved as .apk (expired download links)
+      const head = Buffer.alloc(4);
+      const fh = await open(apkPath, 'r');
+      await fh.read(head, 0, 4, 0);
+      await fh.close();
+      if (head.toString('latin1', 0, 2) !== 'PK') {
+        throw new Error('This file is not an APK (it looks like a web page or an error message). Download the APK again.');
+      }
+      apkPath = await unwrapSinglePackage(apkPath);
+      // The maps this game version downloads at runtime, for "Import map"
+      try {
+        const kit = await saveRemoteKit(apkPath, REMOTE);
+        if (kit) log(`Downloadable maps: ${kit.maps} (game version ${kit.version})`);
+      } catch (e) {
+        log(`Downloadable maps not saved: ${e.message}`);
+      }
     }
-    apkPath = await unwrapSinglePackage(apkPath);
     const [cmd, pre] = ripperCommand();
     await run(cmd, [...pre, exportDir, apkPath], (line) => {
       const m = line.match(/^@@stage (\S+)/);
@@ -287,7 +305,7 @@ async function runJob(job, apkPath, sourceName) {
       else if (line.startsWith('@@warning')) job.warning = line.slice(10);
       else log(line);
     });
-    await rm(apkPath, { force: true });
+    await rm(apkPath, { recursive: true, force: true });
 
     setStage('build');
     await buildManifest({ exportDir, out: splitDir, split: true, sourceName }, log);
@@ -449,6 +467,29 @@ export async function handle(req, res) {
       const job = { id, source: sourceName, apkPath, status: 'queued', stage: 'queued', label: STAGES.queued, log: [], envs: [], error: null };
       jobs.set(id, job);
       startNextJob(); // runs in the background; poll /api/jobs/:id
+      sendJson(res, 202, { jobId: id });
+      return true;
+    }
+    // GET /api/remote  -> maps of the newest game version that SYBO serves for download
+    if (parts[1] === 'remote' && parts.length === 2 && req.method === 'GET') {
+      const kit = await latestKit(REMOTE);
+      if (!kit) return sendJson(res, 200, { version: null, maps: [] }), true;
+      const installed = new Set((await listEnvs()).map((e) => e.theme.toLowerCase().replace(/^\d+\.\d+_/, '')));
+      const pending = new Set([...jobs.values()].filter((j) => j.remote && ['queued', 'running', 'conflict'].includes(j.status)).map((j) => j.remote.id));
+      const maps = kit.maps.map((m) => ({ id: m.id, installed: installed.has(m.id), pending: pending.has(m.id) }));
+      sendJson(res, 200, { version: kit.version, maps });
+      return true;
+    }
+    // POST /api/remote/:version/:id  -> download + extract one map (a job like an APK's)
+    if (parts[1] === 'remote' && parts.length === 4 && req.method === 'POST') {
+      await staleJobsCleared;
+      const [version, mapId] = parts.slice(2).map(decodeURIComponent);
+      if (!existsSync(path.join(REMOTE, slug(version), 'index.json'))) return sendJson(res, 404, { error: 'Unknown game version' }), true;
+      const id = randomUUID();
+      await mkdir(path.join(JOBS, id), { recursive: true });
+      const job = { id, source: `${mapId} (SYBO)`, remote: { version: slug(version), id: mapId }, status: 'queued', stage: 'queued', label: STAGES.queued, log: [], envs: [], error: null };
+      jobs.set(id, job);
+      startNextJob();
       sendJson(res, 202, { jobId: id });
       return true;
     }
