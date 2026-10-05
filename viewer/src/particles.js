@@ -289,7 +289,7 @@ const DOT = (() => {
 })();
 
 /** Blend, texture and tint of a particle material (Unity built-in, SYBO, 1.x Custom). */
-function particleLook(materials, name) {
+function particleLook(materials, name, renderMode = 0) {
   const def = name ? materials.defs[name] : null;
   const shader = def?.shader ?? 'Particles/Additive';
   const f = def?.floats ?? {};
@@ -305,8 +305,10 @@ function particleLook(materials, name) {
   const fadeMode = src === 2 ? 3 : dst === 1 ? 2 : src === 1 && dst === 10 ? 4 : 1;
   // Legacy particle shaders double _TintColor (0.5 grey = unchanged)
   const tint = c._TintColor ? c._TintColor.map((v) => v * 2) : c._MainColor && /Additive/i.test(shader) ? [...c._MainColor.slice(0, 3), 1] : c._Color ?? [1, 1, 1, 1];
-  // Combined without VERTEX_COLORS ignores the particle color (3.60 Ireland seagulls: dark grey start color)
-  const vertexColors = shader !== 'SYBO/Bend/Combined' || !!f._HasVertexColors || !!def?.keywords?.includes('VERTEX_COLORS_ENABLED');
+  // Combined without VERTEX_COLORS ignores the particle color on meshes (3.60 Ireland
+  // seagulls: dark grey start color, Sydney's fish: red). Billboards keep it: their fades
+  // and tints live there (3.70 cloud Space Station's purple fog, Mexico City's spirits)
+  const vertexColors = shader !== 'SYBO/Bend/Combined' || renderMode !== 4 || !!f._HasVertexColors || !!def?.keywords?.includes('VERTEX_COLORS_ENABLED');
   return { map: def ? materials.tex(def, '_MainTex') : null, src, dst, fadeMode, tint, vertexColors };
 }
 
@@ -379,7 +381,7 @@ class Emitter {
     this.period = def.loop ? def.duration : def.duration + (def.lifetime?.max ?? 5) + 1;
     this.delay = sample(def.delay, 0);
 
-    const look = particleLook(materials, def.render.material);
+    const look = particleLook(materials, def.render.material, def.render.mode);
     if (this.mesh) {
       this.material = makeMaterial(look, MESH_VERTEX, {});
       // One instanced mesh per mesh the system picks from (Paris Summer Games' balloon colors)

@@ -560,6 +560,11 @@ function translateLegacy(def) {
   const floats = { ...def.floats };
   for (const [re, flags] of LEGACY_SHADERS) if (re.test(def.shader)) Object.assign(floats, flags, def.floats.FADE_MODE != null ? {} : {});
   if (floats._ColorMultiplier != null) Object.assign(floats, { _HasMultiplier: 1, _Multiplier: floats._ColorMultiplier });
+  // Bend/UVScroll scrolls by _Time.y (seconds), the Combined shader by _Time.x (seconds / 20):
+  // 2.11 Space Station's lane glow is 0.12 there, 2.4 in 3.70's Combined copy
+  if (/^Bend\/UVScroll$/.test(def.shader) && def.colors?._ScrollSpeed) {
+    return { ...def, floats, renderQueue: def.renderQueue > 0 ? def.renderQueue : floats._DstMode ? 3000 : 2000, colors: { ...def.colors, _ScrollSpeed: def.colors._ScrollSpeed.map((v) => v * 20) } };
+  }
   // Legacy transparent queues were left at -1 (shader default)
   const renderQueue = def.renderQueue > 0 ? def.renderQueue : floats._DstMode ? 3000 : 2000;
   return { ...def, floats, renderQueue };
