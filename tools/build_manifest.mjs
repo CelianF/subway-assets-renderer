@@ -1019,6 +1019,74 @@ function parseAnimators(file, guidIndex) {
  * pattern). Each names its node by path below the prefab root, "name#k" the k-th sibling
  * of that name, so identical copies (three candle glows) all move. glb space (X mirrored).
  */
+// Unity's built-in meshes (Library/unity default resources): not exported with the prefab
+const BUILTIN_MESHES = { 10202: 'cube', 10206: 'cylinder', 10207: 'sphere', 10208: 'capsule', 10209: 'plane', 10210: 'quad' };
+
+/**
+ * Renderers drawing one of Unity's built-in meshes (3.70 Cambridge's owl eyes: glowing
+ * planes), which the glb leaves without geometry: [{ path, mesh, materials }]. Only active,
+ * enabled renderers with a real material.
+ */
+function parseBuiltinMeshes(file, guidIndex) {
+  const text = read(file);
+  if (!text.includes('guid: 0000000000000000e000000000000000')) return [];
+  const docs = yamlDocs(text);
+  const names = new Map();
+  const active = new Map();
+  const transformOf = new Map();
+  const goOfTransform = new Map();
+  const fatherOf = new Map();
+  const childrenOf = new Map();
+  for (const { doc, kind, fid } of docs) {
+    if (kind === '1') {
+      names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+      active.set(fid, !/m_IsActive: 0/.test(doc));
+    }
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    if (kind === '4' || kind === '224') {
+      transformOf.set(go, fid);
+      goOfTransform.set(fid, go);
+      fatherOf.set(fid, doc.match(/m_Father: \{fileID: (\d+)/)?.[1]);
+      childrenOf.set(fid, [...(doc.split('m_Children:')[1]?.split('m_Father')[0] ?? '').matchAll(/fileID: (\d+)/g)].map(([, t]) => t));
+    }
+  }
+  // Path below the prefab root as motions name it ("a#0/b#1"); inactive ancestors hide it
+  const pathOf = (go) => {
+    const parts = [];
+    for (let t = transformOf.get(go); t && fatherOf.get(t) && fatherOf.get(t) !== '0'; t = fatherOf.get(t)) {
+      const name = names.get(goOfTransform.get(t));
+      const same = (childrenOf.get(fatherOf.get(t)) ?? []).filter((c) => names.get(goOfTransform.get(c)) === name);
+      parts.unshift(`${name}#${Math.max(0, same.indexOf(t))}`);
+    }
+    return parts.join('/');
+  };
+  // (the root itself is stored inactive: the game turns pieces on as it spawns them)
+  const visible = (go) => {
+    for (let t = transformOf.get(go); t && fatherOf.get(t) && fatherOf.get(t) !== '0'; t = fatherOf.get(t)) if (active.get(goOfTransform.get(t)) === false) return false;
+    return true;
+  };
+  const renderers = new Map(); // GameObject -> material names
+  for (const { doc, kind } of docs) {
+    if (kind !== '23' || /\n {2}m_Enabled: 0/.test(doc)) continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    const mats = [...(doc.split('m_Materials:')[1]?.split(/\n {2}\w/)[0] ?? '').matchAll(GUID_RE_G)]
+      .map(([, g]) => guidIndex.get(g))
+      .filter((p) => p?.endsWith('.mat'))
+      .map(stem);
+    if (mats.length) renderers.set(go, mats);
+  }
+  const out = [];
+  for (const { doc, kind } of docs) {
+    if (kind !== '33') continue;
+    const m = doc.match(/m_Mesh: \{fileID: (\d+), guid: 0000000000000000e000000000000000/);
+    const mesh = m && BUILTIN_MESHES[m[1]];
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    if (!mesh || !renderers.has(go) || !visible(go)) continue;
+    out.push({ path: pathOf(go), mesh, materials: renderers.get(go) });
+  }
+  return out;
+}
+
 function parseMotions(file, guidIndex) {
   const docs = yamlDocs(read(file));
   const names = new Map();
@@ -2673,6 +2741,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     }
     const motions = parseMotions(prefabPath, guidIndex);
     if (motions.length) info.motions = motions;
+    const builtins = parseBuiltinMeshes(prefabPath, guidIndex);
+    if (builtins.length) {
+      info.builtinMeshes = builtins;
+      info.materials = sortedStrings(new Set([...(info.materials ?? []), ...builtins.flatMap((b) => b.materials)]));
+    }
     const morphMeshes = parseMorphMeshes(prefabPath, guidIndex).map(({ node, materials: mats, data }) => {
       const file = `mesh/${name}_${node.replace(/[^A-Za-z0-9._-]+/g, "_")}.json`;
       writeFileSync(path.join(out, file), JSON.stringify(data));

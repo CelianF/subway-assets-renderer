@@ -36,10 +36,8 @@ const LABELS = {
   trainPlatform: 'Train platform',
 };
 const FIX_TITLES = {
-  pillar: 'Put a pillar back in every pillar hall spot that has none',
-  platform: 'Put back every station platform the auto run has',
-  full: 'Put back every full barrier the auto run has',
-  trainPlatform: 'Put back every train platform the auto run has',
+  pillar: 'Every pillar hall gets its pillars back (whatever stands in their spots is cleared)',
+  platform: 'Every station gets its platforms back (whatever stands on the outer tracks there is cleared)',
 };
 const KIND_LABELS = { static: 'Parked', moving: 'Moving', falling: 'Lava' };
 /** Name of an obstacle tool: regular ones, else the game mode's piece names. */
@@ -615,7 +613,9 @@ export function createStudio(ctx) {
         // Game mode (and skin): which pieces the run uses and the palette offers
         ...modeSelects(select),
         // Obstacles the auto run has and the studio list may lack (pillars, platforms…)
-        ...fixKeys.map((key) => el('button', { title: FIX_TITLES[key], onclick: () => { const n = ctx.fixMissing(key); setInfo(n ? `Put back ${n} ${LABELS[key].toLowerCase()}${n > 1 ? 's' : ''}` : `No ${LABELS[key].toLowerCase()} missing`); } }, FIX_LABELS[key])),
+        ...fixKeys.map((key) =>
+          el('button', { title: FIX_TITLES[key], onclick: () => { const n = ctx.fixMissing(key); drawFootprints(); setInfo(n ? `Placed ${n} ${LABELS[key].toLowerCase()}${n > 1 ? 's' : ''}` : `No ${key === 'pillar' ? 'pillar hall' : 'station'} in this run`); } }, FIX_LABELS[key]),
+        ),
         el('button', { title: 'Replace everything with the auto-generated run', onclick: async () => commit(await ctx.fromRun(), 'Copied the auto-generated run') }, '⟳ Copy auto run'),
         el('button', { class: 'primary', onclick: () => ctx.onExit() }, 'Done'),
       ),

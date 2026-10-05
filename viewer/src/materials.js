@@ -558,6 +558,8 @@ function translateLegacy(def) {
   }
   if (!/^(SYBO\/)?Bend\//.test(def.shader) || /Combined|Specials|Common\/ScreenMask|Legacy\/VertexWave/.test(def.shader)) return def;
   const floats = { ...def.floats };
+  // Pre-3.0 additive shaders keep their color in _TintColor (2.8 Cambridge's red owl eyes)
+  if (def.colors?._TintColor && !def.colors._Color) def = { ...def, colors: { ...def.colors, _Color: def.colors._TintColor } };
   for (const [re, flags] of LEGACY_SHADERS) if (re.test(def.shader)) Object.assign(floats, flags, def.floats.FADE_MODE != null ? {} : {});
   if (floats._ColorMultiplier != null) Object.assign(floats, { _HasMultiplier: 1, _Multiplier: floats._ColorMultiplier });
   // Bend/UVScroll scrolls by _Time.y (seconds), the Combined shader by _Time.x (seconds / 20):

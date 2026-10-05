@@ -225,7 +225,9 @@ void main() {
 
 const MESH_VERTEX = /* glsl */ `
 uniform vec2 uBend;
+uniform vec2 uSheet;
 attribute vec4 iColor;
+attribute float iFrame;
 varying vec2 vUv;
 varying vec4 vColor;
 varying float vDepth;
@@ -234,7 +236,9 @@ void main() {
   float depth = max(-mv.z, 0.0);
   mv.xy += vec2(uBend.x, -uBend.y) * depth * depth;
   vDepth = -mv.z;
-  vUv = uv;
+  // Texture sheet frames (Cambridge's bats flap their wings): glb UVs start top-left
+  vec2 cell = vec2(mod(iFrame, uSheet.x), floor(iFrame / uSheet.x));
+  vUv = (uv + cell) / uSheet;
   vColor = iColor;
   gl_Position = projectionMatrix * mv;
 }
@@ -305,11 +309,15 @@ function particleLook(materials, name, renderMode = 0) {
   const fadeMode = src === 2 ? 3 : dst === 1 ? 2 : src === 1 && dst === 10 ? 4 : 1;
   // Legacy particle shaders double _TintColor (0.5 grey = unchanged)
   const tint = c._TintColor ? c._TintColor.map((v) => v * 2) : c._MainColor && /Additive/i.test(shader) ? [...c._MainColor.slice(0, 3), 1] : c._Color ?? [1, 1, 1, 1];
-  // Combined without VERTEX_COLORS ignores the particle color on meshes (3.60 Ireland
-  // seagulls: dark grey start color, Sydney's fish: red). Billboards keep it: their fades
-  // and tints live there (3.70 cloud Space Station's purple fog, Mexico City's spirits)
-  const vertexColors = shader !== 'SYBO/Bend/Combined' || renderMode !== 4 || !!f._HasVertexColors || !!def?.keywords?.includes('VERTEX_COLORS_ENABLED');
-  return { map: def ? materials.tex(def, '_MainTex') : null, src, dst, fadeMode, tint, vertexColors };
+  // Combined without VERTEX_COLORS: meshes cut from the city atlas ignore the particle
+  // color (3.60 Ireland seagulls: dark grey start color, Sydney's fish: red). The rest keep
+  // it, their tints and fades live there: billboards (cloud Space Station's purple fog),
+  // white masks (Cambridge's black bats), fading meshes (Cambridge's tube light beam)
+  const atlas = /_environment[^/]*$/i.test(def?.textures?._MainTex?.url ?? '');
+  const vertexColors = shader !== 'SYBO/Bend/Combined' || renderMode !== 4 || !atlas || !!f._HasVertexColors || !!def?.keywords?.includes('VERTEX_COLORS_ENABLED');
+  // Pre-3.0 particle shaders (Bend/Particle_AlphaBlend) name their texture _Texture
+  const map = def ? materials.tex(def, '_MainTex') ?? materials.tex(def, '_Texture') : null;
+  return { map, src, dst, fadeMode, tint, vertexColors };
 }
 
 const BLEND = [
@@ -383,18 +391,21 @@ class Emitter {
 
     const look = particleLook(materials, def.render.material, def.render.mode);
     if (this.mesh) {
-      this.material = makeMaterial(look, MESH_VERTEX, {});
+      this.material = makeMaterial(look, MESH_VERTEX, { uSheet: { value: def.sheet ? new THREE.Vector2(def.sheet.x, def.sheet.y) : new THREE.Vector2(1, 1) } });
       // One instanced mesh per mesh the system picks from (Paris Summer Games' balloon colors)
       const geometries = Array.isArray(meshGeometry) ? meshGeometry : [meshGeometry];
       this.parts = geometries.map((g, k) => {
         const colorAttr = new THREE.InstancedBufferAttribute(new Float32Array(this.max * 4), 4).setUsage(THREE.DynamicDrawUsage);
         const geometry = g.clone();
         geometry.setAttribute('iColor', colorAttr);
+        const frameAttr = new THREE.InstancedBufferAttribute(new Float32Array(this.max), 1).setUsage(THREE.DynamicDrawUsage);
+        geometry.setAttribute('iFrame', frameAttr);
         geometry.computeBoundingBox();
         const size = geometry.boundingBox.getSize(new THREE.Vector3());
         return {
           object: new THREE.InstancedMesh(geometry, this.material, this.max),
           colorAttr,
+          frameAttr,
           weight: def.render.variants?.[k]?.weight ?? 1,
           // Modeled standing up (balloons) rather than lengthwise (fish, lasers)
           upright: size.y > 1.2 * Math.max(size.x, size.z),
@@ -639,6 +650,16 @@ class Emitter {
     tmpRel.toArray(this.local.pos, i * 3);
   }
 
+  /** Texture sheet frame of particle i at life fraction lt (0 without a sheet). */
+  frameOf(i, lt) {
+    const sheet = this.def.sheet;
+    if (!sheet) return 0;
+    const frames = sheet.row == null ? sheet.x * sheet.y : sheet.x;
+    let frame = Math.floor(((sample(sheet.frame, lt, this.rand[i * 2]) * (sheet.cycles || 1)) % 1) * frames);
+    if (sheet.row != null) frame += (sheet.row < 0 ? Math.floor(this.rand[i * 2 + 1] * sheet.y) : sheet.row) * sheet.x;
+    return frame;
+  }
+
   upload() {
     const d = this.def;
     const col = new THREE.Vector4();
@@ -680,24 +701,20 @@ class Emitter {
         part.object.setMatrixAt(n, m);
         this.color(i, lt, col, life);
         part.colorAttr.setXYZW(n, col.x, col.y, col.z, col.w);
+        part.frameAttr.setX(n, this.frameOf(i, lt));
       }
       this.parts.forEach((p, k) => {
         p.object.count = counts[k];
         p.object.instanceMatrix.needsUpdate = true;
         p.colorAttr.needsUpdate = true;
+        p.frameAttr.needsUpdate = true;
       });
       return;
     }
-    const sheet = d.sheet;
     for (let i = 0; i < this.count; i++) {
       const lt = this.age[i] / this.life[i];
       const size = this.size0[i] * (d.sizeOverLife ? sample(d.sizeOverLife, lt, this.rand[i * 2]) : 1);
-      let frame = 0;
-      if (sheet) {
-        const frames = sheet.row == null ? sheet.x * sheet.y : sheet.x;
-        frame = Math.floor(((sample(sheet.frame, lt, this.rand[i * 2]) * (sheet.cycles || 1)) % 1) * frames);
-        if (sheet.row != null) frame += (sheet.row < 0 ? Math.floor(this.rand[i * 2 + 1] * sheet.y) : sheet.row) * sheet.x;
-      }
+      const frame = this.frameOf(i, lt);
       this.posAttr.setXYZ(i, this.local.pos[i * 3], this.local.pos[i * 3 + 1], this.local.pos[i * 3 + 2]);
       this.velAttr.setXYZ(i, this.local.vel[i * 3], this.local.vel[i * 3 + 1], this.local.vel[i * 3 + 2]);
       this.miscAttr.setXYZW(i, size, this.rot[i], frame, 0);

@@ -241,8 +241,24 @@ const OBSTACLE_SLOTS = {
   trainPlatform: 'obstacle_train_platform',
 };
 /** Studio obstacles the "Fix …" buttons put back from the auto run (pillars: their halls). */
-export const FIXABLE = ['pillar', 'platform', 'full', 'trainPlatform'];
-export const FIX_LABELS = { pillar: '🏛 Fix pillars', platform: '🚉 Fix platforms', full: '🚧 Fix full barriers', trainPlatform: '🛤 Fix train platforms' };
+/** Studio "Fix" buttons: pieces that belong to a section (pillar halls, stations). */
+export const FIXABLE = ['pillar', 'platform'];
+export const FIX_LABELS = { pillar: '🏛 Fix pillars', platform: '🚉 Fix platforms' };
+
+/**
+ * Where a run's pillar halls and stations want their pillars and platforms, as studio
+ * items: a pillar in the middle lane every 180 (mid-segment), a platform piece every 180
+ * along the station (it covers both outer tracks).
+ */
+export function wallItems(layout, key) {
+  const out = [];
+  if (key === 'pillar') {
+    for (const [a, b] of layout.pillarHalls ?? []) for (let z = a + SEGMENT / 2; z < b; z += SEGMENT) out.push({ type: 'obstacle', key: 'pillar', lane: 0, z });
+  } else if (key === 'platform') {
+    for (const [a, b] of layout.stations ?? []) for (let z = a; z + SEGMENT <= b; z += SEGMENT) out.push({ type: 'obstacle', key: 'platform', lane: 0, z });
+  }
+  return out;
+}
 
 /**
  * ≤ 1.43: hand-built chunks laid end to end, as Track/TrackChunkCollection do: the chunks
@@ -451,6 +467,10 @@ export function generateLayout(
   const noTrackRanges = []; // [z0, z1) where the regular rails are replaced
   const platformRanges = []; // [z0, z1) where platforms cover the two outer tracks
   const pillarRanges = []; // [z0, z1) where pillars stand in the middle lane
+  const pillarHalls = []; // [z0, z1) of every pillar hall / station ("Fix" buttons)
+  const stations = [];
+  // In the studio, platforms are items: the outer tracks they cover come from the list
+  if (obstacleMode === 'studio') for (const it of studio) if (it.type === 'obstacle' && it.key === 'platform') platformRanges.push([it.z, it.z + SEGMENT]);
   const laneBlocks = []; // { x, z0, z1 }: single-lane stretches already taken (start train)
   let z = 0;
 
@@ -575,6 +595,9 @@ export function generateLayout(
     placeRun('boundary_station_end');
     // Raised platforms along both outer tracks, the length of the station (90 + n·180 + 90
     // tiles exactly with the 180-long platform piece)
+    // (in the studio they are items, wiped and put back like the rest)
+    if (has('special_station_platform')) stations.push([start, z]);
+    if (obstacleMode === 'studio') return;
     for (let pz = start; pz + SEGMENT <= z; pz += SEGMENT) place('special_station_platform', [0, 0, pz]);
     if (has('special_station_platform')) platformRanges.push([start, z]);
   }
@@ -643,6 +666,7 @@ export function generateLayout(
     // Like the game's Pillars chunk: a pillar in the middle lane every 180, mid-segment.
     // They come and go with the obstacles; in the studio they are items like the others
     // ("Fix pillars" puts back any that are missing)
+    if (has('obstacle_pillar')) pillarHalls.push([start, z]);
     if (has('obstacle_pillar') && gen.obstacles.pillar && obstacleMode !== 'studio') {
       for (let pz = start + SEGMENT / 2; pz < z; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], 'obstacle');
       pillarRanges.push([start, z]);
@@ -1019,7 +1043,7 @@ export function generateLayout(
     place('obstacle_bush', [x - 4.64, 0.34, pz + 1.93], 'obstacle', { scale: 0.54 });
   }
 
-  return { items, length };
+  return { items, length, pillarHalls, stations };
 }
 
 /** Converts generated obstacle items into an editable studio list ("start from this run"). */
@@ -1043,6 +1067,9 @@ export function itemsToStudio(items) {
       out.push({ type: 'train', lane: x, z0, z1: z + trainLength(Number(m[2])), kind: m[1], variant, ramp: !!ramp });
     } else if (it.slot === 'prop_train_start') {
       out.push({ type: 'startTrain', lane: x, z });
+    } else if (it.slot === 'special_station_platform') {
+      // Station platforms: studio items too (placed with the scenery in auto runs)
+      out.push({ type: 'obstacle', key: 'platform', lane: 0, z });
     } else if (it.slot === 'obstacle_lightSignal') {
       out.push({ type: 'signal', x, z, color: mulberry32(it.signalSeed)() < 0.5 ? 'green' : 'red' });
     } else if (it.layer === 'obstacle' || it.mode) {

@@ -5,7 +5,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setReversedDepth, texturesReady } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, FIX_LABELS } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, FIX_LABELS, wallItems } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI, prettyTheme } from './ui.js';
@@ -377,7 +377,15 @@ function animationMixer(obj, anim) {
     return node;
   };
   const Track = { quaternion: THREE.QuaternionKeyframeTrack, position: THREE.VectorKeyframeTrack, scale: THREE.VectorKeyframeTrack };
+  // A constant position or rotation on the animated object itself (an Animator's root
+  // motion) would pin it to that value: 3.70 Ireland's idle sheep sat in the middle of the
+  // road (their clip holds them at 0, the building places them 44 to the side)
+  const constant = (t) => {
+    const n = t.values.length / t.times.length;
+    return t.values.every((v, i) => Math.abs(v - t.values[i % n]) < 1e-4);
+  };
   const tracks = anim.tracks.map((t) => {
+    if (!t.path && (t.property === 'position' || t.property === 'quaternion') && constant(t)) return null;
     const node = find(t.path);
     if (!node) return null;
     if (t.property === 'morph') {
@@ -489,6 +497,31 @@ function nodeByPath(obj, path) {
   };
   return walk(obj) ?? (obj.children.length === 1 ? walk(obj.children[0]) : null);
 }
+/**
+ * Unity's built-in meshes, which the glb leaves out (3.70 Cambridge's owl eyes: glowing
+ * planes). Shapes as Unity builds them: plane 10x10 facing up, quad 1x1 facing -Z.
+ */
+const BUILTIN_GEOMETRY = {
+  plane: () => new THREE.PlaneGeometry(10, 10).rotateX(-Math.PI / 2),
+  quad: () => new THREE.PlaneGeometry(1, 1).rotateY(Math.PI),
+  cube: () => new THREE.BoxGeometry(1, 1, 1),
+  sphere: () => new THREE.SphereGeometry(0.5, 24, 16),
+  cylinder: () => new THREE.CylinderGeometry(0.5, 0.5, 2, 24),
+  capsule: () => new THREE.CapsuleGeometry(0.5, 1, 8, 16),
+};
+const builtinGeometries = new Map();
+function addBuiltinMeshes(obj, list) {
+  for (const b of list) {
+    const node = nodeByPath(obj, b.path);
+    if (!node || !BUILTIN_GEOMETRY[b.mesh]) continue; // its variant wasn't picked
+    if (!builtinGeometries.has(b.mesh)) builtinGeometries.set(b.mesh, BUILTIN_GEOMETRY[b.mesh]());
+    // Named like the glb's materials, so the library swaps in the real one below
+    const mesh = new THREE.Mesh(builtinGeometries.get(b.mesh), new THREE.MeshBasicMaterial({ name: b.materials[0] }));
+    mesh.name = `${node.name}_builtin`;
+    node.add(mesh);
+  }
+}
+
 function resolveMotionNode(obj, m) {
   return m.path ? nodeByPath(obj, m.path) : findNode(obj, m.node);
 }
@@ -729,6 +762,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   if (prefab.motions) applyMotions(obj, prefab.motions, variantSeed);
   else if (prefab.spinners) applyMotions(obj, prefab.spinners.map((sp) => ({ type: 'spin', ...sp })), variantSeed); // 0.1.7 manifests
   if (prefab.trails) applyTrails(obj, prefab.trails);
+  if (prefab.builtinMeshes) addBuiltinMeshes(obj, prefab.builtinMeshes);
   obj.traverse((o) => {
     if (!o.isMesh) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -957,6 +991,7 @@ function loadStudio() {
 }
 function saveStudio() {
   try {
+    localStorage.setItem(`studio-platforms:${ENV_ID}`, '1'); // lists saved from now on hold their platforms
     localStorage.setItem(`studio:${ENV_ID}`, JSON.stringify(state.studio));
   } catch {
     // storage full or blocked: placements still live for this session
@@ -1436,26 +1471,17 @@ const shuffle = () => {
 };
 const regen = () => rebuild();
 
-/** Where the auto run gets an obstacle kind: pillars from pillar halls, the rest from the game's chunks. */
-function fixSource(key) {
-  if (key === 'pillar') {
-    const gen = { ...state.gen, obstacles: { ...state.gen.obstacles, pillar: true } };
-    return itemsToStudio(generateLayout(manifest, state.theme, { ...state, obstacleMode: 'random', gen, trainTheme: trainTheme() }).items);
-  }
-  const mode = Object.keys(manifest.chunks ?? {}).length ? 'chunks' : 'random';
-  return itemsToStudio(currentLayout(mode).items);
-}
-
-/** Obstacle kinds the auto run has but the studio list lacks some of ("Fix …" buttons). */
+/** Pillar halls / stations of the run in the studio: the "Fix" buttons this map needs. */
 function fixables() {
-  // (game modes run between buildings: no pillar halls)
-  return FIXABLE.filter((key) => (key === 'pillar' ? isNormal() && hasSlot('boundary_pillars_mid') && hasSlot('obstacle_pillar') : fixSource(key).some((it) => it.type === 'obstacle' && it.key === key)));
+  const layout = currentLayout('studio');
+  return FIXABLE.filter((key) => wallItems(layout, key).length > 0);
 }
 
 /**
- * Puts back every obstacle of one kind (pillars, station platforms…) the auto run has at a
- * spot where the studio has none: as studio items, or (pillars, outside the studio) by
- * turning pillar obstacles on.
+ * "Fix pillars" / "Fix platforms": every pillar hall gets its middle-lane pillars, every
+ * station its platforms. Whatever stands where they go (trains, obstacles, older copies)
+ * is cleared first. Outside the studio, pillars come back by turning pillar obstacles on.
+ * Returns how many were put back.
  */
 function fixMissing(key) {
   if (key === 'pillar' && state.obstacleMode !== 'studio') {
@@ -1463,12 +1489,32 @@ function fixMissing(key) {
     generation.refresh();
     return regen();
   }
-  const has = (o) => state.studio.some((it) => it.type === 'obstacle' && it.key === key && Math.abs(it.lane - o.lane) < 1 && Math.abs(it.z - o.z) < 1);
-  const missing = fixSource(key).filter((it) => it.type === 'obstacle' && it.key === key && !has(it));
-  state.studio = [...state.studio, ...missing];
+  const wanted = wallItems(currentLayout('studio'), key);
+  const size = catalog().sizes?.[key];
+  const overlaps = (a0, a1, b0, b1) => a0 < b1 && b0 < a1;
+  // Spans of an item along its lane (trains: their tiles, start train: its wagon, obstacles: their footprint)
+  const spanOf = (it) => {
+    if (it.type === 'train' || it.type === 'noTracks') return [it.z0, it.z1];
+    if (it.type === 'startTrain') return [it.z - 30, it.z + 100];
+    const s = catalog().sizes?.[it.key];
+    return s ? [it.z + s.z0, it.z + s.z1] : [it.z - 5, it.z + 5];
+  };
+  // Where the new pieces stand: pillars in the middle lane, platforms over both outer tracks
+  const spots = wanted.map((w) =>
+    key === 'pillar'
+      ? { lanes: [0], z0: w.z + (size?.z0 ?? -22), z1: w.z + (size?.z1 ?? 24) }
+      : { lanes: [-20, 20], z0: w.z, z1: w.z + 180 },
+  );
+  const blocked = (it) => {
+    if (it.type === 'signal' || it.type === 'noTracks') return false;
+    if (it.type === 'obstacle' && it.key === key) return spots.some((sp) => overlaps(...spanOf(it), sp.z0, sp.z1));
+    const lane = it.lane ?? 0;
+    return spots.some((sp) => sp.lanes.includes(lane) && overlaps(...spanOf(it), sp.z0, sp.z1));
+  };
+  state.studio = [...state.studio.filter((it) => !blocked(it)), ...wanted];
   saveStudio();
   rebuild({ dynamicOnly: true });
-  return missing.length;
+  return wanted.length;
 }
 const catalog = () => studioCatalog(manifest, state.theme, trainTheme(), state.gen);
 const modes = gameModes(manifest);
@@ -1786,12 +1832,29 @@ async function enterStudio() {
     if (!state.studio.length) {
       state.studio = await runToStudio(state.obstacleMode);
       saveStudio();
-    }
+    } else migrateStudioPlatforms();
     state.obstacleMode = 'studio';
   }
   fly.enabled = orbit.enabled = false;
   document.body.classList.add('studio');
   rebuild().then(() => (studio.enter(), applyThemeLook(), applyBend()));
+}
+
+/**
+ * Station platforms became studio items (wiped and "fixed" like pillars). Lists saved
+ * before have none: they get the run's platforms once, so stations don't lose them.
+ */
+function migrateStudioPlatforms() {
+  const key = `studio-platforms:${ENV_ID}`;
+  try {
+    if (localStorage.getItem(key)) return;
+    localStorage.setItem(key, '1');
+  } catch {
+    return;
+  }
+  if (state.studio.some((it) => it.type === 'obstacle' && it.key === 'platform')) return;
+  state.studio = [...state.studio, ...wallItems(currentLayout('studio'), 'platform')];
+  saveStudio();
 }
 
 function exitStudio() {
