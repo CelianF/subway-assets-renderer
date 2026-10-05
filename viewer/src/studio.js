@@ -149,7 +149,18 @@ export function createStudio(ctx) {
     return `${KIND_LABELS[it.kind]}${variant} train, ${cars} car${cars > 1 ? 's' : ''}${ramp ? ' + ramp' : ''}`;
   }
 
-  function footprintOf(it, color = null, opacity = null) {
+  /**
+   * Ground rectangle an obstacle covers: its model's footprint around its spot (one cell
+   * when unknown). Pieces across the track (platforms, race arches) sit on the middle one.
+   */
+  function rectOf(it, cat = ctx.getCatalog()) {
+    const size = cat.sizes?.[it.key];
+    if (!size) return { x0: it.lane - 8.5, x1: it.lane + 8.5, z0: it.z - (CELL - 2) / 2, z1: it.z + (CELL - 2) / 2 };
+    return { x0: it.lane + size.x0, x1: it.lane + size.x1, z0: it.z + size.z0, z1: it.z + size.z1 };
+  }
+  const isTrainPiece = (key, cat) => cat.trainPieces?.includes(key);
+
+  function footprintOf(it, color = null, opacity = null, cat = ctx.getCatalog()) {
     let m;
     if (it.type === 'train') {
       m = flat(17, it.z1 - it.z0, color ?? COLORS.train, opacity ?? 0.35);
@@ -164,16 +175,18 @@ export function createStudio(ctx) {
       m = flat(17, 130, color ?? COLORS.train, opacity ?? 0.35);
       m.position.set(it.lane, 1, it.z + 35);
     } else {
-      m = flat(17, CELL - 2, color ?? COLORS.obstacle, opacity ?? 0.45);
-      m.position.set(it.lane, 1, it.z);
+      const r = rectOf(it, cat);
+      m = flat(Math.max(r.x1 - r.x0, 4), Math.max(r.z1 - r.z0, 4), color ?? (isTrainPiece(it.key, cat) ? COLORS.train : COLORS.obstacle), opacity ?? 0.45);
+      m.position.set((r.x0 + r.x1) / 2, 1, (r.z0 + r.z1) / 2);
     }
     return m;
   }
 
   function drawFootprints() {
     footprints.clear();
+    const cat = ctx.getCatalog();
     ctx.getList().forEach((it, i) => {
-      const m = i === selected && tool.type === 'edit' ? footprintOf(it, COLORS.selected, 0.55) : footprintOf(it);
+      const m = i === selected && tool.type === 'edit' ? footprintOf(it, COLORS.selected, 0.55, cat) : footprintOf(it, null, null, cat);
       footprints.add(m);
     });
   }
@@ -260,15 +273,20 @@ export function createStudio(ctx) {
 
   function itemAtPass(s, zonesOnly) {
     const list = ctx.getList();
+    const cat = ctx.getCatalog();
     for (let i = list.length - 1; i >= 0; i--) {
       const it = list[i];
       if ((it.type === 'noTracks') !== zonesOnly) continue;
       if (it.type === 'signal') {
         if (Math.abs(s.x - it.x) < 4 && cellOf(it.z) === s.cell) return i;
+      } else if (it.type === 'obstacle') {
+        // Anywhere on its footprint (at least its tile on its track)
+        const r = rectOf(it, cat);
+        const onTile = s.laneOk && it.lane === s.lane && cellOf(it.z) === s.cell;
+        if (onTile || (s.x >= r.x0 && s.x <= r.x1 && s.z >= r.z0 && s.z <= r.z1)) return i;
       } else if (s.laneOk && it.lane === s.lane) {
         if ((it.type === 'train' || it.type === 'noTracks') && s.z >= it.z0 && s.z < it.z1) return i;
         if (it.type === 'startTrain' && s.z >= it.z - 30 && s.z < it.z + 100) return i;
-        if (it.type === 'obstacle' && cellOf(it.z) === s.cell) return i;
       }
     }
     return -1;
@@ -350,6 +368,14 @@ export function createStudio(ctx) {
     }
     hover.visible = true;
     hover.material.color.set(COLORS.hover);
+    if (tool.type === 'obstacle') {
+      // The piece's real footprint where it would go
+      const cat = ctx.getCatalog();
+      const r = rectOf({ key: tool.key, lane: cat.sizes?.[tool.key]?.wide ? 0 : s.lane, z: s.cellZ + CELL / 2 }, cat);
+      hover.scale.set(Math.max(r.x1 - r.x0, 4) / 18, 1, Math.max(r.z1 - r.z0, 4) / (CELL - 1));
+      hover.position.set((r.x0 + r.x1) / 2, 1.5, (r.z0 + r.z1) / 2);
+      return;
+    }
     hover.scale.set(1, 1, 1);
     hover.position.set(s.lane, 1.5, s.cellZ + CELL / 2);
   }
@@ -408,10 +434,11 @@ export function createStudio(ctx) {
       });
       return commit([...rest, zone]);
     }
-    // Obstacles: max one of each kind per tile
-    const taken = list.some((it) => it.type === 'obstacle' && it.key === tool.key && it.lane === s.lane && cellOf(it.z) === s.cell);
+    // Obstacles: max one of each kind per tile; pieces across the track sit on the middle one
+    const lane = ctx.getCatalog().sizes?.[tool.key]?.wide ? 0 : s.lane;
+    const taken = list.some((it) => it.type === 'obstacle' && it.key === tool.key && it.lane === lane && cellOf(it.z) === s.cell);
     if (taken) return setInfo(`There is already a ${labelOf(tool.key, ctx.getCatalog()).toLowerCase()} on this tile`);
-    list.push({ type: 'obstacle', key: tool.key, lane: s.lane, z: s.cellZ + CELL / 2 });
+    list.push({ type: 'obstacle', key: tool.key, lane, z: s.cellZ + CELL / 2 });
     commit(list);
   }
 
@@ -515,10 +542,11 @@ export function createStudio(ctx) {
     if (mode === 'place') {
       const isTool = (type, extra = {}) => tool.type === type && Object.entries(extra).every(([k, v]) => tool[k] === v);
       const variants = tool.type === 'train' ? cat.variants[tool.kind] ?? [] : [];
-      const modeKeys = Object.keys(cat.modePieces);
+      const modeKeys = Object.keys(cat.modePieces).filter((k) => !cat.trainPieces.includes(k));
       const categories = [
         ['trains', '🚆 Trains', () => setTool({ type: 'train', kind: Object.keys(cat.trains)[0] ?? 'static', variant: 'auto', ramp: false })],
         ['obstacles', '🚧 Obstacles', () => setTool({ type: 'obstacle', key: Object.keys(cat.obstacles)[0] })],
+        ...(Object.keys(cat.walls).length ? [['walls', '🧱 Walls', () => setTool({ type: 'obstacle', key: Object.keys(cat.walls)[0] })]] : []),
         ...(cat.signal ? [['lights', '🚦 Lights', () => setTool({ type: 'signal', color: 'green' })]] : []),
         // The game mode's own pieces (moving/vanishing obstacles, hurdles, speed pads…)
         ...(modeKeys.length ? [['mode', cat.modeLabel, () => setTool({ type: 'obstacle', key: modeKeys[0] })]] : []),
@@ -530,8 +558,8 @@ export function createStudio(ctx) {
           btn(label, category === key, () => {
             category = key;
             // Keep the asset already chosen in that family, else its first one
-            const inFamily = { obstacles: cat.obstacles, mode: cat.modePieces }[key];
-            const keep = { trains: 'train', obstacles: 'obstacle', lights: 'signal', mode: 'obstacle' }[key] === placeTool.type && (!inFamily || placeTool.key in inFamily);
+            const family = familyOf(cat)[key];
+            const keep = key === 'trains' ? placeTool.type === 'train' || isTrainPiece(placeTool.key, cat) : key === 'lights' ? placeTool.type === 'signal' : placeTool.type === 'obstacle' && family?.includes(placeTool.key);
             if (keep) setTool(placeTool);
             else first();
           }),
@@ -553,6 +581,8 @@ export function createStudio(ctx) {
             : null,
         ),
       );
+      if (category === 'trains' && cat.trainPieces.length) rows.push(row('Platforms', ...cat.trainPieces.map((key) => btn(labelOf(key, cat), isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key })))));
+      if (category === 'walls') rows.push(row('Walls', ...Object.keys(cat.walls).map((key) => btn(LABELS[key] ?? key, isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key })))));
       if (category === 'obstacles') rows.push(row('Obstacles', ...Object.keys(cat.obstacles).map((key) => btn(LABELS[key] ?? key, isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key })))));
       if (category === 'mode') rows.push(row(cat.modeLabel, ...modeKeys.map((key) => btn(cat.modePieces[key], isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key })))));
       if (category === 'lights') rows.push(row('Lights', ...SIGNAL_TOOLS.map(([color, label]) => btn(label, isTool('signal', { color }), () => setTool({ type: 'signal', color })))));
@@ -608,6 +638,16 @@ export function createStudio(ctx) {
     return [modeSelect, skinSelect];
   }
 
+  /** Palette families of obstacle-like pieces, by category. */
+  function familyOf(cat) {
+    return {
+      trains: cat.trainPieces,
+      obstacles: Object.keys(cat.obstacles),
+      walls: Object.keys(cat.walls),
+      mode: Object.keys(cat.modePieces).filter((k) => !cat.trainPieces.includes(k)),
+    };
+  }
+
   const SIGNAL_TOOLS = [
     ['green', '🟢 Green'],
     ['red', '🔴 Red'],
@@ -622,9 +662,9 @@ export function createStudio(ctx) {
     if (!it) return row(el('span', { class: 'studio-info' }, 'Click a train, obstacle or light to change it'));
 
     if (it.type === 'obstacle') {
-      // A mode piece turns into the mode's other pieces, a regular obstacle into the others
-      const family = it.key in cat.modePieces ? cat.modePieces : cat.obstacles;
-      return row(...Object.keys(family).map((key) => btn(labelOf(key, cat), it.key === key, () => editObstacle(key))), del);
+      // A piece turns into the others of its family (obstacles, walls, platforms, mode pieces)
+      const family = Object.values(familyOf(cat)).find((keys) => keys.includes(it.key)) ?? Object.keys(cat.obstacles);
+      return row(...family.map((key) => btn(labelOf(key, cat), it.key === key, () => editObstacle(key))), del);
     }
     if (it.type === 'signal') {
       return row(...SIGNAL_TOOLS.map(([color, label]) => btn(label, (it.color ?? 'green') === color, () => replaceSelected({ ...it, color }))), del);
@@ -679,8 +719,8 @@ export function createStudio(ctx) {
     refresh() {
       if (!active) return;
       const cat = ctx.getCatalog();
-      const modeKeys = Object.keys(cat.modePieces);
-      const valid = tool.type !== 'obstacle' || tool.key in cat.obstacles || tool.key in cat.modePieces;
+      const modeKeys = familyOf(cat).mode;
+      const valid = tool.type !== 'obstacle' || Object.values(familyOf(cat)).some((keys) => keys.includes(tool.key));
       fixKeys = null;
       if (category === 'mode' && modeKeys.length && !(placeTool.key in cat.modePieces)) setTool({ type: 'obstacle', key: modeKeys[0] });
       else if (!valid || (category === 'mode' && !modeKeys.length)) {

@@ -20,7 +20,8 @@ function el(tag, attrs = {}, ...children) {
   for (const [k, v] of Object.entries(attrs)) {
     if (k === 'class') node.className = v;
     else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
-    else if (v != null) node.setAttribute(k, v);
+    else if (v === true) node.setAttribute(k, '');
+    else if (v != null && v !== false) node.setAttribute(k, v); // disabled="false" would still disable
   }
   node.append(...children.flat().filter((c) => c != null));
   return node;
@@ -378,7 +379,10 @@ async function openRemoteMaps() {
                   e.target.textContent = 'Queued';
                   m.pending = true;
                   const res = await fetch(`/api/remote/${encodeURIComponent(version)}/${encodeURIComponent(m.id)}`, { method: 'POST' });
-                  if (!res.ok) alert((await res.json().catch(() => ({}))).error ?? 'Could not queue it');
+                  if (!res.ok) return alert((await res.json().catch(() => ({}))).error ?? 'Could not queue it');
+                  // Its progress shows on the page, like an APK's
+                  close();
+                  $('upload').scrollIntoView({ behavior: 'smooth' });
                   watchJobs();
                 },
               },

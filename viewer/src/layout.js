@@ -357,6 +357,27 @@ function themeSlots(manifest, themeName, trainTheme, gen = null) {
 // Train skins share a slot: <Theme>_Train_Static_3_Cargo / _Standard / _Subway
 export const TRAIN_VARIANTS = { cargo: /_Cargo$/i, passenger: /_Standard$/i, subway: /_Subway$/i };
 
+// Studio "Walls": pieces across the track (station platforms cover both outer tracks)
+const STUDIO_WALLS = { pillar: true, platform: true };
+
+/**
+ * Footprint of each studio piece around its spot, from its model's bounds (glb space):
+ * { x0, x1, z0, z1, wide } (wide: spans the tracks, so it sits on the middle one).
+ * A vanishing piece shows the size of the piece under it.
+ */
+function pieceSizes(manifest, slots, keys) {
+  const out = {};
+  for (const key of keys) {
+    const slot = OBSTACLE_SLOTS[key] ?? key;
+    const bb = (slots[VANISH_BASE[slot] ?? slot] ?? []).map((n) => manifest.prefabs[n]?.bbox).find(Boolean);
+    if (!bb) continue;
+    const [[x0, , z0], [x1, , z1]] = bb;
+    // (ghost trails and glows can reach far: a piece is never longer than a 5-car train)
+    out[key] = { x0, x1, z0: Math.max(z0, -40), z1: Math.min(z1, 400), wide: x1 - x0 > 45 };
+  }
+  return out;
+}
+
 /** What the studio can place for this theme: obstacle tools and train kinds with their wagon counts. */
 export function studioCatalog(manifest, themeName, trainTheme = null, gen = null) {
   const slots = themeSlots(manifest, themeName, trainTheme, gen);
@@ -383,8 +404,12 @@ export function studioCatalog(manifest, themeName, trainTheme = null, gen = null
     variants: Object.fromEntries(Object.keys(trains).map((k) => [k, variantsOf(k)])),
     ramp: has('train_ramp'),
     startTrain: has('prop_train_start'),
-    // Pillars come with pillar halls: not a free-placement tool
-    obstacles: Object.fromEntries(Object.entries(OBSTACLE_SLOTS).filter(([k, slot]) => k !== 'pillar' && has(slot))),
+    obstacles: Object.fromEntries(Object.entries(OBSTACLE_SLOTS).filter(([k, slot]) => !(k in STUDIO_WALLS) && k !== 'trainPlatform' && has(slot))),
+    // Pieces that span the track: pillars, station platforms
+    walls: Object.fromEntries(Object.entries(OBSTACLE_SLOTS).filter(([k, slot]) => k in STUDIO_WALLS && has(slot))),
+    // Train platforms (the mode's moving / vanishing ones too) go with the trains
+    trainPieces: [...(has(OBSTACLE_SLOTS.trainPlatform) ? ['trainPlatform'] : []), ...Object.keys(modePieces).filter((k) => /train_platform$/.test(k))],
+    sizes: pieceSizes(manifest, slots, [...Object.keys(OBSTACLE_SLOTS), ...Object.keys(modePieces)]),
     signal: has('obstacle_lightSignal'),
     pillars: has('boundary_pillars_mid') && has('obstacle_pillar'),
     // Classic maps model their rails into the chunks: no track to take out
