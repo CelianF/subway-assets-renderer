@@ -3,7 +3,7 @@
 // bundle (themes-remote_assets_<city>_config) whose dependencies all ship in the APK. An
 // APK import keeps a "kit" per game version: the list of remote cities and those shared
 // bundles (~20 MB), so a remote map is one download plus the kit.
-//   <workspace>/remote/<version>/index.json   { version, savedAt, maps: [{ id, url, bundle }] }
+//   <workspace>/remote/<version>/index.json   { version, savedAt, maps: [{ id, address (sybo://…), bundle }] }
 //   <workspace>/remote/<version>/bundles/…    shared bundles from the APK
 import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -17,11 +17,15 @@ const CATALOG = 'assets/aa/catalog.json';
 const KIT_EXTRA = /^(gamemodes|common)-builtin_assets_|_monoscripts_|_unitybuiltinshaders_/;
 
 /**
- * Where a catalog's sybo:// address is served: SYBO's asset CDN ("Tower"), as the game's
- * CDN.URLForBundle builds it. Not confirmed yet: if SYBO serves bundles elsewhere, the
- * import fails with the address it tried.
+ * Where a catalog's sybo://<game>/<project>/<version>/<file> address is served: SYBO's asset
+ * CDN ("Tower"), with the game's CDN.URLForBundle template "{0}/{1}/{2}/bundle/{3}/{4}"
+ * (base, game, project, version, file).
  */
-export const remoteUrl = (internalId) => internalId.replace(/^sybo:\/\//, 'https://assets.tower.sybo.net/v1.0/');
+const CDN_BASE = 'https://assets.tower.sybo.net/v1.0';
+export function remoteUrl(internalId) {
+  const [game, project, version, ...file] = internalId.replace(/^sybo:\/\//, '').split('/');
+  return `${CDN_BASE}/${game}/${project}/bundle/${version}/${file.join('/')}`;
+}
 
 /** The APK files under assets/aa/ (an APKPure .zip/.xapk wraps the base APK). */
 function aaEntries(buf) {
@@ -56,7 +60,7 @@ export async function saveRemoteKit(apkPath, root) {
     // Only cities whose other bundles all ship in the APK can be rebuilt from one download
     if (remote.length !== 1 || bundles.some((b) => !b.startsWith('sybo://') && !files.has(path.basename(b)))) continue;
     for (const b of bundles) if (!b.startsWith('sybo://')) shared.add(path.basename(b));
-    maps.push({ id: theme.id, url: remoteUrl(remote[0]), bundle: path.basename(remote[0]) });
+    maps.push({ id: theme.id, address: remote[0], bundle: path.basename(remote[0]) });
   }
   const dir = path.join(root, version);
   await mkdir(path.join(dir, 'bundles'), { recursive: true });
@@ -67,7 +71,7 @@ export async function saveRemoteKit(apkPath, root) {
 
 const versionKey = (v) => v.split('.').map((n) => n.padStart(6, '0')).join('.');
 
-/** The newest kit's remote maps: { version, maps: [{ id, url, bundle }] } or null. */
+/** The newest kit's remote maps: { version, maps: [{ id, address, bundle }] } or null. */
 export async function latestKit(root) {
   if (!existsSync(root)) return null;
   const versions = (await readdir(root)).filter((v) => existsSync(path.join(root, v, 'index.json')));
@@ -87,8 +91,11 @@ export async function prepareRemoteMap(root, version, id, dir, onProgress = () =
   const input = path.join(dir, 'bundles');
   await mkdir(input, { recursive: true });
   let res;
+  // (kits saved before the address template was known kept a full url)
+  const url = map.address ? remoteUrl(map.address) : map.url.includes('/bundle/') ? map.url : remoteUrl(map.url.replace(`${CDN_BASE}/`, 'sybo://'));
+  map.url = url;
   try {
-    res = await fetch(map.url);
+    res = await fetch(url);
   } catch (e) {
     throw new Error(`Could not reach SYBO's server (${e.cause?.code ?? e.message}). Check your connection.`);
   }
