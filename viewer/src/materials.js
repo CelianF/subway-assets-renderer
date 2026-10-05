@@ -247,6 +247,11 @@ uniform sampler2D uMaskTex;
 uniform vec2 uResolution;
 uniform vec4 uUvWobble; // 1.x water: x amplitude, x frequency, y amplitude, y frequency
 uniform vec2 uUvWobbleSpeed;
+#ifdef WATER_DISTORT
+uniform sampler2D uDisplaceTex; // Specials/Water: a scrolling noise ripples the texture
+uniform vec2 uDisplaceScroll;
+uniform float uDisplaceStrength;
+#endif
 varying vec2 vUv;
 varying float vDepth;
 varying vec3 vNormalV;
@@ -281,6 +286,9 @@ ${CUT_MAIN}
 #ifdef UV_WOBBLE
   uv.x += sin(vUv.y * uUvWobble.y * 6.2832 + uTime * uUvWobbleSpeed.x) * uUvWobble.x;
   uv.y += sin(vUv.x * uUvWobble.w * 6.2832 + uTime * uUvWobbleSpeed.y) * uUvWobble.z * 0.1;
+#endif
+#ifdef WATER_DISTORT
+  uv += (texture2D(uDisplaceTex, vUv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5) * uDisplaceStrength;
 #endif
   vec4 c = texture2D(uMap, uv);
   vec3 base = c.rgb;
@@ -633,6 +641,10 @@ export class MaterialLibrary {
     if (defines.REFLECTIONS !== undefined && def.textures._RefCube?.cubeStrip) defines.CUBE_STRIP = '';
     if (defines.CUBE_STRIP !== undefined && f._DistortedReflect) defines.DISTORTED_REFLECT = '';
     if (f._WaterWave) Object.assign(defines, { WATER_WAVE: '', UV_WOBBLE: '' });
+    // SYBO/Bend/Specials/Water (Ireland's river and sea): the texture scrolls by
+    // _TextureScrollSpeed, rippled by a scrolling _DisplaceTex, always tinted by _Color
+    const water = def.shader === 'SYBO/Bend/Specials/Water';
+    if (water) Object.assign(defines, { SCROLL: '', WATER_DISTORT: '', TINT: '' });
     // Only the shared foam texture is a channel-packed mask; themed fountain textures are color
     if (/_Common_FountainTexture/i.test(main?.url ?? '')) defines.MASK_TEXTURE = '';
     const altTex = this.tex(def, '_AlternateTex');
@@ -660,7 +672,10 @@ export class MaterialLibrary {
         uColor: { value: tint },
         uColor2: { value: color4(c._Color2) },
         uMultiplier: { value: f._Multiplier ?? 1 },
-        uScroll: { value: new THREE.Vector2(c._ScrollSpeed?.[0] ?? 0, c._ScrollSpeed?.[1] ?? 0) },
+        uScroll: { value: new THREE.Vector2(...((water ? c._TextureScrollSpeed : c._ScrollSpeed) ?? [0, 0]).slice(0, 2)) },
+        uDisplaceTex: { value: water ? this.tex(def, '_DisplaceTex') ?? WHITE : WHITE },
+        uDisplaceScroll: { value: new THREE.Vector2(...(c._DisplaceScrollSpeed ?? [0, 0]).slice(0, 2)) },
+        uDisplaceStrength: { value: f._DisplaceStrength ?? 0 },
         uRefTex: { value: refTex ?? WHITE },
         uRefColor: { value: color4(c._RefColor, [1, 1, 1, 0]) },
         uRimColor: { value: color4(c._RimColor) },
