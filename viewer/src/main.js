@@ -10,6 +10,7 @@ import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, 
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
+import { createTime, createTimeDeck } from './time.js';
 import { addCredit } from './credit.js';
 import { attachParticles, updateParticles, setWeather, setWeatherVisible, setWeatherCover } from './particles.js';
 
@@ -2177,6 +2178,9 @@ const openGeneration = () => (view.close(), generation.toggle());
 const openView = () => (generation.close(), view.toggle());
 const openStudio = () => (studio.active ? exitStudio() : enterStudio());
 
+const time = createTime();
+const timeDeck = createTimeDeck(document.getElementById('ui'), time);
+
 const ui = createUI(manifest, {
   getState: () => state,
   env: envInfo,
@@ -2192,6 +2196,7 @@ const ui = createUI(manifest, {
   openGeneration,
   openView,
   openStudio,
+  timeButton: timeDeck.button,
   // The header's Back button while a bar or the studio is open
   closePanels: () => (generation.close(), view.close(), studio.active && exitStudio()),
   shotOptions,
@@ -2264,13 +2269,15 @@ if (params.get('z')) {
   camera.lookAt(orbit.target);
 }
 setControlMode(state.controls);
-window.__viewer = { motions, fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild };
+window.__viewer = { time, motions, fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild };
 await rebuild();
 
+// Scene time runs on the time deck's clock (frozen, slowed, stepped); a hitch (hidden tab)
+// counts as a tenth of a second at most
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  const now = clock.getElapsedTime();
-  const dt = now - globals.uTime.value;
+  const dt = time.tick(Math.min(clock.getDelta(), 0.1));
+  const now = time.now;
   globals.uTime.value = now;
   updateMeshAnimations(now);
   updateAnimators(dt);

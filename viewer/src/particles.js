@@ -847,19 +847,26 @@ export function setWeatherVisible(visible) {
   if (weather) weather.root.visible = visible;
 }
 
+const MAX_STEP = 0.05; // longest single simulation step (s)
+
 /** Steps and uploads every live emitter near the camera; drops those of removed pieces. */
 export function updateParticles(dt, camera) {
   const cam = camera.getWorldPosition(new THREE.Vector3());
   const at = new THREE.Vector3();
-  dt = Math.min(dt, 0.1);
+  // Sped-up time runs in several steps; frozen time runs none (particles hold still)
+  const steps = Math.ceil(dt / MAX_STEP);
+  const h = steps ? dt / steps : 0;
+  const run = (e) => {
+    for (let n = 0; n < steps; n++) e.step(h);
+  };
   for (const e of emitters) {
     if (e.weather) {
       // Just ahead of and above the camera, where the flakes are seen
       const ahead = camera.getWorldDirection(at).setY(0).normalize().multiplyScalar(60);
       e.spawnOffset.copy(cam).add(ahead).add(new THREE.Vector3(0, 30, 0));
       for (const part of e.parts ?? [e]) part.object.visible = e.root.visible;
-      if (e.root.visible) {
-        e.step(dt);
+      if (e.root.visible && steps) {
+        run(e);
         e.upload();
       }
       continue;
@@ -878,12 +885,14 @@ export function updateParticles(dt, camera) {
     const near = at.distanceTo(cam) < ACTIVE_DISTANCE;
     for (const part of e.parts ?? [e]) part.object.visible = near;
     if (!near) continue;
+    let fresh = false;
     if (!e.warmed) {
       // Looping systems start full, as if they had been running (sub-emitters follow their parent)
-      e.warmed = true;
+      e.warmed = fresh = true;
       if (e.def.loop && !e.sources) e.advance(Math.min(e.def.duration + (e.def.lifetime?.max ?? 0), 20));
     }
-    e.step(dt);
+    if (!steps && !fresh) continue;
+    run(e);
     e.upload();
   }
 }

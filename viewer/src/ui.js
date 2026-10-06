@@ -34,6 +34,7 @@ export const prettyTheme = (t) => t.replace(/^\d+\.\d+_/, '').replace(/([a-z])([
  * @param manifest viewer manifest
  * @param actions { getState, env, inspect(names), exitInspect, screenshot() -> {blob, name, width, height},
  *                   thumbnail() -> dataURL, saveThumbnail(dataURL), openGeneration, openView, openStudio,
+ *                   timeButton: toolbar button of the time deck (time.js),
  *                   shotOptions: settings.js controls }
  */
 export function createUI(manifest, actions) {
@@ -189,6 +190,10 @@ export function createUI(manifest, actions) {
           ['Mouse wheel', 'Field of view'],
           ['1 / 2 / 3', 'Generation / View / Studio'],
           ['Esc', 'Close the open bar'],
+          ['T', 'Time controls'],
+          ['F', 'Freeze / play'],
+          ['. (Shift)', 'Next frame (10 frames)'],
+          ['[ / ]', 'Slower / faster'],
           ['Tab', 'Hide / show the interface'],
           ['P', 'Screenshot'],
           ...(DEBUG ? [['B', 'Piece browser']] : []),
@@ -241,6 +246,7 @@ export function createUI(manifest, actions) {
       el('button', { title: 'Seed, game mode, map sections and building pieces (1)', onclick: () => actions.openGeneration() }, '🗺 Generation'),
       el('button', { title: 'Camera, fog, skyline, bend and materials (2)', onclick: () => actions.openView() }, '🎨 View'),
       el('button', { title: 'Place trains and obstacles yourself (3)', onclick: () => actions.openStudio() }, '✏️ Studio'),
+      actions.timeButton ?? null,
       // Piece browser: a debug tool, only with ?debug=true
       DEBUG ? el('button', { title: 'Piece browser (B)', onclick: () => toggleBrowser() }, '🧱 Pieces') : null,
     ),
