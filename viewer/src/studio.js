@@ -770,6 +770,8 @@ export function createStudio(ctx) {
       return active;
     },
     camera: cam,
+    /** The bottom palette: other bars (time) stack on top of it while the studio is open. */
+    palette,
     enter() {
       active = true;
       overlay.visible = true;

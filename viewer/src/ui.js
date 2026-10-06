@@ -190,7 +190,7 @@ export function createUI(manifest, actions) {
           ['Mouse wheel', 'Field of view'],
           ['1 / 2 / 3', 'Generation / View / Studio'],
           ['Esc', 'Close the open bar'],
-          ['T', 'Time controls'],
+          ['4 / T', 'Time'],
           ['F', 'Freeze / play'],
           ['. (Shift)', 'Next frame (10 frames)'],
           ['[ / ]', 'Slower / faster'],

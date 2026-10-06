@@ -58,31 +58,43 @@ export function createTime() {
 }
 
 /**
- * Floating transport bar (top right), opened from the toolbar's Time button or T.
- * Stays up over the work bars and the studio, so a shot can be framed while frozen.
- * @returns {{ button, toggle(show?) }}
+ * Bottom work bar like Generation, View and Studio, opened from the toolbar's Time button
+ * (T / 4). In the studio it stacks on top of the studio's palette, so a shot can be framed
+ * there while frozen.
+ * @param host () => element the bar joins instead of standing alone (the studio palette), or null
+ * @param onOpen called before it opens (closes the other bars)
+ * @returns {{ button, open(), close(), toggle(), place() }}
  */
-export function createTimeDeck(root, time) {
+export function createTimeDeck(root, time, { host = () => null, onOpen = null } = {}) {
   const play = el('button', { class: 'time-play', onclick: () => time.toggle() });
-  const step = el('button', { title: 'Next frame (.) — Shift: 10 frames', onclick: (e) => time.step(e.shiftKey ? 10 : 1) }, '⏭');
+  const step = el('button', { title: 'Next frame (.) — Shift: 10 frames', onclick: (e) => time.step(e.shiftKey ? 10 : 1) }, '⏭ Frame');
   const speeds = SPEEDS.map((s) => el('button', { class: 'tool', onclick: () => time.setSpeed(s) }, label(s)));
   const clock = el('span', { class: 'time-clock' });
-  const deck = el(
+  const bar = el(
     'div',
-    { class: 'time-deck hidden' },
-    play,
-    step,
-    el('span', { class: 'time-sep' }),
-    el('button', { title: 'Slower ([)', onclick: () => time.shift(-1) }, '−'),
-    el('div', { class: 'time-speeds' }, speeds),
-    el('button', { title: 'Faster (])', onclick: () => time.shift(1) }, '+'),
-    el('span', { class: 'time-sep' }),
-    clock,
-    el('button', { class: 'icon', title: 'Close (T)', onclick: () => toggle(false) }, '✕'),
+    { class: 'studio-bar time-bar' },
+    el(
+      'div',
+      { class: 'studio-row' },
+      el('strong', { class: 'workbar-title' }, 'Time'),
+      play,
+      step,
+      el('span', { class: 'studio-label' }, 'Speed'),
+      el('button', { title: 'Slower ([)', onclick: () => time.shift(-1) }, '−'),
+      speeds,
+      el('button', { title: 'Faster (])', onclick: () => time.shift(1) }, '+'),
+      el('span', { class: 'studio-sep' }),
+      clock,
+      el('button', { class: 'primary', title: 'Close (T)', onclick: () => close() }, 'Done'),
+    ),
   );
-  // Toolbar button: shows the clock's state while the deck is closed
-  const button = el('button', { title: 'Freeze, slow down, speed up or step time (T)', onclick: () => toggle() });
-  root.append(deck);
+  // Standing alone: its own bottom palette, like the other work bars
+  const palette = el('div', { class: 'studio-palette hidden' });
+  root.append(palette);
+  let shown = false;
+  let alone = false; // shown on its own (not in the studio)
+  // Toolbar button: shows the clock's state while the bar is closed
+  const button = el('button', { title: 'Freeze, slow down, speed up or step time (4)', onclick: () => toggle() });
 
   function render() {
     play.textContent = time.paused ? '▶ Play' : '❄ Freeze';
@@ -94,12 +106,32 @@ export function createTimeDeck(root, time) {
   }
   // The scene clock, to the frame (60 a second at 1×)
   function renderClock() {
-    if (!deck.classList.contains('hidden')) clock.textContent = `${time.now.toFixed(3)} s · f${Math.floor(time.now / FRAME + 1e-6)}`;
+    if (shown) clock.textContent = `${time.now.toFixed(3)} s · f${Math.floor(time.now / FRAME + 1e-6)}`;
     requestAnimationFrame(renderClock);
   }
-  function toggle(show = deck.classList.contains('hidden')) {
-    deck.classList.toggle('hidden', !show);
+  /** Puts the bar where it belongs now: on top of the studio palette, or alone. */
+  function place() {
+    const into = shown ? host() : null;
+    if (into) into.prepend(bar);
+    else palette.append(bar);
+    palette.classList.toggle('hidden', !shown || !!into);
+    // Alone it's a work bar: the toolbar steps aside as for the others
+    const now = shown && !into;
+    if (now !== alone) document.body.classList.toggle('workbar-open', (alone = now));
   }
+  function open() {
+    if (shown) return;
+    onOpen?.();
+    shown = true;
+    place();
+  }
+  function close() {
+    if (!shown) return;
+    shown = false;
+    bar.remove();
+    place();
+  }
+  const toggle = () => (shown ? close() : open());
   time.onChange(render);
   render();
   renderClock();
@@ -107,12 +139,12 @@ export function createTimeDeck(root, time) {
   addEventListener('keydown', (e) => {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.code === 'KeyT') toggle();
+    if (e.code === 'KeyT' || e.code === 'Digit4') toggle();
     else if (e.code === 'KeyF') time.toggle();
     else if (e.code === 'Period') time.step(e.shiftKey ? 10 : 1);
     else if (e.code === 'BracketLeft') time.shift(-1);
     else if (e.code === 'BracketRight') time.shift(1);
   });
 
-  return { button, toggle };
+  return { button, open, close, toggle, place, isOpen: () => shown };
 }

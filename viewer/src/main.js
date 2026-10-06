@@ -2133,6 +2133,7 @@ async function studioFootprints() {
 async function enterStudio() {
   generation.close();
   view.close();
+  timeDeck.place();
   if (state.obstacleMode !== 'studio') {
     // Start from the run on screen when nothing was placed yet
     if (!state.studio.length) {
@@ -2144,7 +2145,7 @@ async function enterStudio() {
   await studioFootprints();
   fly.enabled = orbit.enabled = false;
   document.body.classList.add('studio');
-  rebuild().then(() => (studio.enter(), applyThemeLook(), applyBend()));
+  rebuild().then(() => (studio.enter(), timeDeck.place(), applyThemeLook(), applyBend()));
 }
 
 /**
@@ -2166,6 +2167,7 @@ function migrateStudioPlatforms() {
 
 function exitStudio() {
   studio.exit();
+  timeDeck.place();
   applyThemeLook();
   applyBend();
   document.body.classList.remove('studio');
@@ -2173,13 +2175,15 @@ function exitStudio() {
   view.refresh();
 }
 
-// The toolbar's three work modes: one open at a time
-const openGeneration = () => (view.close(), generation.toggle());
-const openView = () => (generation.close(), view.toggle());
+// The toolbar's work modes: one open at a time (Time also stacks on the studio's palette)
+const openGeneration = () => (view.close(), timeDeck.close(), generation.toggle());
+const openView = () => (generation.close(), timeDeck.close(), view.toggle());
 const openStudio = () => (studio.active ? exitStudio() : enterStudio());
-
 const time = createTime();
-const timeDeck = createTimeDeck(document.getElementById('ui'), time);
+const timeDeck = createTimeDeck(document.getElementById('ui'), time, {
+  host: () => (studio.active ? studio.palette : null),
+  onOpen: () => (generation.close(), view.close()),
+});
 
 const ui = createUI(manifest, {
   getState: () => state,
@@ -2198,7 +2202,7 @@ const ui = createUI(manifest, {
   openStudio,
   timeButton: timeDeck.button,
   // The header's Back button while a bar or the studio is open
-  closePanels: () => (generation.close(), view.close(), studio.active && exitStudio()),
+  closePanels: () => (generation.close(), view.close(), timeDeck.close(), studio.active && exitStudio()),
   shotOptions,
   thumbnail: themeThumbnail,
   saveThumbnail: async (dataUrl) => {
@@ -2236,7 +2240,7 @@ const debugMenu = createSettings(
   { title: 'Debug' },
 );
 
-// Tab hides / shows the whole interface; 1 / 2 / 3 open Generation, View and Studio
+// Tab hides / shows the whole interface; 1 / 2 / 3 open Generation, View and Studio (4 / T: Time, time.js)
 addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -2257,6 +2261,7 @@ addEventListener('keydown', (e) => {
     generation.close();
     view.close();
     debugMenu.close();
+    if (!studio.active) timeDeck.close();
   }
 });
 
