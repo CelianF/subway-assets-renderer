@@ -525,13 +525,17 @@ function parseChunk(file, guidIndex, { aliases = true } = {}) {
  * on its own and lists an idle one. The chase mode's vanishing objects idle until the runner
  * comes near, then play their dissolve (the component's default); its moving blockers have
  * an empty idle and stand where their drop ends: `hold` keeps the default clip's last pose.
+ * `reveal`: the clip a posed idle gives way to when the runner comes near (3.70 No Floor's
+ * moving blockers: raised, then FloorIsLava_Blockers_drops), for the viewer's second state.
  */
 function legacyClip(doc, guidIndex) {
   const fallback = guidIndex.get(doc.match(/\n {2}m_Animation: \{[^}]*guid: (\w+)/)?.[1]);
   if (!/m_PlayAutomatically: 0/.test(doc)) return { clip: fallback, hold: false };
   const list = doc.match(/\n {2}m_Animations:\n((?:\s+- .*\n)*)/)?.[1] ?? '';
   const idle = [...list.matchAll(GUID_RE_G)].map((g) => guidIndex.get(g[1])).find((p) => p && /idle/i.test(stem(p)));
-  if (idle && existsSync(idle) && /\n\s+path: /.test(read(idle))) return { clip: idle, hold: false };
+  if (idle && existsSync(idle) && /\n\s+path: /.test(read(idle))) {
+    return { clip: idle, hold: false, reveal: fallback && fallback !== idle && existsSync(fallback) ? fallback : null };
+  }
   return { clip: fallback, hold: !!idle };
 }
 
@@ -1036,11 +1040,30 @@ function parseAnimators(file, guidIndex) {
   // plays them on a trigger or at spawn; here they loop, holding the last frame a moment.
   // Clips that sweep a trail are laid down by parseTrails instead.
   const trailed = new Set(parseTrails(file, guidIndex).map((t) => t.animation.node));
+  // Clips a script plays on its Animations when the runner comes near (3.70 No Floor's
+  // MovingBlocker: _entries' Animations idle, then _revealAnimation drops them)
+  const scriptReveal = new Map();
   for (const { doc, kind } of docs) {
+    const reveal = kind === '114' && guidIndex.get(doc.match(/\n {2}_revealAnimation: \{[^}]*guid: (\w+)/)?.[1]);
+    if (!reveal) continue;
+    for (const [, fid] of doc.matchAll(/\n\s+- Animation: \{fileID: (\d+)/g)) scriptReveal.set(fid, reveal);
+  }
+  for (const { doc, kind, fid } of docs) {
     if (kind !== '111') continue;
     const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
-    const { clip, hold } = legacyClip(doc, guidIndex);
+    const legacy = legacyClip(doc, guidIndex);
+    const { clip, hold } = legacy;
+    const reveal = legacy.reveal ?? (scriptReveal.get(fid) !== clip && existsSync(scriptReveal.get(fid) ?? '') ? scriptReveal.get(fid) : null);
     if (!names.has(go) || trailed.has(names.get(go)) || !clip || !existsSync(clip)) continue;
+    // The second state, played once: { duration, tracks } (the viewer holds either end or loops)
+    let revealed = null;
+    if (reveal) {
+      const rtext = read(reveal);
+      const rstop = Number(rtext.match(/m_StopTime: ([\d.eE+-]+)/)?.[1] ?? 0);
+      const rtracks = new Map();
+      if (rstop > 0) sampleClipTracks(rtext, rstop, rstop, 0, rtracks, FPS);
+      if (rtracks.size) revealed = { duration: round(rstop, 4), tracks: [...rtracks.values()] };
+    }
     const text = read(clip);
     const lastKey = Math.max(0, ...[...text.matchAll(/\n\s+time: ([\d.eE+-]+)/g)].map(([, t]) => Number(t)));
     const stop = Math.max(Number(text.match(/m_StopTime: ([\d.eE+-]+)/)?.[1] ?? 0), lastKey);
@@ -1055,7 +1078,7 @@ function parseAnimators(file, guidIndex) {
         t.values = t.values.slice(-n).concat(t.values.slice(-n));
         t.times = [0, 1];
       }
-      out.push({ node: names.get(go), duration: 1, tracks: [...tracks.values()] });
+      out.push({ node: names.get(go), duration: 1, tracks: [...tracks.values()], ...(revealed ? { reveal: revealed } : {}) });
       continue;
     }
     const looping = /m_LoopTime: 1/.test(text) || /m_WrapMode: 2/.test(doc);
@@ -1065,7 +1088,7 @@ function parseAnimators(file, guidIndex) {
       t.times.push(round(duration, 4));
       t.values.push(...t.values.slice(-n));
     }
-    out.push({ node: names.get(go), duration: round(duration, 4), tracks: [...tracks.values()] });
+    out.push({ node: names.get(go), duration: round(duration, 4), tracks: [...tracks.values()], ...(revealed ? { reveal: revealed } : {}) });
   }
   return out;
 }
@@ -2853,6 +2876,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       mkdirSync(path.join(out, 'anim'), { recursive: true });
       writeFileSync(path.join(out, 'anim', `${name}.json`), JSON.stringify(animators));
       info.animators = `anim/${name}.json`;
+      // Two states the viewer can show (raised / dropped) or play between
+      if (animators.some((a) => a.reveal)) info.reveal = true;
     }
     const trails = parseTrails(prefabPath, guidIndex);
     if (trails.length) {

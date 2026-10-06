@@ -12,6 +12,8 @@ const ZONE_WIDTH = 62; // full-width zones: across the three tracks
 // Full-width zones the map offers (ctx.zoneKinds): an event challenge (Green Jam,
 // Christmas) or the No Floor mode's activated floor (spiked vines, hot lava)
 const FULL_ZONES = ['challenge', 'surge'];
+// Two-state pieces (No Floor's moving blockers): as they wait, as the runner meets them, or both in turn
+const PIECE_STATES = [['idle', '⬆ Raised'], ['revealed', '⬇ Dropped'], ['animated', '▶ Animated']];
 // A challenge zone's runner: the game's left is +X
 const RUNNER_LANES = [[20, '⬅ Left'], [0, 'Center'], [-20, 'Right ➡']];
 const LANES = [20, 0, -20]; // left, middle, right (glTF X; the game's left is +X)
@@ -514,7 +516,8 @@ export function createStudio(ctx) {
     const lane = ctx.getCatalog().sizes?.[tool.key]?.wide ? 0 : s.lane;
     const taken = list.some((it) => it.type === 'obstacle' && it.key === tool.key && it.lane === lane && cellOf(it.z) === s.cell);
     if (taken) return setInfo(`There is already a ${labelOf(tool.key, ctx.getCatalog()).toLowerCase()} on this tile`);
-    list.push({ type: 'obstacle', key: tool.key, lane, z: s.cellZ + CELL / 2 });
+    const state = ctx.getCatalog().statePieces?.includes(tool.key) ? { state: tool.state ?? 'revealed' } : {};
+    list.push({ type: 'obstacle', key: tool.key, lane, z: s.cellZ + CELL / 2, ...state });
     commit(list);
   }
 
@@ -702,7 +705,13 @@ export function createStudio(ctx) {
       if (category === 'trains' && cat.trainPieces.length) rows.push(row('Platforms', ...cat.trainPieces.map((key) => btn(labelOf(key, cat), isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key })))));
       if (category === 'walls') rows.push(row('Walls', ...Object.keys(cat.walls).map((key) => btn(LABELS[key] ?? key, isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key })))));
       if (category === 'obstacles') rows.push(row('Obstacles', ...Object.keys(cat.obstacles).map((key) => btn(LABELS[key] ?? key, isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key })))));
-      if (category === 'mode') rows.push(row(cat.modeLabel, ...modeKeys.map((key) => btn(cat.modePieces[key], isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key })))));
+      if (category === 'mode') {
+        rows.push(row(cat.modeLabel, ...modeKeys.map((key) => btn(cat.modePieces[key], isTool('obstacle', { key }), () => setTool({ type: 'obstacle', key, state: tool.state ?? 'revealed' })))));
+        // Two-state pieces (No Floor's blockers): raised, dropped or dropping over and over
+        if (tool.type === 'obstacle' && cat.statePieces?.includes(tool.key)) {
+          rows.push(row('State', ...PIECE_STATES.map(([state, label]) => btn(label, (tool.state ?? 'revealed') === state, () => setTool({ ...tool, state })))));
+        }
+      }
       if (category === 'lights') rows.push(row('Lights', ...SIGNAL_TOOLS.map(([color, label]) => btn(label, isTool('signal', { color }), () => setTool({ type: 'signal', color })))));
     } else if (mode === 'edit' && selected >= 0) {
       rows.push(editRow(cat, btn, select));
@@ -816,7 +825,10 @@ export function createStudio(ctx) {
     if (it.type === 'obstacle') {
       // A piece turns into the others of its family (obstacles, walls, platforms, mode pieces)
       const family = Object.values(familyOf(cat)).find((keys) => keys.includes(it.key)) ?? Object.keys(cat.obstacles);
-      return row(...family.map((key) => btn(labelOf(key, cat), it.key === key, () => editObstacle(key))), del);
+      const states = cat.statePieces?.includes(it.key)
+        ? [el('span', { class: 'studio-label' }, 'State'), ...PIECE_STATES.map(([state, label]) => btn(label, (it.state ?? 'revealed') === state, () => replaceSelected({ ...it, state })))]
+        : [];
+      return row(...family.map((key) => btn(labelOf(key, cat), it.key === key, () => editObstacle(key))), ...states, del);
     }
     if (it.type === 'signal') {
       return row(...SIGNAL_TOOLS.map(([color, label]) => btn(label, (it.color ?? 'green') === color, () => replaceSelected({ ...it, color }))), del);

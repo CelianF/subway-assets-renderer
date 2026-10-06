@@ -168,6 +168,28 @@ function activeMode(manifest, gen) {
   return { mode, overrides: mode.overrides[skin] ?? {} };
 }
 
+/** Slots whose pieces show their second state by default (animState 'revealed'). */
+const DROPPED_SLOTS = /^nf_moving_obstacle_/;
+
+/** Height the game modes' chunks give a slot (the commonest), 0 if they never place it. */
+const modeHeights = new WeakMap();
+function modeHeight(manifest, slot) {
+  if (!modeHeights.has(manifest)) {
+    const counts = new Map(); // slot -> Map(y -> n)
+    for (const mode of Object.values(manifest.modes ?? {})) {
+      for (const chunk of Object.values(mode.chunks ?? {})) {
+        for (const pl of chunk.placements ?? []) {
+          const ys = counts.get(pl.slot) ?? counts.set(pl.slot, new Map()).get(pl.slot);
+          const y = Math.round(pl.pos[1] * 100) / 100;
+          ys.set(y, (ys.get(y) ?? 0) + 1);
+        }
+      }
+    }
+    modeHeights.set(manifest, new Map([...counts].map(([k, ys]) => [k, [...ys].sort((a, b) => b[1] - a[1])[0][0]])));
+  }
+  return modeHeights.get(manifest).get(slot) ?? 0;
+}
+
 /** Layer a chunk slot goes on: train-shaped pieces hide with the trains. */
 const layerOf = (slot) =>
   slot === 'obstacle_lightSignal' ? 'signal' : /^(train_|nf_falling_train|ct_vanish_obstacles_(moving_)?train(_\d)?$)/.test(slot) ? 'train' : 'obstacle';
@@ -463,6 +485,8 @@ export function studioCatalog(manifest, themeName, trainTheme = null, gen = null
     tracks: !slots.classic_chunk?.length,
     modeLabel,
     modePieces,
+    // Pieces with two states (raised / dropped) the studio can show or animate
+    statePieces: Object.keys(modePieces).filter((slot) => (slots[slot] ?? []).some((n) => manifest.prefabs[n]?.reveal)),
     modes: gameModes(manifest),
   };
 }
@@ -521,6 +545,8 @@ export function generateLayout(
     const { prefab, variants } = gen.showcase ? choose(key, showcaseList(list)) : { prefab: choose(key, list), variants: null };
     // Per-instance seed for the prefab's random variant groups ("mode": a game mode's own piece)
     const own = slot in modeSlots ? { mode: true } : {};
+    // No Floor's blockers drop as the runner comes near: shown dropped, as it meets them
+    if (DROPPED_SLOTS.test(slot)) own.animState = 'revealed';
     items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(placeRng() * 2 ** 31), ...(variants ? { variants } : {}), ...own, ...extra });
     return prefab;
   };
@@ -966,12 +992,14 @@ export function generateLayout(
         // Regular obstacles by tool key, a game mode's pieces by slot
         const slot = OBSTACLE_SLOTS[it.key] ?? it.key;
         const layer = layerOf(slot);
-        const extra = { ...(it.scale ? { scale: it.scale } : {}), ...(layer === 'train' ? { group: `studio${it.lane}@${it.z}` } : {}) };
+        const extra = { ...(it.scale ? { scale: it.scale } : {}), ...(it.state ? { animState: it.state } : {}), ...(layer === 'train' ? { group: `studio${it.lane}@${it.z}` } : {}) };
+        // A game mode's piece stands where the mode's chunks put it (No Floor's blockers: on the roofs)
+        const y = it.y ?? (it.key in OBSTACLE_SLOTS ? 0 : modeHeight(manifest, slot));
         const base = VANISH_BASE[slot];
         if (it.key === 'powerBox') powerBoxCluster(it.lane, it.z);
         // Height and scale kept from the game's chunks (a barrier on a train roof, small bushes)
-        else place(slot, [it.lane, it.y ?? 0, it.z], layer, extra);
-        if (base) place(base, [it.lane, it.y ?? 0, it.z], layerOf(base), { ...extra, ...(layerOf(base) === 'train' ? { group: `studio${it.lane}@${it.z}` } : {}) });
+        else place(slot, [it.lane, y, it.z], layer, extra);
+        if (base) place(base, [it.lane, y, it.z], layerOf(base), { ...extra, ...(layerOf(base) === 'train' ? { group: `studio${it.lane}@${it.z}` } : {}) });
       }
     }
     placeRng = rng;

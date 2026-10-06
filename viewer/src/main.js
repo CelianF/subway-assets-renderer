@@ -361,15 +361,47 @@ async function applyMorphMeshes(obj, list) {
   }
 }
 
-async function applyAnimators(obj, url, seed) {
+/**
+ * Plays a prefab's baked animations. Those with a second state (`reveal`: No Floor's
+ * blockers drop when the runner comes near) show `state`: 'idle' (raised), 'revealed'
+ * (dropped, still) or 'animated' (raised, the drop, dropped, over and over).
+ */
+async function applyAnimators(obj, url, seed, state = null) {
   if (!animatorFiles.has(url)) animatorFiles.set(url, fetch(dataUrl(url)).then((r) => r.json()).catch(() => []));
   const rng = mulberry32(seed ^ 0x616e696d);
-  for (const anim of await animatorFiles.get(url)) {
+  for (const base of await animatorFiles.get(url)) {
+    const anim = base.reveal && (state === 'revealed' || state === 'animated') ? revealClip(base) : base;
     const mixer = animationMixer(obj, anim);
     if (!mixer) continue;
-    mixer.setTime(rng() * anim.duration);
+    if (anim === base) mixer.setTime(rng() * anim.duration);
+    else if (state === 'revealed') {
+      mixer.setTime(anim.dropped); // still: not stepped
+      continue;
+    } else mixer.setTime(rng() * anim.duration);
     mixers.add({ root: obj, mixer });
   }
+}
+
+/** The idle pose held, the reveal played, its end held: one looping clip; `dropped`: its end. */
+const REVEAL_HOLD = 1.5;
+function revealClip(anim) {
+  const r = anim.reveal;
+  const end = REVEAL_HOLD + r.duration;
+  const duration = end + REVEAL_HOLD;
+  const idle = new Map(anim.tracks.map((t) => [`${t.path}|${t.property}`, t]));
+  const first = (t) => t.values.slice(0, t.values.length / t.times.length);
+  const last = (t) => t.values.slice(-t.values.length / t.times.length);
+  const tracks = r.tracks.map((t) => {
+    const from = idle.get(`${t.path}|${t.property}`) ?? t;
+    return {
+      ...t,
+      times: [0, ...t.times.map((x) => x + REVEAL_HOLD), duration],
+      values: [...first(from), ...t.values, ...last(t)],
+    };
+  });
+  // The idle's other tracks stay as they are
+  for (const [key, t] of idle) if (!r.tracks.some((u) => `${u.path}|${u.property}` === key)) tracks.push(t.times.length > 1 ? { ...t, times: [0, duration], values: [...first(t), ...first(t)] } : t);
+  return { node: anim.node, duration, tracks, dropped: end };
 }
 
 /** A playing mixer for a baked clip ({ node, duration, tracks }) under obj, or null. */
@@ -754,7 +786,7 @@ function applyMaterial(mesh, mat) {
 }
 
 /** Instantiates a prefab (or one of its runtime track configs) with manifest materials. */
-async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null, signalColor = null, cutMode = null, worldZ = 0, variants = null) {
+async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null, signalColor = null, cutMode = null, worldZ = 0, variants = null, animState = null) {
   // Rails hide inside studio "no tracks" zones; fill ground only shows inside them
   const cut = layer === 'track' ? (cutMode === 'inside' ? 2 : 1) : 0;
   const prefab = manifest.prefabs[name];
@@ -799,7 +831,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   if (prefab.randomizers) applyRandomizers(obj, prefab.randomizers, variantSeed, name, variants);
   if (prefab.skinned) await applySkinned(obj, prefab.skinned);
   if (prefab.morphMeshes) await applyMorphMeshes(obj, prefab.morphMeshes);
-  if (prefab.animators) await applyAnimators(obj, prefab.animators, variantSeed);
+  if (prefab.animators) await applyAnimators(obj, prefab.animators, variantSeed, animState);
   if (prefab.meshAnimations) await applyMeshAnimations(obj, prefab.meshAnimations, variantSeed);
   if (prefab.motions) applyMotions(obj, prefab.motions, variantSeed, prefab.bbox);
   else if (prefab.spinners) applyMotions(obj, prefab.spinners.map((sp) => ({ type: 'spin', ...sp })), variantSeed); // 0.1.7 manifests
@@ -1080,7 +1112,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
   const objs = await Promise.all(
     items.map(async (it) => {
       try {
-        const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed, it.signalSeed, it.signalColor, it.cut, it.pos[2], it.variants);
+        const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed, it.signalSeed, it.signalColor, it.cut, it.pos[2], it.variants, it.animState);
         if (obj) {
           obj.position.set(...it.pos);
           if (it.scale) obj.scale.setScalar(it.scale);
