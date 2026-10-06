@@ -41,16 +41,22 @@ function aaEntries(buf) {
   return null;
 }
 
+const isVersion = (v) => /^\d+(\.\d+)+$/.test(v ?? '');
+
 /**
  * Saves the remote-map kit of an APK. Returns { version, maps } or null when the APK has
- * no Addressables catalog (games before remote cities).
+ * no Addressables catalog (games before remote cities) or no known game version.
+ * `sourceName`: the APK's file name, for the version when the bundles don't give it.
  */
-export async function saveRemoteKit(apkPath, root) {
+export async function saveRemoteKit(apkPath, root, sourceName = '') {
   const entries = aaEntries(await readFile(apkPath));
   const catalogEntry = entries?.find((e) => e.name === CATALOG);
   if (!catalogEntry) return null;
   const files = new Map(entries.map((e) => [path.basename(e.name), e]));
-  const version = entries.map((e) => e.name.match(/^assets\/aa\/Android\/([^/]+)\//)?.[1]).find(Boolean);
+  // 3.70 keeps its bundles under assets/aa/Android/<version>/; 3.19 keeps them in Android/
+  // itself, next to a countryflags-builtin_assets_assets/ folder: then the APK's name tells
+  const folder = entries.map((e) => e.name.match(/^assets\/aa\/Android\/([^/]+)\//)?.[1]).find(isVersion);
+  const version = folder ?? sourceName.match(/(?:^|[_+\s-])(\d+\.\d+(?:\.\d+)?)(?=[-_+\s(]|\.(?:apk|xapk|zip)$|$)/i)?.[1];
   if (!version) return null;
   const catalog = parseCatalog(JSON.parse(catalogEntry.data.toString('utf8')));
   const maps = [];
@@ -75,7 +81,8 @@ const versionKey = (v) => v.split('.').map((n) => n.padStart(6, '0')).join('.');
 /** The newest kit's remote maps: { version, maps: [{ id, address, bundle }] } or null. */
 export async function latestKit(root) {
   if (!existsSync(root)) return null;
-  const versions = (await readdir(root)).filter((v) => existsSync(path.join(root, v, 'index.json')));
+  // (a folder that isn't a version: a kit saved under a bundle folder's name before 0.2.3)
+  const versions = (await readdir(root)).filter((v) => isVersion(v) && existsSync(path.join(root, v, 'index.json')));
   if (!versions.length) return null;
   const version = versions.sort((a, b) => versionKey(b).localeCompare(versionKey(a)))[0];
   return JSON.parse(await readFile(path.join(root, version, 'index.json'), 'utf8'));

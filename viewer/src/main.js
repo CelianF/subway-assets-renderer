@@ -5,7 +5,7 @@ import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
-import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setReversedDepth, texturesReady } from './materials.js';
+import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setAltZones, setReversedDepth, texturesReady } from './materials.js';
 import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
@@ -1006,7 +1006,6 @@ const state = {
   skylineDistance: 1,
   obstacleMode: params.get('obstacleMode') ?? 'random',
   inspect: params.get('prefab')?.split(',') ?? null, // prefab names shown alone, or null for the run
-  altColors: Number(params.get('altColors') ?? 0),
   camera: params.get('cam') ?? 'game',
   controls: 'fly',
   cutaway: false,
@@ -1105,6 +1104,8 @@ async function rebuild({ dynamicOnly = false } = {}) {
     }
   }
   if (!only && !dynamicOnly) await addThemeEffects(length, id);
+  await placeChallenge(length, id); // (studio zones change with the items: every rebuild)
+  if (!only) await placeFloor(length, id);
   updateVisibility();
   applyBend();
   const missing = objs.filter(([, o]) => !o).length;
@@ -1127,7 +1128,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
 async function addThemeEffects(length, id) {
   for (const effect of manifest.themeConfigs?.[state.theme]?.effects ?? []) {
     const prefab = manifest.prefabs[effect.prefab];
-    if (!prefab?.glb || !effect.segments.length) continue;
+    if (!prefab?.glb || !effect.segments.length || effect === challengeEffect() || effect === floorEffect()) continue;
     const root = await loadGlb(prefab.glb);
     if (id !== buildId) return;
     const segment = root.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(effect.segments[0]));
@@ -1138,6 +1139,118 @@ async function addThemeEffects(length, id) {
       copy.position.set(0, segment.position.y, z);
       layers.effect.add(copy);
     }
+  }
+}
+
+/**
+ * Event challenges (3.19 New York Play2Plant's Green Jam, St Petersburg's Christmas): while
+ * one runs, a trail (grass, snow) grows under the runner and the city takes its challenge
+ * look (green instead of grey, Christmas decorations). Auto runs show it all along; the
+ * studio places it in zones.
+ */
+const CHALLENGE_LABELS = { ThemeEffectGreenJam: '🌱 Green Jam', ThemeEffectChristmas: '🎄 Christmas' };
+const challengeEffect = () => (manifest.themeConfigs?.[state.theme]?.effects ?? []).find((e) => e.segments?.length && e.script in CHALLENGE_LABELS);
+const challengeGroup = new THREE.Group();
+scene.add(challengeGroup);
+let challengeSegment = null; // { theme, node }: the trail piece, loaded once
+
+/** [z0, z1) zones where the challenge shows, or null when the map has none. */
+function challengeZones(length) {
+  if (!challengeEffect() || state.inspect) return null;
+  if (state.obstacleMode !== 'studio') return [[0, length]];
+  return state.studio.filter((it) => it.type === 'challenge').map((it) => [it.z0, it.z1]).sort((a, b) => a[0] - b[0]);
+}
+
+/** The challenge trail tiled over its zones, and the city's look switched inside them. */
+async function placeChallenge(length, id) {
+  const zones = challengeZones(length);
+  setAltZones(zones);
+  challengeGroup.clear();
+  const effect = zones && challengeEffect();
+  if (!effect) return;
+  if (challengeSegment?.theme !== state.theme) {
+    const prefab = manifest.prefabs[effect.prefab];
+    const root = prefab?.glb ? await loadGlb(prefab.glb) : null;
+    const node = root?.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(effect.segments[0]));
+    if (id !== buildId) return;
+    node?.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
+    challengeSegment = { theme: state.theme, node };
+  }
+  const node = challengeSegment.node;
+  if (!node) return;
+  for (const [z0, z1] of zones) {
+    for (let z = z0; z < z1; z += effect.segmentSize) {
+      const copy = node.clone();
+      copy.position.set(0, node.position.y, z);
+      challengeGroup.add(copy);
+    }
+  }
+}
+
+/**
+ * The No Floor ground (3.70 Floor Is Lava's lava, Plant Invasion's vines): its default state
+ * along the run, and in the No Floor mode its activated state (spiked vines, hotter lava with
+ * a stronger ripple) in the studio's "surge" zones. Re-laid on every rebuild, as zones change.
+ */
+const floorEffect = () => (manifest.themeConfigs?.[state.theme]?.effects ?? []).find((e) => e.segments?.length && e.activated);
+const surgeEffect = () => (state.gen.mode === 'noFloor' ? floorEffect() : null);
+const surgeLabel = (effect) => (effect.activated.mesh ? '🌿 Vine spikes' : '🔥 Hot lava');
+const floorGroup = new THREE.Group();
+let floorTemplate = null; // { theme, normal, active, table }: one segment in each state
+
+async function loadFloorTemplate(effect) {
+  const prefab = manifest.prefabs[effect.prefab];
+  const root = prefab?.glb ? await loadGlb(prefab.glb) : null;
+  const segment = root?.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(effect.segments[0]));
+  if (!segment) return null;
+  // Each state keeps its own particles (…_Default / …_Active); colliders aren't drawn
+  const strip = (drop) => {
+    const copy = segment.clone();
+    const doomed = [];
+    copy.traverse((o) => o !== copy && drop.test(o.name) && doomed.push(o));
+    for (const o of doomed) o.removeFromParent();
+    copy.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
+    return copy;
+  };
+  const normal = strip(/_Active$|^Collider$/);
+  const active = strip(/_Default$|^Collider$/);
+  const { mesh, meshGlb, colors, meshDisplace } = effect.activated;
+  const geometry = mesh && meshGlb ? await particleMesh(meshGlb) : null;
+  active.traverse((o) => {
+    if (!o.isMesh || o.userData.particles) return;
+    if (geometry && (o === active || o.parent === active)) o.geometry = geometry;
+    if (colors || meshDisplace != null) {
+      // Its own material: the activated colors and ripple
+      o.material = o.material.clone();
+      const u = o.material.uniforms;
+      if (u && colors) for (const k of ['R', 'G', 'B']) if (u[`uColor${k}`] && colors[k]) u[`uColor${k}`] = { value: new THREE.Vector3(...colors[k].slice(0, 3)) };
+      if (u?.uMeshDisplace && meshDisplace != null) u.uMeshDisplace = { value: meshDisplace };
+    }
+  });
+  const table = prefab.particles ? sanitizedTable(Object.entries(prefab.particles)) : null;
+  return { theme: state.theme, normal, active, table };
+}
+
+async function placeFloor(length, id) {
+  floorGroup.clear();
+  if (!floorGroup.parent) layers.effect.add(floorGroup);
+  const effect = floorEffect();
+  if (!effect || state.inspect) return;
+  if (floorTemplate?.theme !== state.theme) {
+    const template = await loadFloorTemplate(effect);
+    if (id !== buildId) return;
+    floorTemplate = template;
+  }
+  if (!floorTemplate) return;
+  const zones = surgeEffect() && state.obstacleMode === 'studio' ? state.studio.filter((it) => it.type === 'surge') : [];
+  const { normal, active, table } = floorTemplate;
+  for (let z = -effect.segmentSize; z < length + effect.segmentSize; z += effect.segmentSize) {
+    const mid = z + effect.segmentSize / 2;
+    const copy = (zones.some((zone) => mid >= zone.z0 && mid < zone.z1) ? active : normal).clone();
+    copy.position.set(0, normal.position.y, z);
+    floorGroup.add(copy);
+    if (table && state.particles) await attachParticles(copy, table, materials, (n) => nodeKey(table, n), particleMesh);
+    if (id !== buildId) return;
   }
 }
 
@@ -1237,13 +1350,65 @@ function themeWeather() {
 }
 let weatherTheme = null;
 
+/**
+ * The theme's own effect that follows the runner while running (ThemeEffectFollowPlayer:
+ * Vancouver Autumn's falling leaves, Transylvania's frost): it stands in for the start-train
+ * weather above. Placed every frame at its offset from where the runner would be (the game
+ * camera rides 33 behind and above it); its world-space particles stay put as it moves,
+ * and come at the camera at the run speed, as the runner runs into them.
+ */
+const followEffectsOf = (theme) => (manifest.themeConfigs?.[theme]?.effects ?? []).filter((e) => e.follow && manifest.prefabs[e.prefab]?.glb);
+let followFx = []; // { obj, effect, particles } per effect
+let followToken = 0;
+async function setFollowEffects(effects) {
+  const token = ++followToken;
+  for (const fx of followFx) fx.obj.removeFromParent();
+  followFx = [];
+  for (const effect of effects) {
+    const prefab = manifest.prefabs[effect.prefab];
+    const obj = (await loadGlb(prefab.glb)).clone();
+    if (token !== followToken) return;
+    // Meshes too (3.19 Underwater World's light rays), with their materials
+    obj.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
+    scene.add(obj);
+    if (prefab.particles) {
+      // (made with particles off too: shown once they're on)
+      const table = sanitizedTable(Object.entries(prefab.particles));
+      const emitters = await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
+      for (const e of emitters) {
+        if (e.def.local) continue;
+        e.worldLock = { pos: new THREE.Vector3(), ready: false };
+        // The runner runs into them: they come at the camera at the run speed
+        e.drift = new THREE.Vector3(0, 0, -RUN_SPEED).applyQuaternion(e.node.getWorldQuaternion(new THREE.Quaternion()).invert());
+      }
+    }
+    followFx.push({ obj, effect, particles: !!prefab.particles });
+  }
+  placeFollowEffects();
+  applyThemeLook();
+}
+const RUNNER_AHEAD = 33; // camConfig_Run: the camera sits (0, 33, -33) from the runner
+function placeFollowEffects() {
+  const cam = camera.position;
+  for (const { obj, effect } of followFx) {
+    const [ox, oy, oz] = effect.follow.offset;
+    obj.position.set(effect.follow.zOnly ? ox : cam.x + ox, oy, cam.z + RUNNER_AHEAD + oz);
+  }
+}
+
 function applyThemeLook() {
   const cfg = manifest.themeConfigs?.[state.theme] ?? {};
+  const weatherOn = state.particles && state.weather && !state.inspect && !studio?.active;
   if (weatherTheme !== state.theme) {
     weatherTheme = state.theme;
-    setWeather(scene, themeWeather(), materials, particleMesh);
+    const follow = followEffectsOf(state.theme);
+    // The start-train snow or leaves stand in when the theme has no falling effect of its own
+    setWeather(scene, follow.some((e) => manifest.prefabs[e.prefab].particles) ? null : themeWeather(), materials, particleMesh);
+    setFollowEffects(follow);
   }
-  setWeatherVisible(state.particles && state.weather && !state.inspect && !studio?.active);
+  const effectsOn = state.weather && !state.inspect && !studio?.active;
+  for (const fx of followFx) fx.obj.visible = effectsOn && (state.particles || !fx.particles);
+  setWeatherVisible(weatherOn);
   // No fog/skyline while inspecting: the camera frames pieces from far away
   // (nor in the studio's top view, 600 units above the run)
   setFog(cfg.fog, state.fog && !state.inspect && !studio?.active, state.fogScale);
@@ -1260,7 +1425,6 @@ function applyThemeLook() {
   }
   skylineGroup.visible = state.skyline && state.skylineOpacity > 0 && !state.inspect;
   skylineUniforms.uOpacity.value = state.skylineOpacity;
-  globals.uAltRatio.value = state.altColors;
 }
 
 /**
@@ -1584,7 +1748,7 @@ function fixMissing(key) {
       : { lanes: [-20, 20], z0: w.z, z1: w.z + 180 },
   );
   const blocked = (it) => {
-    if (it.type === 'signal' || it.type === 'noTracks') return false;
+    if (it.type === 'signal' || it.type === 'noTracks' || it.type === 'challenge' || it.type === 'surge') return false; // (zones stay)
     if (it.type === 'obstacle' && it.key === key) return spots.some((sp) => overlaps(...spanOf(it), sp.z0, sp.z1));
     const lane = it.lane ?? 0;
     return spots.some((sp) => sp.lanes.includes(lane) && overlaps(...spanOf(it), sp.z0, sp.z1));
@@ -1780,7 +1944,7 @@ const view = createWorkbar(
           title: 'Particles',
           controls: [
             { type: 'toggle', label: 'Smoke, glows, sparks', obj: state, key: 'particles', onChange: () => (rebuild(), applyThemeLook()) },
-            { type: 'toggle', label: 'Snow or leaves along the run', obj: state, key: 'weather', visible: () => !!themeWeather(), onChange: applyThemeLook },
+            { type: 'toggle', label: 'Weather & effects along the run', obj: state, key: 'weather', visible: () => !!(followEffectsOf(state.theme).length || themeWeather()), onChange: applyThemeLook },
           ],
         },
       ],
@@ -1808,10 +1972,6 @@ const view = createWorkbar(
         {
           title: 'Glass',
           controls: [{ type: 'slider', label: 'Opacity', obj: state, key: 'glass', min: 0, max: 1, step: 0.01, onChange: (v) => materials.setGlassOpacity(v) }],
-        },
-        {
-          title: 'Alternate colors (New York)',
-          controls: [{ type: 'slider', label: 'Amount', obj: state, key: 'altColors', min: 0, max: 1, step: 0.01, onChange: (v) => (globals.uAltRatio.value = v) }],
         },
       ],
     },
@@ -1857,6 +2017,12 @@ const studio = createStudio({
     rebuild({ dynamicOnly: true });
   },
   fromRun: () => runToStudio(),
+  // Full-width zone tools: the event challenge (Green Jam, Christmas), and in the No Floor
+  // mode only, the activated floor
+  zoneKinds: () => [
+    ...(challengeEffect() ? [{ type: 'challenge', label: CHALLENGE_LABELS[challengeEffect().script] }] : []),
+    ...(surgeEffect() ? [{ type: 'surge', label: surgeLabel(surgeEffect()) }] : []),
+  ],
   getMode: () => ({ mode: state.gen.mode, skin: state.gen.skin ?? skinsOf()[0]?.[0] ?? null, skins: skinsOf() }),
   setMode: (key, skin) => setGameMode(key, skin),
   fixables: () => fixables(),
@@ -1871,11 +2037,17 @@ const studio = createStudio({
   getFocusZ: () => camera.position.z + camera.getWorldDirection(new THREE.Vector3()).z * 150,
 });
 
+/** The auto run as studio items, its challenge zone included (over the whole run, as auto runs show it). */
+async function runToStudio(mode = 'random') {
+  const items = await runToStudioItems(mode);
+  return challengeEffect() ? [...items, { type: 'challenge', z0: 0, z1: Math.round(runLength) }] : items;
+}
+
 /**
  * The auto-generated run as studio items. Classic chunks pick their trains and obstacles
  * when instantiated, so those are read from the chunks as the run lays them out.
  */
-async function runToStudio(mode = 'random') {
+async function runToStudioItems(mode) {
   const items = currentLayout(mode).items;
   const chunks = items.filter((it) => manifest.prefabs[it.prefab]?.chunk);
   if (!chunks.length) return itemsToStudio(items);
@@ -2059,6 +2231,7 @@ renderer.setAnimationLoop(() => {
   globals.uTime.value = now;
   updateMeshAnimations(now);
   updateAnimators(dt);
+  placeFollowEffects();
   updateParticles(dt, studio.active ? studio.camera : camera);
   if (orbit.enabled) orbit.update();
   fly.update();

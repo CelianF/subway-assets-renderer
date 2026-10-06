@@ -8,6 +8,10 @@ import { fitTrain, trainLength, RAMP_LENGTH, FIX_LABELS } from './layout.js';
 // away so stations and tunnels don't hide the tracks.
 
 const CELL = 11.25;
+const ZONE_WIDTH = 62; // full-width zones: across the three tracks
+// Full-width zones the map offers (ctx.zoneKinds): an event challenge (Green Jam,
+// Christmas) or the No Floor mode's activated floor (spiked vines, hot lava)
+const FULL_ZONES = ['challenge', 'surge'];
 const LANES = [20, 0, -20]; // left, middle, right (glTF X; the game's left is +X)
 const SIGNAL_X = [30, 10, -10, -30]; // outer left edge, between tracks, outer right edge
 const CLIP_HEIGHT = 34;
@@ -18,6 +22,8 @@ const COLORS = {
   obstacle: 0xffb020,
   signal: { green: 0x3ddc84, red: 0xff4d4d, off: 0x9aa5b5 },
   noTracks: 0xff4d4d,
+  challenge: 0x4cd964,
+  surge: 0xff7a1a,
   hover: 0xffffff,
   remove: 0xff3030,
   selected: 0xffffff,
@@ -127,7 +133,7 @@ export function createStudio(ctx) {
   /** Only the spots the current tool can use. */
   function updateSpotVisibility() {
     if (!laneSpots) return;
-    laneSpots.visible = ['train', 'obstacle', 'noTracks'].includes(tool.type);
+    laneSpots.visible = ['train', 'obstacle', 'noTracks', ...FULL_ZONES].includes(tool.type);
     signalSpots.visible = tool.type === 'signal';
   }
 
@@ -166,6 +172,9 @@ export function createStudio(ctx) {
     } else if (it.type === 'noTracks') {
       m = flat(19, it.z1 - it.z0, color ?? COLORS.noTracks, opacity ?? 0.25);
       m.position.set(it.lane, 0.8, (it.z0 + it.z1) / 2);
+    } else if (FULL_ZONES.includes(it.type)) {
+      m = flat(ZONE_WIDTH, it.z1 - it.z0, color ?? COLORS[it.type], opacity ?? 0.16);
+      m.position.set(0, 0.6, (it.z0 + it.z1) / 2);
     } else if (it.type === 'signal') {
       m = flat(5, 5, color ?? COLORS.signal[it.color ?? 'green'], opacity ?? 0.85);
       m.position.set(it.x, 1, it.z);
@@ -217,6 +226,7 @@ export function createStudio(ctx) {
     if (it.type === 'obstacle') return labelOf(it.key, ctx.getCatalog());
     if (it.type === 'signal') return `Signal light (${it.color ?? 'green'})`;
     if (it.type === 'noTracks') return `No tracks zone, ${Math.round((it.z1 - it.z0) / CELL)} tiles`;
+    if (FULL_ZONES.includes(it.type)) return `${zoneLabel(it.type)} zone, ${Math.round((it.z1 - it.z0) / CELL)} tiles`;
     return it.type;
   }
 
@@ -274,8 +284,10 @@ export function createStudio(ctx) {
     const cat = ctx.getCatalog();
     for (let i = list.length - 1; i >= 0; i--) {
       const it = list[i];
-      if ((it.type === 'noTracks') !== zonesOnly) continue;
-      if (it.type === 'signal') {
+      if (isZone(it) !== zonesOnly) continue;
+      if (FULL_ZONES.includes(it.type)) {
+        if (s.z >= it.z0 && s.z < it.z1) return i; // across the whole width
+      } else if (it.type === 'signal') {
         if (Math.abs(s.x - it.x) < 4 && cellOf(it.z) === s.cell) return i;
       } else if (it.type === 'obstacle') {
         // Anywhere on its footprint (at least its tile on its track)
@@ -289,6 +301,9 @@ export function createStudio(ctx) {
     }
     return -1;
   }
+
+  const isZone = (it) => it.type === 'noTracks' || FULL_ZONES.includes(it.type);
+  const zoneLabel = (type) => ctx.zoneKinds?.().find((k) => k.type === type)?.label ?? type;
 
   /** [z0, z1] a two-click tool covers between the first click and this spot. */
   function spanTo(s) {
@@ -339,6 +354,16 @@ export function createStudio(ctx) {
       hover.material.color.set(COLORS.signal[tool.color]);
       hover.scale.set(0.3, 1, 0.5);
       hover.position.set(s.signalX, 1.5, s.cellZ + CELL / 2);
+      return;
+    }
+    if (FULL_ZONES.includes(tool.type)) {
+      const range = pending ? spanTo(s) : { z0: s.cellZ, z1: s.cellZ + CELL };
+      span.visible = true;
+      span.material.color.set(COLORS[tool.type]);
+      span.scale.set(ZONE_WIDTH / 17, 1, range.z1 - range.z0);
+      span.position.set(0, 1.4, (range.z0 + range.z1) / 2);
+      const tiles = Math.round((range.z1 - range.z0) / CELL);
+      setInfo(pending ? `${zoneLabel(tool.type)} over ${tiles} tiles · click the end (Esc cancels)` : `Click where the ${zoneLabel(tool.type)} zone starts`);
       return;
     }
     if (!s.laneOk) return;
@@ -402,6 +427,23 @@ export function createStudio(ctx) {
       if (i >= 0) list[i] = { ...list[i], color: tool.color };
       else list.push({ type: 'signal', x: s.signalX, z: s.cellZ + CELL / 2, color: tool.color });
       return commit(list);
+    }
+    if (FULL_ZONES.includes(tool.type)) {
+      if (!pending) {
+        pending = { lane: 0, cellZ: s.cellZ };
+        return setInfo('Zone start set: click its end');
+      }
+      const { z0, z1 } = spanTo(s);
+      pending = null;
+      span.visible = false;
+      // Overlapping zones merge into one
+      let zone = { type: tool.type, z0, z1 };
+      const rest = list.filter((it) => {
+        if (it.type !== zone.type || !overlaps(zone.z0, zone.z1, it.z0 - 0.1, it.z1 + 0.1)) return true;
+        zone = { ...zone, z0: Math.min(zone.z0, it.z0), z1: Math.max(zone.z1, it.z1) };
+        return false;
+      });
+      return commit([...rest, zone]);
     }
     if (!s.laneOk) return;
     if (tool.type === 'train' || tool.type === 'noTracks') {
@@ -505,7 +547,7 @@ export function createStudio(ctx) {
   ctx.root.append(palette);
 
   function setTool(t) {
-    if (!['edit', 'remove', 'noTracks'].includes(t.type)) placeTool = t;
+    if (!['edit', 'remove', 'noTracks', ...FULL_ZONES].includes(t.type)) placeTool = t;
     tool = t;
     pending = null;
     selected = -1;
@@ -521,7 +563,8 @@ export function createStudio(ctx) {
     ['remove', '🗑 Remove'],
     ['noTracks', '🚧 Remove track'],
   ];
-  const modeOf = (t) => (['edit', 'remove', 'noTracks'].includes(t.type) ? t.type : 'place');
+  const modeOf = (t) => (['edit', 'remove', 'noTracks', ...FULL_ZONES].includes(t.type) ? t.type : 'place');
+  const modesOf = (cat) => [...MODES.filter(([m]) => m !== 'noTracks' || cat.tracks !== false), ...(ctx.zoneKinds?.() ?? []).map((k) => [k.type, `${k.label} zone`])];
 
   let fixKeys = null; // "Fix …" buttons for this map (the auto run's layout, worked out once)
   let toolsOpen = false; // the tools menu of the main bar
@@ -599,13 +642,15 @@ export function createStudio(ctx) {
       edit: 'Click a train, obstacle or light to change it',
       remove: 'Click something to remove it',
       noTracks: 'Click the start then the end of a stretch of track',
+      challenge: 'Click the start then the end of the stretch where the challenge runs',
+      surge: 'Click the start then the end of the stretch where the floor is activated',
     };
     if (!info.textContent || info.dataset.mode !== mode) {
       info.textContent = hints[mode];
       info.dataset.mode = mode;
     }
     // Tools (modes) and run-wide actions behind one button: it shows the current tool
-    const current = MODES.find(([m]) => m === mode);
+    const current = modesOf(cat).find(([m]) => m === mode);
     const pickTool = (m) => {
       toolsOpen = false;
       setTool(m === 'place' ? placeTool : { type: m });
@@ -618,7 +663,7 @@ export function createStudio(ctx) {
     const toolsMenu = el(
       'div',
       { class: `studio-menu ${toolsOpen ? '' : 'hidden'}` },
-      ...MODES.filter(([m]) => m !== 'noTracks' || cat.tracks !== false).map(([m, label]) => btn(label, mode === m, () => pickTool(m), m === 'remove' ? 'danger' : '')),
+      ...modesOf(cat).map(([m, label]) => btn(label, mode === m, () => pickTool(m), m === 'remove' ? 'danger' : '')),
       el('hr'),
       // Obstacles the auto run has and the studio list may lack (pillars, platforms…)
       ...fixKeys.map((key) =>
@@ -743,6 +788,8 @@ export function createStudio(ctx) {
       const modeKeys = familyOf(cat).mode;
       const valid = tool.type !== 'obstacle' || Object.values(familyOf(cat)).some((keys) => keys.includes(tool.key));
       fixKeys = null;
+      // A zone tool the new mode doesn't offer (the activated floor outside No Floor)
+      if (FULL_ZONES.includes(tool.type) && !ctx.zoneKinds?.().some((k) => k.type === tool.type)) tool = placeTool;
       if (category === 'mode' && modeKeys.length && !(placeTool.key in cat.modePieces)) setTool({ type: 'obstacle', key: modeKeys[0] });
       else if (!valid || (category === 'mode' && !modeKeys.length)) {
         category = 'trains';

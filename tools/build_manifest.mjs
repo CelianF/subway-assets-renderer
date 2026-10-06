@@ -641,6 +641,32 @@ function parseModes(find, guidIndex, log) {
   return modes;
 }
 
+/**
+ * No Floor effects (ThemeEffectNoFloor, …FloorIsLava) switch between a default and an
+ * "activated" state during the mode: Plant Invasion's vines swap to a spiked mesh, Floor Is
+ * Lava's lava to hotter colors and a stronger ripple. Its particles are named for their
+ * state (…_Default / …_Active, SpikesCutting). Returns what the activated state changes.
+ */
+function parseNoFloorStates(doc, guidIndex) {
+  const meshName = (key) => {
+    const g = doc.match(new RegExp(`\\n {2}${key}: \\{fileID: \\d+, guid: (\\w+)`))?.[1];
+    return g && guidIndex.has(g) ? stem(guidIndex.get(g)) : null;
+  };
+  const color = (key) => {
+    const m = doc.match(new RegExp(`\\n {2}${key}: \\{r: ([-\\d.e]+), g: ([-\\d.e]+), b: ([-\\d.e]+), a: ([-\\d.e]+)\\}`));
+    return m ? m.slice(1, 5).map(num) : null;
+  };
+  const strength = (key) => doc.match(new RegExp(`\\n {2}${key}: ([-\\d.e]+)`))?.[1];
+  const out = {};
+  const mesh = meshName('_meshActivated');
+  if (mesh && mesh !== meshName('_meshDefault')) out.mesh = mesh;
+  if (color('_activatedColorR')) {
+    out.colors = { R: color('_activatedColorR'), G: color('_activatedColorG'), B: color('_activatedColorB') };
+  }
+  if (strength('_activatedMeshDisplaceStrength') != null) out.meshDisplace = num(strength('_activatedMeshDisplaceStrength'));
+  return Object.keys(out).length ? out : null;
+}
+
 /** ThemeConfig.ThemeEffects entry: segmented ground effects (Floor Is Lava's lava)
  * that the game leapfrogs under the runner. Returns the segment node names and size. */
 function parseThemeEffect(file, guidIndex) {
@@ -661,11 +687,29 @@ function parseThemeEffect(file, guidIndex) {
     if (!doc.startsWith('!u!114') || !size) continue;
     const segments = [...doc.matchAll(/_segment[AB]: \{fileID: (\d+)/g)].map((m) => goNames.get(transformGo.get(m[1]) ?? '') ?? null);
     const script = doc.match(/m_Script: .*guid: (\w+)/);
-    return {
+    const effect = {
       prefab: stem(file),
       script: script && guidIndex.has(script[1]) ? stem(guidIndex.get(script[1])) : null,
       segmentSize: num(size[1]),
       segments: segments.filter(Boolean),
+    };
+    const activated = parseNoFloorStates(doc, guidIndex);
+    if (activated) effect.activated = activated;
+    return effect;
+  }
+  // Effects that follow the runner at an offset, while running (ThemeEffectFollowPlayer:
+  // Vancouver Autumn's falling leaves; …ZOnly, along the run only: Transylvania's frost)
+  for (const { doc } of docs) {
+    const offset = doc.match(/\n {2}_offset: \{x: ([-\d.e]+), y: ([-\d.e]+), z: ([-\d.e]+)\}/);
+    if (!doc.startsWith('!u!114') || !offset) continue;
+    const script = doc.match(/m_Script: .*guid: (\w+)/);
+    const name = script && guidIndex.has(script[1]) ? stem(guidIndex.get(script[1])) : null;
+    if (name && !/^ThemeEffect(FollowPlayer|AttachToPlayer)/.test(name)) continue;
+    return {
+      prefab: stem(file),
+      script: name,
+      segments: [], // (viewers before follow effects skip it)
+      follow: { offset: [-num(offset[1]), num(offset[2]), num(offset[3])], zOnly: /ZOnly/.test(name ?? '') }, // Unity -> glTF: mirror X
     };
   }
   return null;
@@ -2845,6 +2889,16 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     if (Object.keys(particles).length) info.particles = particles;
   }
 
+  // No Floor effects' activated mesh (Plant Invasion's spiked vines)
+  for (const config of Object.values(themeConfigs)) {
+    for (const effect of config.effects ?? []) {
+      const src = effect.activated?.mesh ? meshGlbs.get(`${effect.activated.mesh}.glb`) : null;
+      if (!src) continue;
+      copyIfNewer(src, path.join(outMesh, path.basename(src)));
+      effect.activated.meshGlb = `mesh/${path.basename(src)}`;
+    }
+  }
+
   // Runtime-assigned track meshes (TrackController configurations)
   for (const [name, info] of Object.entries(prefabs)) {
     const prefabPath = prefabFile(name);
@@ -3002,6 +3056,7 @@ function splitByTheme(manifest, staging, out, log) {
       ...Object.values(prefabs).flatMap((p) => (p.morphMeshes ?? []).map((m) => m.url)),
       ...Object.values(materials).flatMap((m) => Object.values(m.textures).map((t) => t.url)).filter(Boolean),
       ...(config.sky?.texture ? [config.sky.texture] : []),
+      ...(config.effects ?? []).map((e) => e.activated?.meshGlb).filter(Boolean),
     ]);
     const dest = path.join(out, theme);
     rmSync(dest, { recursive: true, force: true });

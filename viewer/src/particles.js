@@ -385,6 +385,7 @@ class Emitter {
     this.sources = null; // as a sub-emitter: where its parent's particles start it
     this.spawnOffset = null; // weather: emission follows the camera
     this.drift = null; // node-space units/s every particle moves by (world-space systems on a moving node)
+    this.worldLock = null; // world-space system on a node that moves: its node's last world position
     this.count = 0;
     this.time = 0;
     this.emitAcc = 0;
@@ -872,6 +873,7 @@ export function updateParticles(dt, camera) {
       emitters.delete(e);
       continue;
     }
+    if (e.worldLock) keepInWorld(e);
     e.object.getWorldPosition(at);
     const near = at.distanceTo(cam) < ACTIVE_DISTANCE;
     for (const part of e.parts ?? [e]) part.object.visible = near;
@@ -884,6 +886,29 @@ export function updateParticles(dt, camera) {
     e.step(dt);
     e.upload();
   }
+}
+
+/**
+ * A world-space system whose node moves (a theme effect that follows the camera): its
+ * particles stay where they are in the world, the node's move taken back off them. A jump
+ * (camera reset, new map) carries them along instead.
+ */
+const lockPos = new THREE.Vector3();
+const lockQuat = new THREE.Quaternion();
+function keepInWorld(e) {
+  e.node.getWorldPosition(lockPos);
+  const last = e.worldLock;
+  if (last.ready && lockPos.distanceTo(last.pos) < 300) {
+    const d = last.pos.sub(lockPos).applyQuaternion(e.node.getWorldQuaternion(lockQuat).invert());
+    const pos = e.local.pos;
+    for (let i = 0; i < e.count; i++) {
+      pos[i * 3] += d.x;
+      pos[i * 3 + 1] += d.y;
+      pos[i * 3 + 2] += d.z;
+    }
+  }
+  last.pos.copy(lockPos);
+  last.ready = true;
 }
 
 /** Particle count, for the status line. */

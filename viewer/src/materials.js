@@ -37,6 +37,7 @@ export function setBendDegrees(horizontal, vertical = 0) {
 }
 
 const MAX_CUTS = 32;
+const MAX_ALT_ZONES = 16; // studio challenge zones (setAltZones)
 
 // Depth bias, in steps towards the camera. three flips the slope factor for the reversed
 // depth buffer but not the constant units, so those are flipped here
@@ -58,10 +59,31 @@ export const globals = {
   uBend: bend,
   uResolution: { value: new THREE.Vector2(1920, 1080) }, // render target size (screen-space masks)
   uAltRatio: { value: 0 }, // _AlternateColorRatio (New York "Play2Plant" variant textures)
+  // Challenge zones (setAltZones): [z0, z1) where the main textures show, the alternate
+  // ones elsewhere. Count -1: no zones, uAltRatio everywhere
+  uAltZoneCount: { value: -1 },
+  uAltZones: { value: Array.from({ length: MAX_ALT_ZONES }, () => new THREE.Vector2()) },
   // Studio "no tracks" zones: (track x, z0, z1); rails hide inside, fill ground shows only inside
   uCutCount: { value: 0 },
   uCuts: { value: Array.from({ length: MAX_CUTS }, () => new THREE.Vector3()) },
 };
+
+/**
+ * Event challenge cities (3.19 New York Play2Plant's Green Jam, St Petersburg's Christmas):
+ * the main textures are the challenge look (green city, Christmas decorations), the
+ * alternate ones the city without it (grey, plain). Inside the zones the challenge shows;
+ * null: no challenge, the main textures everywhere.
+ */
+export function setAltZones(zones) {
+  if (!zones) {
+    globals.uAltZoneCount.value = -1;
+    globals.uAltRatio.value = 0;
+    return;
+  }
+  const list = zones.slice(0, MAX_ALT_ZONES);
+  list.forEach(([z0, z1], i) => globals.uAltZones.value[i].set(z0, z1));
+  globals.uAltZoneCount.value = list.length;
+}
 
 /** Sets the "no tracks" zones the track materials cut out. */
 export function setTrackCuts(zones) {
@@ -249,6 +271,8 @@ uniform float uTime;
 uniform sampler2D uAltTex;
 uniform sampler2D uAltRef;
 uniform float uAltRatio;
+uniform int uAltZoneCount;
+uniform vec2 uAltZones[${MAX_ALT_ZONES}];
 uniform sampler2D uMaskTex;
 uniform vec2 uResolution;
 uniform vec4 uUvWobble; // 1.x water: x amplitude, x frequency, y amplitude, y frequency
@@ -288,6 +312,16 @@ varying float vColorA; // RGBA vertex colors: their alpha fades transparent piec
 #endif
 ${FOG_GLSL}
 ${CUT_GLSL}
+// Alternate texture share here: the challenge zones' look fades in over 40 at their edges
+float altRatio() {
+  if (uAltZoneCount < 0) return uAltRatio;
+  float inside = 0.0;
+  for (int i = 0; i < ${MAX_ALT_ZONES}; i++) {
+    if (i >= uAltZoneCount) break;
+    inside = max(inside, smoothstep(uAltZones[i].x - 20.0, uAltZones[i].x + 20.0, vWorld.z) * (1.0 - smoothstep(uAltZones[i].y - 20.0, uAltZones[i].y + 20.0, vWorld.z)));
+  }
+  return 1.0 - inside;
+}
 
 void main() {
 ${CUT_MAIN}
@@ -302,7 +336,7 @@ ${CUT_MAIN}
   vec4 c = texture2D(uMap, uv);
   vec3 base = c.rgb;
 #ifdef ALTERNATE
-  c = mix(c, texture2D(uAltTex, vUv), uAltRatio);
+  c = mix(c, texture2D(uAltTex, vUv), altRatio());
 #endif
 #ifdef GRADIENT
   c.rgb = mix(uColor.rgb, uColor2.rgb, c.r);
@@ -328,7 +362,7 @@ ${CUT_MAIN}
   vec3 refl = texture2D(uRefTex, n.xy * 0.5 + 0.5).rgb;
 #endif
 #ifdef ALTERNATE
-  refl = mix(refl, texture2D(uAltRef, n.xy * 0.5 + 0.5).rgb, uAltRatio);
+  refl = mix(refl, texture2D(uAltRef, n.xy * 0.5 + 0.5).rgb, altRatio());
 #endif
 #ifdef DISTORTED_REFLECT
   // 1.x "Unlit with overlay and Reflection": faint head-on, strong at grazing angles, and

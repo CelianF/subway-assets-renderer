@@ -291,7 +291,7 @@ async function runJob(job, apkPath, sourceName) {
       apkPath = await unwrapSinglePackage(apkPath);
       // The maps this game version downloads at runtime, for "Import map"
       try {
-        const kit = await saveRemoteKit(apkPath, REMOTE);
+        const kit = await saveRemoteKit(apkPath, REMOTE, sourceName);
         if (kit) log(`Downloadable maps: ${kit.maps} (game version ${kit.version})`);
       } catch (e) {
         log(`Downloadable maps not saved: ${e.message}`);
