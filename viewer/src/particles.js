@@ -385,7 +385,9 @@ class Emitter {
     this.sources = null; // as a sub-emitter: where its parent's particles start it
     this.spawnOffset = null; // weather: emission follows the camera
     this.drift = null; // node-space units/s every particle moves by (world-space systems on a moving node)
+    this.travel = 0; // units/s the system moves at (riding with the runner): rate-over-distance emission
     this.worldLock = null; // world-space system on a node that moves: its node's last world position
+    this.emitting = true; // off: no new particles, the live ones play out (an effect's zone ended)
     this.count = 0;
     this.time = 0;
     this.emitAcc = 0;
@@ -570,13 +572,13 @@ class Emitter {
     this.time += dt;
     const local = this.time - this.delay;
     if (this.sources) this.emitSources(dt);
-    else if (local >= 0) {
+    else if (local >= 0 && this.emitting) {
       const cycle = Math.floor(local / this.period);
       const inCycle = local - cycle * this.period;
       const emitting = d.loop || inCycle < d.duration;
       if (emitting) {
         const t = inCycle / Math.max(d.duration, 1e-3);
-        this.emitAcc += sample(d.rate, t) * dt;
+        this.emitAcc += (sample(d.rate, t) + (d.distanceRate && this.travel ? sample(d.distanceRate, t) * this.travel : 0)) * dt;
         while (this.emitAcc >= 1) {
           this.spawn(this.spawnOffset);
           this.emitAcc -= 1;

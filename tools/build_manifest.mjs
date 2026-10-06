@@ -2224,6 +2224,8 @@ function parseParticles(file, guidIndex) {
         hasMesh: [shape.m_Mesh, shape.m_MeshRenderer, shape.m_SkinnedMeshRenderer].some((m) => m?.fileID),
       },
       rate: minMaxCurve(emission.enabled === 0 ? 0 : emission.rateOverTime ?? emission.rate, 0),
+      // Per unit the system moves (3.x St Petersburg's Christmas gifts, thrown as the runner runs)
+      distanceRate: minMaxCurve(emission.enabled === 0 ? 0 : emission.rateOverDistance, 0),
       bursts: (emission.enabled === 0 ? [] : emission.m_Bursts ?? []).map((b) => ({
         time: b.time ?? 0,
         count: minMaxCurve(b.countCurve ?? b.minCount, b.minCount ?? 1),

@@ -1154,6 +1154,24 @@ const challengeEffect = () => (manifest.themeConfigs?.[state.theme]?.effects ?? 
 const challengeGroup = new THREE.Group();
 scene.add(challengeGroup);
 let challengeSegment = null; // { theme, node }: the trail piece, loaded once
+// The rest of the challenge effect rides with the runner (ThemeEffectChristmas: gifts thrown
+// ahead, poles with garlands and blinking baubles, growing trees, sparkles, Santa): its own
+// particles, spawning while the runner is inside a zone. { theme, obj, emitters, zones }
+let challengeFx = null;
+// Not riding along: the trail (tiled above), the reward drop at milestones, the start's snow
+const CHALLENGE_STILL = /_Segment_\d+$|_Milestone_Drop$|_StaticSnow$/;
+
+async function loadChallengeFx(effect) {
+  const prefab = manifest.prefabs[effect.prefab];
+  if (!prefab?.glb || !prefab.particles) return null;
+  const obj = (await loadGlb(prefab.glb)).clone();
+  const doomed = [];
+  obj.traverse((o) => CHALLENGE_STILL.test(o.name) && doomed.push(o));
+  for (const o of doomed) o.removeFromParent();
+  obj.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
+  const emitters = await attachRunnerParticles(obj, prefab.particles);
+  return { theme: state.theme, obj, emitters, zones: [] };
+}
 
 /** [z0, z1) zones where the challenge shows, or null when the map has none. */
 function challengeZones(length) {
@@ -1168,7 +1186,18 @@ async function placeChallenge(length, id) {
   setAltZones(zones);
   challengeGroup.clear();
   const effect = zones && challengeEffect();
+  if (challengeFx && (!effect || challengeFx.theme !== state.theme)) {
+    challengeFx.obj.removeFromParent(); // (its emitters go with it)
+    challengeFx = null;
+  }
   if (!effect) return;
+  if (!challengeFx) {
+    const fx = await loadChallengeFx(effect);
+    if (id !== buildId) return fx?.obj.removeFromParent();
+    if (fx) scene.add(fx.obj), (challengeFx = fx), applyThemeLook();
+  }
+  // (auto runs: all along, the start included)
+  if (challengeFx) challengeFx.zones = state.obstacleMode === 'studio' ? zones : [[-Infinity, Infinity]];
   if (challengeSegment?.theme !== state.theme) {
     const prefab = manifest.prefabs[effect.prefab];
     const root = prefab?.glb ? await loadGlb(prefab.glb) : null;
@@ -1389,21 +1418,29 @@ async function setFollowEffects(effects) {
     // Meshes too (3.19 Underwater World's light rays), with their materials
     obj.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
     scene.add(obj);
-    if (prefab.particles) {
-      // (made with particles off too: shown once they're on)
-      const table = sanitizedTable(Object.entries(prefab.particles));
-      const emitters = await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
-      for (const e of emitters) {
-        if (e.def.local) continue;
-        e.worldLock = { pos: new THREE.Vector3(), ready: false };
-        // The runner runs into them: they come at the camera at the run speed
-        e.drift = new THREE.Vector3(0, 0, -RUN_SPEED).applyQuaternion(e.node.getWorldQuaternion(new THREE.Quaternion()).invert());
-      }
-    }
+    // (made with particles off too: shown once they're on)
+    if (prefab.particles) await attachRunnerParticles(obj, prefab.particles);
     followFx.push({ obj, effect, particles: !!prefab.particles });
   }
   placeFollowEffects();
   applyThemeLook();
+}
+/** An effect's particles that ride with the runner: world-space ones stay put as it moves. */
+async function attachRunnerParticles(obj, particles) {
+  const table = sanitizedTable(Object.entries(particles));
+  const emitters = await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
+  for (const e of emitters) {
+    if (e.def.local) continue;
+    e.worldLock = { pos: new THREE.Vector3(), ready: false };
+    // The runner runs into them: they come at the camera at the run speed
+    e.drift = new THREE.Vector3(0, 0, -RUN_SPEED).applyQuaternion(e.node.getWorldQuaternion(new THREE.Quaternion()).invert());
+    e.travel = RUN_SPEED;
+    // Imported before rate over distance was kept: a looping system that never emits over
+    // time nor in bursts emitted on distance; a stand-in rate until the map is re-imported
+    const d = e.def;
+    if (!d.distanceRate && d.loop && !d.rate.max && !d.bursts.length) e.def = { ...d, distanceRate: { mode: 0, min: 0.04, max: 0.04 } };
+  }
+  return emitters;
 }
 const RUNNER_AHEAD = 33; // camConfig_Run: the camera sits (0, 33, -33) from the runner
 function placeFollowEffects() {
@@ -1411,6 +1448,13 @@ function placeFollowEffects() {
   for (const { obj, effect } of followFx) {
     const [ox, oy, oz] = effect.follow.offset;
     obj.position.set(effect.follow.zOnly ? ox : cam.x + ox, oy, cam.z + RUNNER_AHEAD + oz);
+  }
+  if (challengeFx) {
+    // On the track's axis, where the runner would be; it only spawns inside the zones
+    const z = cam.z + RUNNER_AHEAD;
+    challengeFx.obj.position.set(0, 0, z);
+    const inside = challengeFx.zones.some(([z0, z1]) => z >= z0 && z < z1);
+    for (const e of challengeFx.emitters) e.emitting = inside;
   }
 }
 
@@ -1426,6 +1470,7 @@ function applyThemeLook() {
   }
   const effectsOn = state.weather && !state.inspect && !studio?.active;
   for (const fx of followFx) fx.obj.visible = effectsOn && (state.particles || !fx.particles);
+  if (challengeFx) challengeFx.obj.visible = effectsOn && state.particles;
   setWeatherVisible(weatherOn);
   // No fog/skyline while inspecting: the camera frames pieces from far away
   // (nor in the studio's top view, 600 units above the run)
@@ -1965,7 +2010,7 @@ const view = createWorkbar(
           title: 'Particles',
           controls: [
             { type: 'toggle', label: 'Smoke, glows, sparks', obj: state, key: 'particles', onChange: () => (rebuild(), applyThemeLook()) },
-            { type: 'toggle', label: 'Weather & effects along the run', obj: state, key: 'weather', visible: () => !!(followEffectsOf(state.theme).length || themeWeather()), onChange: applyThemeLook },
+            { type: 'toggle', label: 'Weather & effects along the run', obj: state, key: 'weather', visible: () => !!(followEffectsOf(state.theme).length || themeWeather() || challengeEffect()), onChange: applyThemeLook },
           ],
         },
       ],
