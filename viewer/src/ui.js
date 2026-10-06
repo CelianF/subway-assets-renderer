@@ -1,5 +1,6 @@
-// Viewer chrome around the canvas: theme bar, piece browser, screenshot gallery, help.
-// The detailed settings live in the central menu (settings.js).
+// Viewer chrome around the canvas: header, toolbar, piece browser, screenshot gallery, help.
+// Generation, View and Studio are bottom work bars (settings.js, studio.js).
+import { createControls } from './settings.js';
 
 const CATEGORY_LABELS = {
   boundary: 'Buildings & structures',
@@ -32,18 +33,26 @@ export const prettyTheme = (t) => t.replace(/^\d+\.\d+_/, '').replace(/([a-z])([
 /**
  * @param manifest viewer manifest
  * @param actions { getState, env, inspect(names), exitInspect, screenshot() -> {blob, name, width, height},
- *                   thumbnail() -> dataURL, saveThumbnail(dataURL) }
+ *                   thumbnail() -> dataURL, saveThumbnail(dataURL), openGeneration, openView, openStudio,
+ *                   shotOptions: settings.js controls }
  */
 export function createUI(manifest, actions) {
   const root = document.getElementById('ui');
   const { env } = actions;
 
   // ------------------------------------------------------------ header (maps are chosen on the home page)
+  // The run's status (seed, pieces) sits by the map name; clicking it opens Generation
+  const status = document.getElementById('status');
+  status.title = 'Generation (1)';
+  status.addEventListener('click', () => actions.openGeneration());
   const header = el(
     'div',
     { class: 'env-header' },
-    el('a', { class: 'back', href: '/', title: 'Back to environments' }, '← Environments'),
+    el('a', { class: 'back home-link', href: '/', title: 'Back to environments' }, '← Environments'),
+    // Shown instead while a bar or the studio is open: closes it (styles.css)
+    el('button', { class: 'back close-link', title: 'Close (Esc)', onclick: () => actions.closePanels() }, '← Back'),
     el('div', {}, el('strong', {}, prettyTheme(env.theme)), env.gameVersion ? el('small', {}, ` v${env.gameVersion}`) : null),
+    status,
   );
 
   // ------------------------------------------------------------ piece browser
@@ -140,7 +149,7 @@ export function createUI(manifest, actions) {
                 ),
               ),
             )
-        : [el('p', { class: 'empty' }, 'No screenshots yet. Press P or the camera button.')]),
+        : [el('p', { class: 'empty' }, 'No screenshots yet. Press P or 📷 Shot.')]),
     );
   }
 
@@ -178,7 +187,8 @@ export function createUI(manifest, actions) {
           ['Ctrl', 'Sprint'],
           ['− / =', 'Fly speed'],
           ['Mouse wheel', 'Field of view'],
-          ['M', 'Settings menu'],
+          ['1 / 2 / 3', 'Generation / View / Studio'],
+          ['Esc', 'Close the open bar'],
           ['Tab', 'Hide / show the interface'],
           ['P', 'Screenshot'],
           ...(DEBUG ? [['B', 'Piece browser']] : []),
@@ -199,28 +209,42 @@ export function createUI(manifest, actions) {
     toastTimer = setTimeout(() => toastEl.classList.add('hidden'), 2500);
   }
 
+  // Screenshot options (resolution, transparency): a popover above the Shot button
+  const shotControls = createControls(actions.shotOptions ?? []);
+  const shotMenu = el('div', { class: 'shot-menu hidden' }, el('h4', {}, 'Screenshot'), shotControls.nodes);
+  const toggleShotMenu = (show = shotMenu.classList.contains('hidden')) => {
+    if (show) shotControls.refresh();
+    shotMenu.classList.toggle('hidden', !show);
+  };
+  addEventListener('pointerdown', (e) => !shotGroup.contains(e.target) && toggleShotMenu(false));
+
+  const toggleGallery = () => {
+    gallery.classList.toggle('hidden');
+    renderGallery();
+  };
+  const shotGroup = el(
+    'div',
+    { class: 'tool-group split' },
+    shotMenu,
+    el('button', { title: 'Screenshot (P)', onclick: takeShot }, '📷 Shot'),
+    el('button', { class: 'caret', title: 'Screenshot options', onclick: () => toggleShotMenu() }, '▾'),
+    el('button', { title: 'Screenshot gallery (G)', onclick: toggleGallery }, '🖼', shotCount),
+  );
+
+  // Grouped by intent: change the scene · capture it · help
   const toolbar = el(
     'div',
     { class: 'toolbar' },
-    el('button', { title: 'Settings (M)', onclick: () => actions.openSettings() }, '⚙️ Menu'),
-    el('button', { title: 'Seed, length, map sections and building pieces', onclick: () => actions.openGeneration() }, '🗺 Generation'),
-    el('button', { title: 'Fog, skyline, materials and bend', onclick: () => actions.openRendering() }, '🎨 Rendering'),
-    el('button', { title: 'Place trains and obstacles yourself', onclick: () => actions.openStudio() }, '✏️ Studio'),
-    // Piece browser: a debug tool, only with ?debug=true
-    DEBUG ? el('button', { title: 'Piece browser (B)', onclick: () => toggleBrowser() }, '🧱 Pieces') : null,
-    el('button', { title: 'Screenshot (P)', onclick: takeShot }, '📷 Shot'),
     el(
-      'button',
-      {
-        title: 'Screenshot gallery (G)',
-        onclick: () => {
-          gallery.classList.toggle('hidden');
-          renderGallery();
-        },
-      },
-      '🖼 Gallery',
-      shotCount,
+      'div',
+      { class: 'tool-group' },
+      el('button', { title: 'Seed, game mode, map sections and building pieces (1)', onclick: () => actions.openGeneration() }, '🗺 Generation'),
+      el('button', { title: 'Camera, fog, skyline, bend and materials (2)', onclick: () => actions.openView() }, '🎨 View'),
+      el('button', { title: 'Place trains and obstacles yourself (3)', onclick: () => actions.openStudio() }, '✏️ Studio'),
+      // Piece browser: a debug tool, only with ?debug=true
+      DEBUG ? el('button', { title: 'Piece browser (B)', onclick: () => toggleBrowser() }, '🧱 Pieces') : null,
     ),
+    shotGroup,
     el('button', { title: 'Help (H)', onclick: () => help.classList.toggle('hidden') }, '?'),
   );
 
@@ -228,13 +252,11 @@ export function createUI(manifest, actions) {
     if (e.target instanceof HTMLInputElement || e.metaKey || e.ctrlKey) return;
     if (e.code === 'KeyP') takeShot();
     if (e.code === 'KeyB' && DEBUG) toggleBrowser();
-    if (e.code === 'KeyG') {
-      gallery.classList.toggle('hidden');
-      renderGallery();
-    }
+    if (e.code === 'KeyG') toggleGallery();
     if (e.code === 'KeyH') help.classList.toggle('hidden');
     if (e.code === 'Escape') {
       help.classList.add('hidden');
+      toggleShotMenu(false);
       if (actions.getState().inspect) actions.exitInspect();
     }
   });

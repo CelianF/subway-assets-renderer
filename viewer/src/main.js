@@ -6,10 +6,10 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setReversedDepth, texturesReady } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, FIX_LABELS, wallItems } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
-import { createUI, prettyTheme } from './ui.js';
+import { createUI } from './ui.js';
 import { addCredit } from './credit.js';
 import { attachParticles, updateParticles, setWeather, setWeatherVisible, setWeatherCover } from './particles.js';
 
@@ -101,7 +101,7 @@ function applyCamera(name) {
     state.fov = camera.fov = p.fov;
     camera.updateProjectionMatrix();
   }
-  settings?.refresh();
+  view?.refresh();
   orbit.target.set(...p.target);
   if (orbit.enabled) orbit.update();
 }
@@ -1110,7 +1110,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
   const missing = objs.filter(([, o]) => !o).length;
   status.textContent = only
     ? `Inspecting ${only.length} piece${only.length > 1 ? 's' : ''}`
-    : `${prettyTheme(state.theme)} · seed ${state.seed} · ${layout.items.length} pieces · ${Math.round(length)} units${missing ? ` · ${missing} without geometry` : ''}`;
+    : `Seed ${state.seed} · ${layout.items.length} pieces · ${Math.round(length)} units${missing ? ` · ${missing} without geometry` : ''}`;
   studio?.relayout();
   ui?.themeChanged(state.theme);
   ui?.setInspecting(only);
@@ -1178,7 +1178,7 @@ function frameInspection(items) {
   camera.position.copy(center).add(new THREE.Vector3(0.7 * side, 0.45, -0.7).normalize().multiplyScalar(radius * 2.2));
   orbit.target.copy(center);
   orbit.update();
-  settings?.refresh();
+  view?.refresh();
 }
 
 const CUTAWAY_LAYERS = ['environment', 'train', 'obstacle', 'wall', 'signal'];
@@ -1600,26 +1600,31 @@ const toggles = (obj, entries, onChange = regen) => entries.filter(([, , show = 
 const hasSlot = (slot) => Object.values(manifest.themes[state.theme]).some((c) => c[slot]?.length);
 const isAuto = () => state.obstacleMode !== 'studio';
 
-// Generation: its own panel (toolbar button), what the run is made of
-const generation = createSettings(
+// Generation: what the run is made of. A work bar at the bottom, so the run stays visible
+const generation = createWorkbar(
   document.getElementById('ui'),
   [
     {
-      tab: 'Generation',
-      groups: [
+      title: 'Run',
+      columns: [
         {
-          title: 'Run',
+          title: 'Seed',
           controls: [
             { type: 'slider', label: 'Seed', obj: state, key: 'seed', min: 1, max: 9999, step: 1, lazy: true, onChange: regen },
             { type: 'button', label: '🎲 Shuffle', action: shuffle },
             { type: 'slider', label: 'Sections', obj: state, key: 'sections', min: 1, max: 40, step: 1, lazy: true, onChange: regen },
+          ],
+        },
+        {
+          title: 'Game mode',
+          visible: () => modes.length > 1,
+          controls: [
             {
               type: 'select',
-              label: 'Game mode',
+              label: 'Mode',
               obj: state.gen,
               key: 'mode',
               options: Object.fromEntries(modes.map((m) => [m.label, m.key])),
-              visible: () => modes.length > 1,
               onChange: (key) => setGameMode(key),
             },
             {
@@ -1632,11 +1637,20 @@ const generation = createSettings(
               onChange: (skin) => setGameMode(state.gen.mode, skin),
             },
             { type: 'note', label: 'Game modes lay the obstacles of their own route, between buildings', visible: () => !isNormal() },
-            { type: 'select', label: 'Trains from', obj: state, key: 'trainEnv', options: trainOptions, onChange: async (id) => (id !== 'same' && (await mergeEnvironment(id)), regen()) },
           ],
         },
         {
+          title: 'Trains',
+          controls: [{ type: 'select', label: 'From', obj: state, key: 'trainEnv', options: trainOptions, onChange: async (id) => (id !== 'same' && (await mergeEnvironment(id)), regen()) }],
+        },
+      ],
+    },
+    {
+      title: 'Sections',
+      columns: [
+        {
           title: 'Map sections',
+          wide: true,
           visible: isNormal,
           controls: toggles(state.gen.sections, [
             ['buildings', 'Buildings'],
@@ -1661,11 +1675,11 @@ const generation = createSettings(
             },
           ],
         },
-        {
-          title: 'Fix',
-          visible: () => isNormal() && hasSlot('boundary_pillars_mid') && hasSlot('obstacle_pillar'),
-          controls: [{ type: 'button', label: FIX_LABELS.pillar, title: 'Put a pillar back in every pillar hall spot that has none', action: () => fixMissing('pillar') }],
-        },
+      ],
+    },
+    {
+      title: 'Pieces',
+      columns: [
         {
           title: 'Landmark',
           visible: () => isNormal() && state.gen.sections.epic !== false && landmarkVariants(manifest, state.theme).length > 0,
@@ -1680,7 +1694,8 @@ const generation = createSettings(
         },
         {
           title: 'Building pieces',
-          visible: () => state.gen.sections.buildings !== false,
+          wide: true,
+          visible: () => state.gen.sections.buildings !== false && buildingPieces(manifest, state.theme).length > 0,
           controls: [
             ...buildingPieces(manifest, state.theme).map((piece) => ({
               type: 'toggle',
@@ -1696,13 +1711,36 @@ const generation = createSettings(
       ],
     },
   ],
-  { title: 'Generation' },
+  { title: '🗺 Generation' },
 );
 
-// Rendering: studio-like bar at the bottom, so the scene stays visible while tuning
-const rendering = createWorkbar(
+// View: how the scene is looked at and drawn. Same bottom bar as Generation
+const view = createWorkbar(
   document.getElementById('ui'),
   [
+    {
+      title: 'Camera',
+      columns: [
+        {
+          title: 'Camera',
+          controls: [
+            { type: 'button', label: '🎥 Reset to game camera', action: () => (applyCamera('game'), view.refresh()) },
+            { type: 'toggle', label: 'Hide piece around camera', obj: state, key: 'cutaway' },
+          ],
+        },
+        {
+          title: 'Lens & speed',
+          controls: [
+            { type: 'slider', label: 'Field of view', hint: 'wheel', obj: state, key: 'fov', min: 20, max: 110, step: 1, onChange: setFov },
+            { type: 'slider', label: 'Fly speed', hint: '− / =', obj: fly, key: 'speed', min: 5, max: 3000, step: 1 },
+          ],
+        },
+        {
+          title: 'Controls',
+          controls: [{ type: 'note', label: 'Drag: look · WASD: move · Space/Shift: up/down · Ctrl: sprint' }],
+        },
+      ],
+    },
     {
       title: 'Atmosphere',
       columns: [
@@ -1743,7 +1781,7 @@ const rendering = createWorkbar(
         },
         {
           title: 'Reset',
-          controls: [{ type: 'button', label: 'Straight', action: () => ((state.bend = state.bendVertical = 0), applyBend(), rendering.refresh()) }],
+          controls: [{ type: 'button', label: 'Straight', action: () => ((state.bend = state.bendVertical = 0), applyBend(), view.refresh()) }],
         },
       ],
     },
@@ -1761,48 +1799,22 @@ const rendering = createWorkbar(
       ],
     },
   ],
-  { title: '🎨 Rendering' },
+  { title: '🎨 View' },
 );
 
-const settings = createSettings(
-  document.getElementById('ui'),
-  [
-    {
-      tab: 'Camera',
-      groups: [
-        {
-          controls: [
-            { type: 'button', label: '🎥 Reset to game camera', action: () => (applyCamera('game'), settings.refresh()) },
-            { type: 'toggle', label: 'Hide piece around camera', obj: state, key: 'cutaway' },
-            { type: 'slider', label: 'Fly speed', hint: '− / =', obj: fly, key: 'speed', min: 5, max: 3000, step: 1 },
-            { type: 'slider', label: 'Field of view', hint: 'wheel', obj: state, key: 'fov', min: 20, max: 110, step: 1, onChange: setFov },
-            { type: 'note', label: 'Drag: look · WASD: move · Space/Shift: up/down · Ctrl: sprint · −/=: speed · Wheel: field of view' },
-          ],
-        },
-      ],
-    },
-    {
-      tab: 'Screenshot',
-      groups: [
-        {
-          controls: [
-            { type: 'select', label: 'Resolution', obj: screenshot, key: 'resolution', options: Object.fromEntries(Object.keys(RESOLUTIONS).map((k) => [k, k])) },
-            { type: 'toggle', label: 'Transparent background', obj: screenshot, key: 'transparent' },
-            { type: 'button', label: '📷 Save screenshot (P)', primary: true, action: () => (settings.close(), ui.takeShot()) },
-          ],
-        },
-      ],
-    },
-  ],
-  { title: 'Settings' },
-);
-fly.onSpeedChange = () => settings.refresh();
+// Screenshot options: the ▾ next to the Shot button
+const shotOptions = [
+  { type: 'select', label: 'Resolution', obj: screenshot, key: 'resolution', options: Object.fromEntries(Object.keys(RESOLUTIONS).map((k) => [k, k])) },
+  { type: 'toggle', label: 'Transparent background', obj: screenshot, key: 'transparent' },
+];
+
+fly.onSpeedChange = () => view.isOpen() && view.refresh();
 fly.onWheel = (deltaY) => setFov(THREE.MathUtils.clamp(state.fov + (deltaY > 0 ? 2 : -2), 20, 110));
 
 function setFov(v) {
   state.fov = camera.fov = v;
   camera.updateProjectionMatrix();
-  if (settings.isOpen()) settings.refresh();
+  if (view.isOpen()) view.refresh();
 }
 
 /** Shows only the given prefabs (piece browser, 👁 previews); "Back to run" restores the run. */
@@ -1838,6 +1850,8 @@ const studio = createStudio({
     return shown ? Object.keys(TRAIN_VARIANTS).find((v) => TRAIN_VARIANTS[v].test(shown.prefab)) ?? null : null;
   },
   onExit: () => exitStudio(),
+  // Where the fly camera looks along the run: a little ahead of it
+  getFocusZ: () => camera.position.z + camera.getWorldDirection(new THREE.Vector3()).z * 150,
 });
 
 /**
@@ -1885,9 +1899,8 @@ async function runToStudio(mode = 'random') {
 }
 
 async function enterStudio() {
-  settings.close();
   generation.close();
-  rendering.close();
+  view.close();
   if (state.obstacleMode !== 'studio') {
     // Start from the run on screen when nothing was placed yet
     if (!state.studio.length) {
@@ -1924,8 +1937,13 @@ function exitStudio() {
   applyBend();
   document.body.classList.remove('studio');
   setControlMode(state.controls);
-  settings.refresh();
+  view.refresh();
 }
+
+// The toolbar's three work modes: one open at a time
+const openGeneration = () => (view.close(), generation.toggle());
+const openView = () => (generation.close(), view.toggle());
+const openStudio = () => (studio.active ? exitStudio() : enterStudio());
 
 const ui = createUI(manifest, {
   getState: () => state,
@@ -1939,10 +1957,12 @@ const ui = createUI(manifest, {
     rebuild();
   },
   screenshot: screenshotBlob,
-  openSettings: () => (generation.close(), rendering.close(), settings.open()),
-  openGeneration: () => (settings.close(), rendering.close(), generation.open()),
-  openRendering: () => (settings.close(), generation.close(), rendering.toggle()),
-  openStudio: () => enterStudio(),
+  openGeneration,
+  openView,
+  openStudio,
+  // The header's Back button while a bar or the studio is open
+  closePanels: () => (generation.close(), view.close(), studio.active && exitStudio()),
+  shotOptions,
   thumbnail: themeThumbnail,
   saveThumbnail: async (dataUrl) => {
     const blob = await (await fetch(dataUrl)).blob();
@@ -1952,7 +1972,6 @@ const ui = createUI(manifest, {
 });
 if (params.has('shot')) document.getElementById('ui').classList.add('hidden');
 
-// Tab hides / shows the whole interface; M or the toolbar opens the settings menu
 // Debug menu (K): tools for checking imports
 const debugMenu = createSettings(
   document.getElementById('ui'),
@@ -1980,23 +1999,26 @@ const debugMenu = createSettings(
   { title: 'Debug' },
 );
 
+// Tab hides / shows the whole interface; 1 / 2 / 3 open Generation, View and Studio
 addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
-  if (e.code === 'KeyK' && !e.metaKey && !e.ctrlKey && !studio.active) {
-    settings.close();
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.code === 'KeyK' && !studio.active) {
     generation.close();
-    rendering.close();
+    view.close();
     debugMenu.toggle();
-    return;
-  }
-  if (e.code === 'Tab') {
+  } else if (e.code === 'Tab') {
     e.preventDefault();
     document.body.classList.toggle('ui-hidden');
-  } else if (e.code === 'KeyM' && !studio.active) {
-    settings.toggle();
-  } else if (e.code === 'Escape' && (settings.isOpen() || generation.isOpen() || debugMenu.isOpen())) {
-    settings.close();
+  } else if (e.code === 'Digit1' && !studio.active) {
+    openGeneration();
+  } else if (e.code === 'Digit2' && !studio.active) {
+    openView();
+  } else if (e.code === 'Digit3') {
+    openStudio();
+  } else if (e.code === 'Escape') {
     generation.close();
+    view.close();
     debugMenu.close();
   }
 });
@@ -2010,7 +2032,7 @@ if (params.get('z')) {
   camera.lookAt(orbit.target);
 }
 setControlMode(state.controls);
-window.__viewer = { motions, fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, settings, enterStudio, exitStudio, rebuild };
+window.__viewer = { motions, fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild };
 await rebuild();
 
 const clock = new THREE.Clock();

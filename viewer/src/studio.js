@@ -497,11 +497,11 @@ export function createStudio(ctx) {
   // ------------------------------------------------------------ palette (DOM)
   const info = el('span', { class: 'studio-info' });
   const setInfo = (t) => (info.textContent = t);
-  // Bottom main bar (modes) with a context bar above it that only appears when needed
+  // Bottom main bar (modes) with a context bar above it that only appears when needed:
+  // the asset categories and the chosen category's assets, together
   const contextBar = el('div', { class: 'studio-bar studio-context hidden' });
-  const categoryBar = el('div', { class: 'studio-bar studio-categories hidden' });
   const mainBar = el('div', { class: 'studio-bar studio-main' });
-  const palette = el('div', { class: 'studio-palette hidden' }, contextBar, categoryBar, mainBar);
+  const palette = el('div', { class: 'studio-palette hidden' }, contextBar, mainBar);
   ctx.root.append(palette);
 
   function setTool(t) {
@@ -524,6 +524,7 @@ export function createStudio(ctx) {
   const modeOf = (t) => (['edit', 'remove', 'noTracks'].includes(t.type) ? t.type : 'place');
 
   let fixKeys = null; // "Fix …" buttons for this map (the auto run's layout, worked out once)
+  let toolsOpen = false; // the tools menu of the main bar
   function renderPalette() {
     const cat = ctx.getCatalog();
     fixKeys ??= ctx.fixables();
@@ -551,7 +552,8 @@ export function createStudio(ctx) {
       ];
       categoryRow = el(
         'div',
-        { class: 'studio-row' },
+        { class: 'studio-row studio-categories' },
+        el('span', { class: 'studio-label' }, 'Place'),
         ...categories.map(([key, label, first]) =>
           btn(label, category === key, () => {
             category = key;
@@ -587,10 +589,9 @@ export function createStudio(ctx) {
     } else if (mode === 'edit' && selected >= 0) {
       rows.push(editRow(cat, btn, select));
     }
+    if (categoryRow) rows.push(categoryRow); // under the chosen category's assets, by the main bar
     contextBar.replaceChildren(...rows);
     contextBar.classList.toggle('hidden', !rows.length);
-    categoryBar.replaceChildren(...(categoryRow ? [categoryRow] : []));
-    categoryBar.classList.toggle('hidden', !categoryRow);
 
     // Main bar (bottom): modes, status, done
     const hints = {
@@ -603,23 +604,41 @@ export function createStudio(ctx) {
       info.textContent = hints[mode];
       info.dataset.mode = mode;
     }
+    // Tools (modes) and run-wide actions behind one button: it shows the current tool
+    const current = MODES.find(([m]) => m === mode);
+    const pickTool = (m) => {
+      toolsOpen = false;
+      setTool(m === 'place' ? placeTool : { type: m });
+    };
+    const action = (fn) => () => {
+      toolsOpen = false;
+      fn();
+      renderPalette();
+    };
+    const toolsMenu = el(
+      'div',
+      { class: `studio-menu ${toolsOpen ? '' : 'hidden'}` },
+      ...MODES.filter(([m]) => m !== 'noTracks' || cat.tracks !== false).map(([m, label]) => btn(label, mode === m, () => pickTool(m), m === 'remove' ? 'danger' : '')),
+      el('hr'),
+      // Obstacles the auto run has and the studio list may lack (pillars, platforms…)
+      ...fixKeys.map((key) =>
+        el('button', { title: FIX_TITLES[key], onclick: action(() => { const n = ctx.fixMissing(key); drawFootprints(); setInfo(n ? `Placed ${n} ${LABELS[key].toLowerCase()}${n > 1 ? 's' : ''}` : `No ${key === 'pillar' ? 'pillar hall' : 'station'} in this run`); }) }, FIX_LABELS[key]),
+      ),
+      el('button', { title: 'Replace everything with the auto-generated run', onclick: action(async () => commit(await ctx.fromRun(), 'Copied the auto-generated run')) }, '⟳ Copy auto run'),
+      el('button', { class: 'danger', onclick: action(() => confirm('Remove everything placed, including no-track zones?') && (setTool(tool), commit([], 'Wiped'))) }, '💥 Wipe'),
+    );
     mainBar.replaceChildren(
       el(
         'div',
         { class: 'studio-row studio-modes' },
-        ...MODES.filter(([m]) => m !== 'noTracks' || cat.tracks !== false).map(([m, label]) => btn(label, mode === m, () => setTool(m === 'place' ? placeTool : { type: m }), m === 'remove' ? 'danger' : '')),
-        btn('💥 Wipe', false, () => confirm('Remove everything placed, including no-track zones?') && (setTool(tool), commit([], 'Wiped')), 'danger'),
+        el('div', { class: 'studio-tools' }, toolsMenu, el('button', { class: 'tool active', title: 'Tools and actions', onclick: () => ((toolsOpen = !toolsOpen), renderPalette()) }, `${current?.[1] ?? 'Tools'} ▾`)),
+        info,
         el('span', { class: 'studio-sep' }),
         // Game mode (and skin): which pieces the run uses and the palette offers
         ...modeSelects(select),
-        // Obstacles the auto run has and the studio list may lack (pillars, platforms…)
-        ...fixKeys.map((key) =>
-          el('button', { title: FIX_TITLES[key], onclick: () => { const n = ctx.fixMissing(key); drawFootprints(); setInfo(n ? `Placed ${n} ${LABELS[key].toLowerCase()}${n > 1 ? 's' : ''}` : `No ${key === 'pillar' ? 'pillar hall' : 'station'} in this run`); } }, FIX_LABELS[key]),
-        ),
-        el('button', { title: 'Replace everything with the auto-generated run', onclick: async () => commit(await ctx.fromRun(), 'Copied the auto-generated run') }, '⟳ Copy auto run'),
         el('button', { class: 'primary', onclick: () => ctx.onExit() }, 'Done'),
       ),
-      el('div', { class: 'studio-row studio-status' }, info, el('span', { class: 'studio-hint' }, 'Drag or wheel: scroll · Ctrl+wheel: zoom · Esc: cancel')),
+      el('div', { class: 'studio-row studio-status' }, el('span', { class: 'studio-hint' }, 'Drag or wheel: scroll · Ctrl+wheel: zoom · Esc: cancel')),
     );
   }
 
@@ -705,6 +724,8 @@ export function createStudio(ctx) {
       drawFootprints();
       renderPalette();
       palette.classList.remove('hidden');
+      // Open over the stretch the 3D camera was looking at
+      viewZ = ctx.getFocusZ?.() ?? viewZ;
       updateCamera();
       setInfo(`${ctx.getList().length} items · pick a tool, then click the tiles`);
     },

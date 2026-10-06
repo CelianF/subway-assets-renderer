@@ -89,9 +89,9 @@ export const DEFAULT_GEN = {
 
 // ---------------------------------------------------------------- game modes
 
-const MODE_LABELS = { normal: 'Normal', chase: 'Chase', mysteryHurdles: 'Mystery Hurdles', race: 'Race' };
+const MODE_LABELS = { normal: 'Normal', chase: 'Chase', mysteryHurdles: 'Mystery Hurdles', race: 'Race', noFloor: 'No Floor' };
 // The Brawl Stars race skin is Showdown (its start arch says so)
-const SKIN_LABELS = { default: 'Default', subway: 'Subway Race', brawlStars: 'Showdown' };
+const SKIN_LABELS = { default: 'Default', subway: 'Subway Race', brawlStars: 'Showdown', floorIsLava: 'Floor Is Lava', plantInvasion: 'Plant Invasion' };
 const SKIN_ORDER = ['brawlStars']; // listed (and picked by default) first
 // Studio names of the modes' own pieces (other slots: their name, tidied)
 const MODE_PIECE_LABELS = {
@@ -119,6 +119,10 @@ const MODE_PIECE_LABELS = {
   race_start_line: 'Start line',
   race_finish_line: 'Finish line',
   race_start_line_backdrop: 'Start line backdrop',
+  nf_moving_obstacle_standard: 'Rising barrier',
+  nf_moving_obstacle_jump: 'Rising jump barrier',
+  nf_moving_obstacle_roll: 'Rising roll barrier',
+  nf_falling_train_effect: 'Falling train effect',
 };
 // A vanishing piece is only its ghost effect: the game's chunks put the regular piece at the
 // same spot, which it dissolves when the runner comes near. Studio items carry both.
@@ -143,23 +147,29 @@ export function gameModes(manifest) {
     const prefabs = Object.values(mode.overrides).flatMap((slots) => Object.values(slots).flat());
     // The chase mode is dressed for the event running at the time: Halloween's is Trick or Treat
     const label = key === 'chase' && prefabs.some((n) => /_TOT_/.test(n)) ? '🎃 Trick or Treat' : MODE_LABELS[key] ?? tidy(key);
-    const skins = Object.keys(mode.overrides).sort((a, b) => (SKIN_ORDER.includes(b) ? 1 : 0) - (SKIN_ORDER.includes(a) ? 1 : 0));
+    // First (the default): the skin made for this city (No Floor: Floor Is Lava's or Plant Invasion's), else SKIN_ORDER
+    const rank = (s) => (themeSkin(manifest, s) ? 2 : SKIN_ORDER.includes(s) ? 1 : 0);
+    const skins = Object.keys(mode.overrides).sort((a, b) => rank(b) - rank(a));
     out.push({ key, label, skins: skins.map((s) => [s, SKIN_LABELS[s] ?? tidy(s)]) });
   }
   return out;
 }
 
+/** Whether a skin is this city's own event dressing ("floorIsLava" in SubwayCityFloorIsLava). */
+const themeSkin = (manifest, skin) => skin.length > 4 && String(manifest.theme ?? '').toLowerCase().includes(skin.toLowerCase());
+
 /** The active mode's data and its override slots (skin as chosen, else the first). */
 function activeMode(manifest, gen) {
   const mode = manifest.modes?.[gen?.mode];
   if (!mode) return { mode: null, overrides: {} };
-  const skin = gen.skin in mode.overrides ? gen.skin : SKIN_ORDER.find((s) => s in mode.overrides) ?? Object.keys(mode.overrides)[0];
+  const skins = Object.keys(mode.overrides);
+  const skin = gen.skin in mode.overrides ? gen.skin : skins.find((s) => themeSkin(manifest, s)) ?? SKIN_ORDER.find((s) => s in mode.overrides) ?? skins[0];
   return { mode, overrides: mode.overrides[skin] ?? {} };
 }
 
 /** Layer a chunk slot goes on: train-shaped pieces hide with the trains. */
 const layerOf = (slot) =>
-  slot === 'obstacle_lightSignal' ? 'signal' : /^(train_|ct_vanish_obstacles_(moving_)?train(_\d)?$)/.test(slot) ? 'train' : 'obstacle';
+  slot === 'obstacle_lightSignal' ? 'signal' : /^(train_|nf_falling_train|ct_vanish_obstacles_(moving_)?train(_\d)?$)/.test(slot) ? 'train' : 'obstacle';
 
 /**
  * Chunk names a mode's route lays, as the game's scheduler would: the intro section, then
@@ -469,6 +479,7 @@ export function generateLayout(
   const pillarRanges = []; // [z0, z1) where pillars stand in the middle lane
   const pillarHalls = []; // [z0, z1) of every pillar hall / station ("Fix" buttons)
   const stations = [];
+  const stationGrounds = []; // [z0, z1) around a station: outer lanes on plain ground, barrier to barrier
   // In the studio, platforms are items: the outer tracks they cover come from the list
   if (obstacleMode === 'studio') for (const it of studio) if (it.type === 'obstacle' && it.key === 'platform') platformRanges.push([it.z, it.z + SEGMENT]);
   const laneBlocks = []; // { x, z0, z1 }: single-lane stretches already taken (start train)
@@ -589,17 +600,28 @@ export function generateLayout(
   }
 
   function station() {
+    // The game's stations sit in a longer stretch (Chunk_ContentTest_Station): 360 of
+    // buildings on either side, where the outer lanes leave their rails for plain ground
+    // between a barrier before and one after (placeStationSets), a bush or such on the way
+    const approach = has('special_station_platform') && has('track_ground') && !!buildingsType && !gen.showcase;
+    const ground0 = z;
+    if (approach) buildings(2);
     const start = z;
     placeRun('boundary_station_start');
     for (let i = count('boundary_station_mid', 1, 3); i > 0; i--) placeRun('boundary_station_mid');
     placeRun('boundary_station_end');
+    const end = z;
+    if (approach) {
+      buildings(2);
+      stationGrounds.push([ground0, z]);
+    }
     // Raised platforms along both outer tracks, the length of the station (90 + n·180 + 90
     // tiles exactly with the 180-long platform piece)
     // (in the studio they are items, wiped and put back like the rest)
-    if (has('special_station_platform')) stations.push([start, z]);
+    if (has('special_station_platform')) stations.push([start, end]);
     if (obstacleMode === 'studio') return;
-    for (let pz = start; pz + SEGMENT <= z; pz += SEGMENT) place('special_station_platform', [0, 0, pz]);
-    if (has('special_station_platform')) platformRanges.push([start, z]);
+    for (let pz = start; pz + SEGMENT <= end; pz += SEGMENT) place('special_station_platform', [0, 0, pz]);
+    if (has('special_station_platform')) platformRanges.push([start, end]);
   }
   function tube() {
     const start = z;
@@ -856,9 +878,11 @@ export function generateLayout(
       trackType = starts && ends ? 'TrackShadowStartEnd' : starts ? 'TrackShadowStart' : ends ? 'TrackShadowEnd' : 'TrackShadow';
     }
     for (const x of LANES) {
-      // Under station platforms the outer tracks are covered: plain ground, no rails
+      // Under station platforms the outer tracks are covered: plain ground, no rails. Around
+      // stations too (the studio gets that ground as "no tracks" zones: itemsToStudio)
       const covered = x !== 0 && platformRanges.some(([a, b]) => tz >= a && tz < b) && has('track_ground');
-      if (covered) place('track_ground', [x, 0, tz], 'track', { trackType: 'GroundNormal' }, TRACK_TYPE_NAMES.GroundNormal);
+      const stationGround = x !== 0 && obstacleMode !== 'studio' && stationGrounds.some(([a, b]) => tz >= a && tz < b);
+      if (covered || stationGround) place('track_ground', [x, 0, tz], 'track', { trackType: 'GroundNormal', ...(stationGround ? { stationGround: true } : {}) }, TRACK_TYPE_NAMES.GroundNormal);
       else placeTrack(x, tz, trackType);
     }
   }
@@ -879,6 +903,32 @@ export function generateLayout(
   else if (routed) placeRoute();
   else if (obstacleMode === 'chunks' && Object.keys(manifest.chunks ?? {}).length) placeChunks();
   else placeObstacles();
+  if (obstacleMode !== 'studio' && !routed) placeStationSets();
+
+  // Outer lanes around a station (barriers included): no trains or random obstacles there
+  function nearStation(x, from, to) {
+    return x !== 0 && Math.abs(x) > 10 && stationGrounds.some(([a, b]) => from < b + 30 && to > a - 30);
+  }
+
+  /** Each station's outer-lane set, as Chunk_ContentTest_Station lays it (its x flipped to glTF). */
+  function placeStationSets() {
+    const enabled = (keys) => keys.filter((k) => gen.obstacles[k]).map((k) => OBSTACLE_SLOTS[k]).filter(has);
+    const barriers = enabled(['jump', 'roll', 'standard']);
+    const props = enabled(['bush', 'dumpster', 'powerBox']);
+    const prop = (x, pz) => {
+      if (!props.length) return;
+      const slot = pick(rng, props);
+      if (slot === 'obstacle_powerBox') powerBoxCluster(x, pz);
+      else place(slot, [x, 0, pz], 'obstacle');
+    };
+    for (const [a, b] of stationGrounds) {
+      // A barrier where the rails stop and one where they come back, on both outer lanes
+      if (barriers.length) for (const x of [-20, 20]) for (const bz of [a, b]) place(pick(rng, barriers), [x, 0, bz], 'obstacle');
+      prop(rng() < 0.5 ? -20 : 20, a + 150); // one side, at random (the game mirrors it)
+      prop(-20, b - 180);
+      prop(20, b - 150);
+    }
+  }
 
   function placeStudio() {
     for (const it of studio) {
@@ -968,6 +1018,7 @@ export function generateLayout(
       if (pl.mirror && mirrored.get(pl.mirror) && Math.abs(2 * pl.mirrorX - x) <= Math.max(20.5, Math.abs(x))) x = 2 * pl.mirrorX - x;
       const key = `${pl.slot}@${x},${pz + cz}`;
       if (seen.has(key)) continue; // a chase entity and its themed child share a spot
+      if (nearStation(x, pz + cz, pz + cz + (layerOf(pl.slot) === 'train' ? 300 : 30))) continue;
       seen.add(key);
       const layer = layerOf(pl.slot);
       // Trains in one lane of a chunk hide together in the cutaway
@@ -999,7 +1050,8 @@ export function generateLayout(
           noTrackRanges.some(([a, b]) => from < b && to > a - 30) ||
           (x === 0 && pillarRanges.some(([a, b]) => from < b && to > a - 10)) ||
           laneBlocks.some((l) => l.x === x && from < l.z1 && to > l.z0) ||
-          (x !== 0 && platformRanges.some(([a, b]) => from < b && to > a - 10));
+          (x !== 0 && platformRanges.some(([a, b]) => from < b && to > a - 10)) ||
+          nearStation(x, from, to);
         if (blocked(oz, oz + 30)) {
           oz += 90;
           continue;
@@ -1058,6 +1110,14 @@ export function itemsToStudio(items) {
   // trains share a group per lane, so it's found by position
   const ramps = items.filter((i) => i.slot === 'train_ramp');
   const rampOf = (it) => ramps.find((r) => r.group === it.group && r.pos[0] === it.pos[0] && it.pos[2] - r.pos[2] > 24 && it.pos[2] - r.pos[2] < 42);
+  // The plain ground around stations: "no tracks" zones, one per lane and stretch
+  for (const it of items) {
+    if (!it.stationGround) continue;
+    const [x, , z] = it.pos;
+    const zone = out.find((o) => o.type === 'noTracks' && o.lane === x && o.z1 === z);
+    if (zone) zone.z1 = z + SEGMENT;
+    else out.push({ type: 'noTracks', lane: x, z0: z, z1: z + SEGMENT });
+  }
   for (const it of items) {
     const [x, , z] = it.pos;
     if (underVanish.has(at(it.slot, it.pos))) continue;

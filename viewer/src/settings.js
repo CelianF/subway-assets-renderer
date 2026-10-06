@@ -152,42 +152,59 @@ export function createSettings(root, schema, { title = 'Settings' } = {}) {
   };
 }
 
+/** Loose controls (outside a menu or work bar), e.g. a popover. */
+export function createControls(controls) {
+  const refreshers = [];
+  const nodes = controls.map((c) => buildControl(c, refreshers));
+  return { nodes, refresh: () => refreshers.forEach((r) => r()) };
+}
+
 /**
  * Bottom work bar (studio-style) for settings you tune while looking at the scene:
  * a main bar with one button per group, and the chosen group's controls above it.
- * Same schema groups as createSettings: [{ title, controls }].
+ * Groups: [{ title, visible?, controls } | { title, visible?, columns: [{ title?, visible?, wide?, controls }] }]
+ * A group whose columns are all hidden is hidden too; a wide column lays its controls out in a grid.
  * @returns {{ open(), close(), toggle(), refresh(), isOpen() }}
  */
 export function createWorkbar(root, groups, { title = 'Settings', onClose = null } = {}) {
   const refreshers = [];
   let current = 0;
-  // A group is either a flat control list or side-by-side titled columns
   const pages = groups.map((g) => {
     const columns = g.columns ?? [{ controls: g.controls }];
-    const page = el('div', { class: 'workbar-controls', style: `grid-template-columns: repeat(${columns.length}, 1fr)` });
-    for (const col of columns) {
-      const colEl = el('div', { class: 'workbar-column' }, col.title ? el('h4', {}, col.title) : null);
-      for (const c of col.controls) colEl.append(buildControl(c, refreshers));
+    const page = el('div', { class: 'workbar-controls' });
+    const shown = columns.map((col) => {
+      const colEl = el('div', { class: `workbar-column${col.wide ? ' wide' : ''}` }, col.title ? el('h4', {}, col.title) : null);
+      const list = col.wide ? el('div', { class: 'workbar-grid' }) : colEl;
+      for (const c of col.controls) list.append(buildControl(c, refreshers));
+      if (col.wide) colEl.append(list);
       page.append(colEl);
-    }
-    return page;
+      const visible = () => !col.visible || col.visible();
+      refreshers.push(() => colEl.classList.toggle('hidden', !visible()));
+      return visible;
+    });
+    return { page, visible: () => (!g.visible || g.visible()) && shown.some((v) => v()) };
   });
   const contextBar = el('div', { class: 'studio-bar workbar-context' });
   const groupButtons = groups.map((g, i) => el('button', { class: 'tool', onclick: () => show(i) }, g.title));
   const mainBar = el(
     'div',
     { class: 'studio-bar' },
-    el('div', { class: 'studio-row' }, el('strong', {}, title), ...groupButtons, el('span', { class: 'studio-sep' }), el('button', { class: 'primary', onclick: () => close() }, 'Done')),
+    el('div', { class: 'studio-row' }, el('strong', { class: 'workbar-title' }, title), ...groupButtons, el('span', { class: 'studio-sep' }), el('button', { class: 'primary', onclick: () => close() }, 'Done')),
   );
   const bar = el('div', { class: 'studio-palette workbar hidden' }, contextBar, mainBar);
   root.append(bar);
 
   function show(i) {
     current = i;
-    contextBar.replaceChildren(pages[i]);
+    contextBar.replaceChildren(pages[i].page);
     groupButtons.forEach((b, k) => b.classList.toggle('active', k === i));
   }
-  const refresh = () => refreshers.forEach((r) => r());
+  function refresh() {
+    refreshers.forEach((r) => r());
+    pages.forEach((p, i) => groupButtons[i].classList.toggle('hidden', !p.visible()));
+    // The open group may have just disappeared (e.g. a game mode without map sections)
+    if (!pages[current].visible()) show(Math.max(0, pages.findIndex((p) => p.visible())));
+  }
   function open() {
     refresh();
     show(current);
@@ -195,6 +212,7 @@ export function createWorkbar(root, groups, { title = 'Settings', onClose = null
     document.body.classList.add('workbar-open');
   }
   function close() {
+    if (bar.classList.contains('hidden')) return;
     bar.classList.add('hidden');
     document.body.classList.remove('workbar-open');
     onClose?.();

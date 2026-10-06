@@ -24,6 +24,7 @@ body {
   height: 100%;
 }
 
+/* Before the UI is up: a loading line; then it moves into the header (ui.js) */
 #status {
   position: fixed;
   left: 12px;
@@ -32,6 +33,18 @@ body {
   font-size: 12px;
   text-shadow: 0 1px 2px #000;
   pointer-events: none;
+}
+.env-header #status {
+  position: static;
+  padding: 5px 0 5px 14px;
+  border-left: 1px solid var(--panel-border);
+  color: var(--muted);
+  text-shadow: none;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.env-header #status:hover {
+  color: var(--text);
 }
 
 button {
@@ -75,6 +88,15 @@ button:hover {
 }
 .env-header .back:hover {
   background: rgba(255, 255, 255, 0.16);
+}
+.env-header .close-link,
+body.workbar-open .env-header .home-link,
+body.studio .env-header .home-link {
+  display: none;
+}
+body.workbar-open .env-header .close-link,
+body.studio .env-header .close-link {
+  display: inline-block;
 }
 .env-header small {
   color: var(--muted);
@@ -146,7 +168,7 @@ button:hover {
 }
 
 .gallery {
-  right: 270px;
+  right: 10px;
   width: 280px;
 }
 .gallery-body {
@@ -183,17 +205,55 @@ button:hover {
 
 /* ---------------------------------------------------------------- toolbar etc. */
 
+/* Groups of joined buttons: scene modes · capture · help */
 .toolbar {
   position: fixed;
   right: 10px;
   bottom: 10px;
   display: flex;
-  gap: 6px;
+  gap: 10px;
 }
 .toolbar button {
   background: var(--panel-bg);
   backdrop-filter: blur(8px);
   position: relative;
+}
+.tool-group {
+  position: relative;
+  display: flex;
+}
+.tool-group > button {
+  border-radius: 0;
+}
+.tool-group > button + button {
+  border-left: 0;
+}
+.tool-group > button:first-of-type {
+  border-radius: 7px 0 0 7px;
+}
+.tool-group > button:last-of-type {
+  border-radius: 0 7px 7px 0;
+}
+.toolbar .caret {
+  padding: 5px 7px;
+}
+.shot-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: 280px;
+  padding: 10px 12px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  backdrop-filter: blur(12px);
+}
+.shot-menu h4 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
 }
 .toolbar .count {
   margin-left: 6px;
@@ -451,8 +511,7 @@ button.danger {
 /* ---------------------------------------------------------------- studio */
 
 body.workbar-open .toolbar,
-body.workbar-open #status,
-body.studio #status,
+body.workbar-open .gallery,
 body.studio .toolbar,
 body.studio .browser,
 body.studio .gallery {
@@ -480,6 +539,38 @@ body.studio #view {
   border: 1px solid var(--panel-border);
   border-radius: 14px;
   backdrop-filter: blur(12px);
+}
+.studio-categories:not(:only-child) {
+  padding-top: 8px;
+  border-top: 1px solid var(--panel-border);
+}
+/* The main bar's tools button and its menu (modes, then run-wide actions) */
+.studio-tools {
+  position: relative;
+}
+.studio-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 190px;
+  padding: 8px;
+  background: #1b2029;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+.studio-menu button {
+  text-align: left;
+}
+.studio-menu hr {
+  width: 100%;
+  margin: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--panel-border);
 }
 .studio-sep {
   flex: 1;
@@ -549,19 +640,30 @@ body.studio #view {
 }
 
 .workbar-controls {
-  display: grid;
-  column-gap: 0;
+  display: flex;
 }
 .workbar-column {
-  padding: 0 16px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.workbar-column.wide {
+  flex-grow: 3;
+}
+/* A separator before every shown column but the first */
+.workbar-column:not(.hidden) ~ .workbar-column {
+  margin-left: 16px;
+  padding-left: 16px;
   border-left: 1px solid var(--panel-border);
 }
-.workbar-column:first-child {
-  padding-left: 0;
-  border-left: 0;
+.workbar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  column-gap: 16px;
+  max-height: 40vh;
+  overflow-y: auto;
 }
-.workbar-column:last-child {
-  padding-right: 0;
+.workbar-title {
+  margin-right: 8px;
 }
 .workbar-column h4 {
   margin: 0 0 4px;

@@ -542,6 +542,8 @@ const GAME_MODES = {
   chase: { route: 'ChaseTargetRouteConfig', overrides: { default: 'ChaseTargetAssetOverrides' } },
   mysteryHurdles: { route: 'MysteryHurdlesRouteConfig', overrides: { default: 'MysteryHurdlesAssetOverrides' } },
   race: { route: 'RaceRouteConfig', overrides: { subway: 'SubwayRace_RaceAssetOverrides', brawlStars: 'BsRace_RaceAssetOverrides' } },
+  // Floor Is Lava / Plant Invasion: one route, each event city with its own moving blockers
+  noFloor: { route: 'NoFloorRouteConfig', overrides: { floorIsLava: 'FloorIsLavaAssetOverrides', plantInvasion: 'PlantInvasionAssetOverrides' } },
 };
 // Section config script -> how the viewer expands it
 const SECTION_KINDS = {
