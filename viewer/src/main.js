@@ -171,7 +171,7 @@ function borrowPrefabs(envId, other, names, materialNames = []) {
     if (copy.animators) copy.animators = abs(copy.animators);
     for (const sk of copy.skinned ?? []) sk.mesh = abs(sk.mesh);
     for (const m of copy.morphMeshes ?? []) m.url = abs(m.url);
-    if (copy.letters) copy.letters.meshes = copy.letters.meshes.map(abs);
+    for (const swap of [copy.letters, copy.meshVariants].filter(Boolean)) swap.meshes = swap.meshes.map(abs);
     for (const a of Object.values(copy.meshAnimations ?? {})) a.frames = a.frames.map(abs);
     for (const p of Object.values(copy.particles ?? {})) {
       p.render.meshGlb = abs(p.render.meshGlb);
@@ -902,22 +902,14 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
 
 /**
  * What a pickup's script picks at runtime, as the studio set it: a hunt letter's mesh
- * (LetterPickup.UpdateLetterModel: one of 26, A to Z), and the season token's hunt token in
- * its holder (the map's first, 3.70's bat, unless the season point is asked for).
+ * (LetterPickup.UpdateLetterModel: one of 26, A to Z), the Pride coin's color (the next of
+ * its six for each coin of a line: a rainbow), and the season token's hunt token in its
+ * holder (the map's first, 3.70's bat, unless the season point is asked for).
  */
 async function customizePickup(obj, prefab, it) {
-  const index = it.letter ? it.letter.toUpperCase().charCodeAt(0) - 65 : -1;
-  const letterNode = prefab.letters && index >= 0 && findNode(obj, prefab.letters.node);
-  if (letterNode && prefab.letters.meshes[index]) {
-    let geometry = null;
-    (await loadGlb(prefab.letters.meshes[index])).traverse((o) => (geometry ??= o.isMesh ? o.geometry : null));
-    const meshes = [];
-    letterNode.traverse((o) => o.isMesh && meshes.push(o));
-    if (geometry && meshes.length) {
-      meshes[0].geometry = geometry;
-      meshes.slice(1).forEach((m) => (m.visible = false)); // (the old letter's unused submesh)
-    }
-  }
+  const letter = it.letter ? it.letter.toUpperCase().charCodeAt(0) - 65 : -1;
+  if (prefab.letters && letter >= 0) await swapMesh(obj, prefab.letters.node, prefab.letters.meshes[letter]);
+  if (prefab.meshVariants) await swapMesh(obj, prefab.meshVariants.node, prefab.meshVariants.meshes[(it.coinIndex ?? 0) % prefab.meshVariants.meshes.length]);
   const token = prefab.tokenSlot && it.token !== 'point' ? it.token ?? manifest.huntTokens?.[0] : null;
   const holder = token && manifest.prefabs[token] && findNode(obj, prefab.tokenSlot.holder);
   if (holder) {
@@ -928,6 +920,19 @@ async function customizePickup(obj, prefab, it) {
       if (point) point.visible = false;
     }
   }
+}
+
+/** Gives a node the mesh of another glb, as a script swapping its MeshFilter's mesh. */
+async function swapMesh(obj, nodeName, url) {
+  const node = url && findNode(obj, nodeName);
+  if (!node) return;
+  let geometry = null;
+  (await loadGlb(url)).traverse((o) => (geometry ??= o.isMesh ? o.geometry : null));
+  const meshes = [];
+  node.traverse((o) => o.isMesh && meshes.push(o));
+  if (!geometry || !meshes.length) return;
+  meshes[0].geometry = geometry;
+  meshes.slice(1).forEach((m) => (m.visible = false)); // (the old mesh's unused submesh)
 }
 
 /** A mesh particle's glb as one geometry. */

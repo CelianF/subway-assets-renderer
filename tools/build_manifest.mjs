@@ -761,7 +761,8 @@ function disabledRenderers(file) {
 /**
  * What a pickup's script picks at runtime: one of its _randomModels (Trick or Treat's two
  * candies), the letter mesh of a hunt letter (_letterMeshes, A to Z, on _letterMeshFilter),
- * the season hunt token's holder (the season point when no hunt runs).
+ * the Pride coin's color (_meshVariants on _filter_LOD0: red, orange … purple, the next one
+ * for each coin spawned), the season hunt token's holder (the season point when no hunt runs).
  */
 function parsePickupScript(file, guidIndex) {
   const docs = yamlDocs(read(file));
@@ -777,6 +778,9 @@ function parsePickupScript(file, guidIndex) {
     const letters = list(doc, '_letterMeshes').map(([, , g]) => g && guidIndex.get(g)).filter(Boolean).map(stem);
     const filter = doc.match(/_letterMeshFilter: \{fileID: (\d+)/)?.[1];
     if (letters.length && names.has(goOf.get(filter))) out.letters = { node: names.get(goOf.get(filter)), meshes: letters };
+    const variants = list(doc, '_meshVariants').map(([, , g]) => g && guidIndex.get(g)).filter(Boolean).map(stem);
+    const lod0 = doc.match(/_filter_LOD0: \{fileID: (\d+)/)?.[1];
+    if (variants.length && names.has(goOf.get(lod0))) out.meshVariants = { node: names.get(goOf.get(lod0)), meshes: variants };
     const holder = names.get(doc.match(/_seasonHuntTokenHolder: \{fileID: (\d+)/)?.[1]);
     const point = names.get(doc.match(/_seasonPointHolder: \{fileID: (\d+)/)?.[1]);
     if (holder) out.tokenSlot = { holder, point };
@@ -2935,10 +2939,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     const randomizers = { ...parseRandomizers(prefabPath, guidIndex), ...script.randomizers };
     if (Object.keys(randomizers).length) info.randomizers = randomizers;
     if (script.tokenSlot) info.tokenSlot = script.tokenSlot;
-    if (script.letters) {
-      const letters = script.letters.meshes.map((m) => meshGlbs.get(`${m}.glb`));
-      for (const src of letters.filter(Boolean)) copyIfNewer(src, path.join(outMesh, path.basename(src)));
-      if (letters.every(Boolean)) info.letters = { node: script.letters.node, meshes: letters.map((src) => `mesh/${path.basename(src)}`) };
+    for (const key of ['letters', 'meshVariants']) {
+      if (!script[key]) continue;
+      const meshes = script[key].meshes.map((m) => meshGlbs.get(`${m}.glb`));
+      for (const src of meshes.filter(Boolean)) copyIfNewer(src, path.join(outMesh, path.basename(src)));
+      if (meshes.every(Boolean)) info[key] = { node: script[key].node, meshes: meshes.map((src) => `mesh/${path.basename(src)}`) };
     }
     // (pickups: the renderers they start with off, too)
     const lodHidden = sortedStrings(new Set([...parseLodGroups(prefabPath), ...(pickups.includes(name) ? disabledRenderers(prefabPath) : [])]));
@@ -3201,7 +3206,7 @@ function splitByTheme(manifest, staging, out, log) {
       ...Object.values(prefabs).map((p) => p.animators).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => (p.skinned ?? []).map((sk) => sk.mesh)),
       ...Object.values(prefabs).flatMap((p) => (p.morphMeshes ?? []).map((m) => m.url)),
-      ...Object.values(prefabs).flatMap((p) => p.letters?.meshes ?? []),
+      ...Object.values(prefabs).flatMap((p) => [...(p.letters?.meshes ?? []), ...(p.meshVariants?.meshes ?? [])]),
       ...Object.values(materials).flatMap((m) => Object.values(m.textures).map((t) => t.url)).filter(Boolean),
       ...(config.sky?.texture ? [config.sky.texture] : []),
       ...(config.effects ?? []).map((e) => e.activated?.meshGlb).filter(Boolean),

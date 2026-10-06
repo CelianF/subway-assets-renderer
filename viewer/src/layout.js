@@ -1045,11 +1045,11 @@ export function generateLayout(
         else place(slot, [it.lane, y, it.z], layer, extra);
         if (base) place(base, [it.lane, y, it.z], layerOf(base), { ...extra, ...(layerOf(base) === 'train' ? { group: `studio${it.lane}@${it.z}` } : {}) });
       } else if (it.type === 'coins') {
-        for (const cz of coinPositions(it)) placePickup(it.coin ?? 'Coin', it.lane, cz, COIN_HEIGHT);
+        coinPositions(it).forEach((cz, coinIndex) => placePickup(it.coin ?? 'Coin', it.lane, cz, COIN_HEIGHT, false, { coinIndex }));
       } else if (it.type === 'coinArc') {
         // (the whole arc rises from its spot's height: a roof's, when it starts on a train)
         const base = roofAt(it.lane, it.z) + ARC_HEIGHT;
-        for (const c of arcPositions(it, manifest.coinPatterns?.arcs?.[0])) placePickup(it.coin ?? 'Coin', it.lane, c.z, base + c.y, true);
+        arcPositions(it, manifest.coinPatterns?.arcs?.[0]).forEach((c, coinIndex) => placePickup(it.coin ?? 'Coin', it.lane, c.z, base + c.y, true, { coinIndex }));
       } else if (it.type === 'pickup') {
         placePickup(it.key, it.lane, it.z, PICKUP_HEIGHT, false, { ...(it.letter ? { letter: it.letter } : {}), ...(it.token ? { token: it.token } : {}) });
       }
