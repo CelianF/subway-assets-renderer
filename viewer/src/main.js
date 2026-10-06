@@ -5,7 +5,7 @@ import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
-import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setAltZones, setReversedDepth, texturesReady, zoneClipped, makeZoneUniforms } from './materials.js';
+import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setAltZones, setAltRunner, MAX_ALT_ZONES, setReversedDepth, texturesReady, zoneClipped, makeZoneUniforms } from './materials.js';
 import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
@@ -1145,32 +1145,41 @@ async function addThemeEffects(length, id) {
 
 /**
  * Event challenges (3.19 New York Play2Plant's Green Jam, St Petersburg's Christmas): while
- * one runs, a trail (grass, snow) grows under the runner and the city takes its challenge
- * look (green instead of grey, Christmas decorations). Auto runs show it all along; the
- * studio places it in zones.
+ * one runs, the city takes its challenge look around the runner (green instead of grey,
+ * Christmas decorations), a trail (grass, snow) leapfrogs under it and the effect's own
+ * particles ride along (gifts thrown ahead, poles with garlands and blinking baubles, growing
+ * trees, sparkles). Auto runs show the look all along, still; the studio's zones each replay
+ * the event in a loop: a runner of their own runs from the zone's start to its end, on the
+ * scene clock (the time bar freezes or slows it).
  */
 const CHALLENGE_LABELS = { ThemeEffectGreenJam: '🌱 Green Jam', ThemeEffectChristmas: '🎄 Christmas' };
 const challengeEffect = () => (manifest.themeConfigs?.[state.theme]?.effects ?? []).find((e) => e.segments?.length && e.script in CHALLENGE_LABELS);
 const challengeGroup = new THREE.Group();
 scene.add(challengeGroup);
-let challengeSegment = null; // { theme, node }: the trail piece, loaded once
-// The rest of the challenge effect rides with the runner (ThemeEffectChristmas: gifts thrown
-// ahead, poles with garlands and blinking baubles, growing trees, sparkles, Santa): its own
-// particles, spawning while the runner is inside a zone. { theme, obj, emitters, zones }
-let challengeFx = null;
-// Not riding along: the trail (tiled above), the reward drop at milestones, the start's snow
+let challengeParts = null; // { theme, segments: [node], fx: node | null }: loaded once per map
+let challengeRuns = []; // per studio zone: { z0, z1, segments: [copy], fx, slot }
+// Riding along: the effect without its trail (leapfrogged apart), the reward drop at
+// milestones and the start's snow
 const CHALLENGE_STILL = /_Segment_\d+$|_Milestone_Drop$|_StaticSnow$/;
+// The look around the runner: from half a segment behind it to a segment and a half ahead,
+// over the two trail segments
+const CHALLENGE_REACH = [0.5, 1.5];
 
-async function loadChallengeFx(effect) {
+async function loadChallengeParts(effect) {
   const prefab = manifest.prefabs[effect.prefab];
-  if (!prefab?.glb || !prefab.particles) return null;
-  const obj = (await loadGlb(prefab.glb)).clone();
-  const doomed = [];
-  obj.traverse((o) => CHALLENGE_STILL.test(o.name) && doomed.push(o));
-  for (const o of doomed) o.removeFromParent();
-  obj.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
-  const emitters = await attachRunnerParticles(obj, prefab.particles);
-  return { theme: state.theme, obj, emitters, zones: [] };
+  const root = prefab?.glb ? await loadGlb(prefab.glb) : null;
+  if (!root) return { theme: state.theme, segments: [], fx: null };
+  const segments = effect.segments.map((n) => root.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(n))).filter(Boolean);
+  for (const node of segments) node.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
+  let fx = null;
+  if (prefab.particles) {
+    fx = root.clone();
+    const doomed = [];
+    fx.traverse((o) => CHALLENGE_STILL.test(o.name) && doomed.push(o));
+    for (const o of doomed) o.removeFromParent();
+    fx.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
+  }
+  return { theme: state.theme, segments, fx };
 }
 
 /** [z0, z1) zones where the challenge shows, or null when the map has none. */
@@ -1180,40 +1189,68 @@ function challengeZones(length) {
   return state.studio.filter((it) => it.type === 'challenge').map((it) => [it.z0, it.z1]).sort((a, b) => a[0] - b[0]);
 }
 
-/** The challenge trail tiled over its zones, and the city's look switched inside them. */
+/** Auto runs: the trail tiled all along. Studio: a looping runner per zone (updateChallenge). */
 async function placeChallenge(length, id) {
   const zones = challengeZones(length);
-  setAltZones(zones);
-  challengeGroup.clear();
+  const looping = state.obstacleMode === 'studio';
+  setAltZones(zones, looping ? CHALLENGE_REACH.map((k) => k * (challengeEffect()?.segmentSize ?? 100)) : null);
+  challengeGroup.clear(); // (the runs' particles go with their effect)
+  challengeRuns = [];
   const effect = zones && challengeEffect();
-  if (challengeFx && (!effect || challengeFx.theme !== state.theme)) {
-    challengeFx.obj.removeFromParent(); // (its emitters go with it)
-    challengeFx = null;
-  }
   if (!effect) return;
-  if (!challengeFx) {
-    const fx = await loadChallengeFx(effect);
-    if (id !== buildId) return fx?.obj.removeFromParent();
-    if (fx) scene.add(fx.obj), (challengeFx = fx), applyThemeLook();
-  }
-  // (auto runs: all along, the start included)
-  if (challengeFx) challengeFx.zones = state.obstacleMode === 'studio' ? zones : [[-Infinity, Infinity]];
-  if (challengeSegment?.theme !== state.theme) {
-    const prefab = manifest.prefabs[effect.prefab];
-    const root = prefab?.glb ? await loadGlb(prefab.glb) : null;
-    const node = root?.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(effect.segments[0]));
+  if (challengeParts?.theme !== state.theme) {
+    const parts = await loadChallengeParts(effect);
     if (id !== buildId) return;
-    node?.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
-    challengeSegment = { theme: state.theme, node };
+    challengeParts = parts;
   }
-  const node = challengeSegment.node;
-  if (!node) return;
-  for (const [z0, z1] of zones) {
-    for (let z = z0; z < z1; z += effect.segmentSize) {
-      const copy = node.clone();
-      copy.position.set(0, node.position.y, z);
-      challengeGroup.add(copy);
+  const { segments, fx } = challengeParts;
+  const size = effect.segmentSize;
+  if (!looping) {
+    if (!segments.length) return;
+    for (const [z0, z1] of zones) {
+      for (let z = z0, k = 0; z < z1; z += size, k++) {
+        const copy = segments[k % segments.length].clone();
+        copy.position.set(0, copy.position.y, z);
+        challengeGroup.add(copy);
+      }
     }
+    return;
+  }
+  for (const [slot, [z0, z1]] of zones.slice(0, MAX_ALT_ZONES).entries()) {
+    // Two segments at least: one under the runner, the next ahead
+    const trail = [0, 1].map((k) => segments[k % segments.length]?.clone()).filter(Boolean);
+    for (const t of trail) challengeGroup.add(t);
+    let fxCopy = null;
+    if (fx) {
+      fxCopy = fx.clone();
+      challengeGroup.add(fxCopy);
+      // (made with particles off too: shown once they're on)
+      await attachRunnerParticles(fxCopy, manifest.prefabs[effect.prefab].particles, { anchored: true });
+      if (id !== buildId) return;
+    }
+    challengeRuns.push({ z0, z1, trail, fx: fxCopy, slot });
+  }
+  updateChallenge(time.now);
+  applyThemeLook();
+}
+
+/** Each zone's runner at scene time `now`: the look's window, the trail and the effect follow. */
+function updateChallenge(now) {
+  if (!challengeRuns.length) return;
+  const size = challengeEffect()?.segmentSize ?? 100;
+  for (const run of challengeRuns) {
+    const length = Math.max(run.z1 - run.z0, 1);
+    const z = run.z0 + ((((now * RUN_SPEED) % length) + length) % length);
+    setAltRunner(run.slot, z);
+    // Leapfrogged as in the game: the segment under the runner and the next one, the one
+    // left behind jumping ahead
+    const under = Math.floor((z - run.z0) / size);
+    for (let n = under; n < under + run.trail.length; n++) {
+      const seg = run.trail[n % run.trail.length];
+      seg.position.z = run.z0 + n * size;
+      seg.visible = seg.position.z < run.z1;
+    }
+    run.fx?.position.set(0, 0, z);
   }
 }
 
@@ -1425,15 +1462,18 @@ async function setFollowEffects(effects) {
   placeFollowEffects();
   applyThemeLook();
 }
-/** An effect's particles that ride with the runner: world-space ones stay put as it moves. */
-async function attachRunnerParticles(obj, particles) {
+/**
+ * An effect's particles that ride with a runner: world-space ones stay put as it moves.
+ * Following the camera, they come at it at the run speed as the runner would run into them;
+ * `anchored`: the effect itself moves (a zone's runner), even jumping back to loop.
+ */
+async function attachRunnerParticles(obj, particles, { anchored = false } = {}) {
   const table = sanitizedTable(Object.entries(particles));
   const emitters = await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
   for (const e of emitters) {
     if (e.def.local) continue;
-    e.worldLock = { pos: new THREE.Vector3(), ready: false };
-    // The runner runs into them: they come at the camera at the run speed
-    e.drift = new THREE.Vector3(0, 0, -RUN_SPEED).applyQuaternion(e.node.getWorldQuaternion(new THREE.Quaternion()).invert());
+    e.worldLock = { pos: new THREE.Vector3(), ready: false, anchored };
+    if (!anchored) e.drift = new THREE.Vector3(0, 0, -RUN_SPEED).applyQuaternion(e.node.getWorldQuaternion(new THREE.Quaternion()).invert());
     e.travel = RUN_SPEED;
     // Imported before rate over distance was kept: a looping system that never emits over
     // time nor in bursts emitted on distance; a stand-in rate until the map is re-imported
@@ -1449,13 +1489,6 @@ function placeFollowEffects() {
     const [ox, oy, oz] = effect.follow.offset;
     obj.position.set(effect.follow.zOnly ? ox : cam.x + ox, oy, cam.z + RUNNER_AHEAD + oz);
   }
-  if (challengeFx) {
-    // On the track's axis, where the runner would be; it only spawns inside the zones
-    const z = cam.z + RUNNER_AHEAD;
-    challengeFx.obj.position.set(0, 0, z);
-    const inside = challengeFx.zones.some(([z0, z1]) => z >= z0 && z < z1);
-    for (const e of challengeFx.emitters) e.emitting = inside;
-  }
 }
 
 function applyThemeLook() {
@@ -1470,7 +1503,7 @@ function applyThemeLook() {
   }
   const effectsOn = state.weather && !state.inspect && !studio?.active;
   for (const fx of followFx) fx.obj.visible = effectsOn && (state.particles || !fx.particles);
-  if (challengeFx) challengeFx.obj.visible = effectsOn && state.particles;
+  for (const run of challengeRuns) if (run.fx) run.fx.visible = state.particles;
   setWeatherVisible(weatherOn);
   // No fog/skyline while inspecting: the camera frames pieces from far away
   // (nor in the studio's top view, 600 units above the run)
@@ -2329,6 +2362,7 @@ renderer.setAnimationLoop(() => {
   const dt = time.tick(Math.min(clock.getDelta(), 0.1));
   const now = time.now;
   globals.uTime.value = now;
+  updateChallenge(now);
   updateMeshAnimations(now);
   updateAnimators(dt);
   placeFollowEffects();

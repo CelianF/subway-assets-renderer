@@ -387,7 +387,6 @@ class Emitter {
     this.drift = null; // node-space units/s every particle moves by (world-space systems on a moving node)
     this.travel = 0; // units/s the system moves at (riding with the runner): rate-over-distance emission
     this.worldLock = null; // world-space system on a node that moves: its node's last world position
-    this.emitting = true; // off: no new particles, the live ones play out (an effect's zone ended)
     this.count = 0;
     this.time = 0;
     this.emitAcc = 0;
@@ -572,7 +571,7 @@ class Emitter {
     this.time += dt;
     const local = this.time - this.delay;
     if (this.sources) this.emitSources(dt);
-    else if (local >= 0 && this.emitting) {
+    else if (local >= 0) {
       const cycle = Math.floor(local / this.period);
       const inCycle = local - cycle * this.period;
       const emitting = d.loop || inCycle < d.duration;
@@ -909,7 +908,8 @@ const lockQuat = new THREE.Quaternion();
 function keepInWorld(e) {
   e.node.getWorldPosition(lockPos);
   const last = e.worldLock;
-  if (last.ready && lockPos.distanceTo(last.pos) < 300) {
+  // (an anchored effect moves by itself: its particles stay even when it jumps back to loop)
+  if (last.ready && (last.anchored || lockPos.distanceTo(last.pos) < 300)) {
     const d = last.pos.sub(lockPos).applyQuaternion(e.node.getWorldQuaternion(lockQuat).invert());
     const pos = e.local.pos;
     for (let i = 0; i < e.count; i++) {

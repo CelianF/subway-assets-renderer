@@ -37,7 +37,7 @@ export function setBendDegrees(horizontal, vertical = 0) {
 }
 
 const MAX_CUTS = 32;
-const MAX_ALT_ZONES = 16; // studio challenge zones (setAltZones)
+export const MAX_ALT_ZONES = 16; // studio challenge zones (setAltZones)
 
 // Depth bias, in steps towards the camera. three flips the slope factor for the reversed
 // depth buffer but not the constant units, so those are flipped here
@@ -59,10 +59,12 @@ export const globals = {
   uBend: bend,
   uResolution: { value: new THREE.Vector2(1920, 1080) }, // render target size (screen-space masks)
   uAltRatio: { value: 0 }, // _AlternateColorRatio (New York "Play2Plant" variant textures)
-  // Challenge zones (setAltZones): [z0, z1) where the main textures show, the alternate
-  // ones elsewhere. Count -1: no zones, uAltRatio everywhere
+  // Challenge zones (setAltZones): (z0, z1, runner z, looping) where the main textures show,
+  // the alternate ones elsewhere; a looping zone only shows them around its runner, from
+  // uAltReach.x behind it to .y ahead. Count -1: no zones, uAltRatio everywhere
   uAltZoneCount: { value: -1 },
-  uAltZones: { value: Array.from({ length: MAX_ALT_ZONES }, () => new THREE.Vector2()) },
+  uAltZones: { value: Array.from({ length: MAX_ALT_ZONES }, () => new THREE.Vector4()) },
+  uAltReach: { value: new THREE.Vector2() },
   // Studio "no tracks" zones: (track x, z0, z1); rails hide inside, fill ground shows only inside
   uCutCount: { value: 0 },
   uCuts: { value: Array.from({ length: MAX_CUTS }, () => new THREE.Vector3()) },
@@ -74,15 +76,20 @@ export const globals = {
  * alternate ones the city without it (grey, plain). Inside the zones the challenge shows;
  * null: no challenge, the main textures everywhere.
  */
-export function setAltZones(zones) {
+export function setAltZones(zones, reach = null) {
   if (!zones) {
     globals.uAltZoneCount.value = -1;
     globals.uAltRatio.value = 0;
     return;
   }
   const list = zones.slice(0, MAX_ALT_ZONES);
-  list.forEach(([z0, z1], i) => globals.uAltZones.value[i].set(z0, z1));
+  list.forEach(([z0, z1], i) => globals.uAltZones.value[i].set(z0, z1, z0, reach ? 1 : 0));
   globals.uAltZoneCount.value = list.length;
+  if (reach) globals.uAltReach.value.set(reach[0], reach[1]);
+}
+/** Where zone `i`'s runner is (looping zones: the look shows around it). */
+export function setAltRunner(i, z) {
+  globals.uAltZones.value[i].z = z;
 }
 
 /**
@@ -310,7 +317,8 @@ uniform sampler2D uAltTex;
 uniform sampler2D uAltRef;
 uniform float uAltRatio;
 uniform int uAltZoneCount;
-uniform vec2 uAltZones[${MAX_ALT_ZONES}];
+uniform vec4 uAltZones[${MAX_ALT_ZONES}];
+uniform vec2 uAltReach;
 uniform sampler2D uMaskTex;
 uniform vec2 uResolution;
 uniform vec4 uUvWobble; // 1.x water: x amplitude, x frequency, y amplitude, y frequency
@@ -351,12 +359,19 @@ varying float vColorA; // RGBA vertex colors: their alpha fades transparent piec
 ${FOG_GLSL}
 ${CUT_GLSL}
 // Alternate texture share here: the challenge zones' look fades in over 40 at their edges
+// (and at the edges of the window around a looping zone's runner)
+float altWindow(float z0, float z1) {
+  return smoothstep(z0 - 20.0, z0 + 20.0, vWorld.z) * (1.0 - smoothstep(z1 - 20.0, z1 + 20.0, vWorld.z));
+}
 float altRatio() {
   if (uAltZoneCount < 0) return uAltRatio;
   float inside = 0.0;
   for (int i = 0; i < ${MAX_ALT_ZONES}; i++) {
     if (i >= uAltZoneCount) break;
-    inside = max(inside, smoothstep(uAltZones[i].x - 20.0, uAltZones[i].x + 20.0, vWorld.z) * (1.0 - smoothstep(uAltZones[i].y - 20.0, uAltZones[i].y + 20.0, vWorld.z)));
+    vec4 zone = uAltZones[i];
+    float shown = altWindow(zone.x, zone.y);
+    if (zone.w > 0.5) shown *= altWindow(zone.z - uAltReach.x, zone.z + uAltReach.y);
+    inside = max(inside, shown);
   }
   return 1.0 - inside;
 }
