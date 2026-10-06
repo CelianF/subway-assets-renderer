@@ -70,6 +70,20 @@ export const TRAIN_KINDS = ['static', 'moving', 'falling'];
 /** Length of a train of `cars` wagons: 70 for the first, 60 per extra wagon. */
 export const trainLength = (cars) => 70 + 60 * (cars - 1);
 const RAMP_LENGTH = 76; // ramp wagon in front of a train (origin 36 behind its start)
+const RAMP_RISE = 66; // its slope reaches the roof 66 in (3.70 Train_Ramp: z -36.7 to 30)
+
+// Pickups float over the ground (the game's spawn points: coin lines at 6, power-ups at 7),
+// coins every 30 or so (Coin_Line_N_over_L: N coins over L, 3 over 60 … 9 over 240)
+const COIN_HEIGHT = 6;
+const PICKUP_HEIGHT = 7;
+const COIN_SPACING = 30;
+
+/** Where a studio coin line's coins go: evenly from its first tile's middle to its last's. */
+export function coinPositions(it) {
+  const length = Math.max(0, it.z1 - it.z0 - CELL);
+  const n = Math.max(1, Math.round(length / COIN_SPACING) + 1);
+  return Array.from({ length: n }, (_, i) => it.z0 + CELL / 2 + (n > 1 ? (length * i) / (n - 1) : 0));
+}
 
 /** Generation filters ("advanced generation"); everything on by default. */
 export const DEFAULT_GEN = {
@@ -487,6 +501,8 @@ export function studioCatalog(manifest, themeName, trainTheme = null, gen = null
     modePieces,
     // Pieces with two states (raised / dropped) the studio can show or animate
     statePieces: Object.keys(modePieces).filter((slot) => (slots[slot] ?? []).some((n) => manifest.prefabs[n]?.reveal)),
+    // The game's pickups (coins, power-ups, boxes, tokens), by prefab name
+    pickups: (manifest.pickups ?? []).filter((n) => manifest.prefabs[n]?.bbox),
     modes: gameModes(manifest),
   };
 }
@@ -1000,9 +1016,29 @@ export function generateLayout(
         // Height and scale kept from the game's chunks (a barrier on a train roof, small bushes)
         else place(slot, [it.lane, y, it.z], layer, extra);
         if (base) place(base, [it.lane, y, it.z], layerOf(base), { ...extra, ...(layerOf(base) === 'train' ? { group: `studio${it.lane}@${it.z}` } : {}) });
+      } else if (it.type === 'coins') {
+        for (const cz of coinPositions(it)) placePickup('Coin', it.lane, cz, COIN_HEIGHT);
+      } else if (it.type === 'pickup') {
+        placePickup(it.key, it.lane, it.z, PICKUP_HEIGHT);
       }
     }
     placeRng = rng;
+  }
+
+  function placePickup(prefab, x, pz, height) {
+    if (!manifest.prefabs[prefab]?.bbox) return;
+    items.push({ prefab, slot: 'pickup', layer: 'pickup', pos: [x, roofAt(x, pz) + height, pz], variantSeed: Math.floor(placeRng() * 2 ** 31) });
+  }
+
+  /** Height under a pickup: a parked train's roof (up its ramp), else the ground. */
+  function roofAt(x, pz) {
+    let y = 0;
+    for (const t of studio) {
+      if (t.type !== 'train' || t.kind !== 'static' || t.lane !== x || pz < t.z0 || pz >= t.z1) continue;
+      const ramp = t.ramp && has('train_ramp') ? RAMP_LENGTH : 0;
+      y = Math.max(y, pz - t.z0 >= ramp ? TRAIN_ROOF : TRAIN_ROOF * Math.min(1, (pz - t.z0) / RAMP_RISE));
+    }
+    return y;
   }
 
   function studioCars(it) {

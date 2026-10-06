@@ -345,6 +345,9 @@ float fogFactor(float depth) {
 `;
 
 const COMBINED_FRAGMENT = /* glsl */ `
+#ifdef DISTANCE_FADE
+uniform float uFalloff;
+#endif
 uniform sampler2D uMap;
 uniform vec4 uColor;
 uniform vec4 uColor2;
@@ -474,6 +477,9 @@ ${CUT_MAIN}
 #endif
 #ifdef MULTIPLIER
   c.rgb *= uMultiplier;
+#endif
+#ifdef DISTANCE_FADE
+  c.rgb *= clamp(vDepth / uFalloff, 0.0, 1.0); // the coins' halo: seen from afar, gone up close
 #endif
   float fog = fogFactor(vDepth);
 #ifdef FOG_MULTIPLIER
@@ -730,6 +736,11 @@ function translateDistorted(def) {
 
 function translateLegacy(def) {
   if (/^Custom\/Distorted\//.test(def.shader) && !/Skyline/.test(def.shader)) return translateDistorted(def);
+  // Specials/Coin Glow (the coin's halo): its program isn't in the game files, only its
+  // transparent queue without depth writes. Drawn like the other pickups' PickupGlow, on
+  // the same glow texture: added on, tinted, growing in over its _Falloff distance (a guess:
+  // coins glow from afar, the haze would cover them up close)
+  if (def.shader === 'SYBO/Bend/Specials/Coin Glow') return { ...def, floats: { ...def.floats, FADE_MODE: 2, _SrcMode: 1, _DstMode: 1, _HasTint: 1, _ZWrite: 0 } };
   if (/^Bend\/Wave \(UV Distorted\)/.test(def.shader)) {
     // 1.x water: scrolling, UV-wobbled texture on a gently swelling surface
     return { ...def, floats: { ...def.floats, _HasScroll: 1, _WaterWave: 1 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
@@ -829,6 +840,7 @@ export class MaterialLibrary {
     if (wave) defines.WAVE = '';
     const wave2x = def.shader === 'SYBO/Bend/VertexWave';
     if (wave2x) defines.WAVE_2X = '';
+    if (def.shader === 'SYBO/Bend/Specials/Coin Glow') defines.DISTANCE_FADE = '';
 
     const tint = color4(c._Color);
     const mat = new THREE.ShaderMaterial({
@@ -855,6 +867,7 @@ export class MaterialLibrary {
         uRimPower: { value: f._RimPower ?? 2.75 },
         uRimAmount: { value: f._RimAmount ?? 1.5 },
         uFogMultiplier: { value: f._FogMultiplier ?? 1 },
+        uFalloff: { value: f._Falloff || 200 },
         uAltTex: { value: altTex ?? WHITE },
         uAltRef: { value: this.tex(def, '_AlternateRef') ?? refTex ?? WHITE },
         uMaskTex: { value: maskTex ?? WHITE },

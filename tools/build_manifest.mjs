@@ -733,6 +733,20 @@ function parseThemeEffect(file, guidIndex) {
 // Prefabs the viewer needs beyond theme slots
 const EXTRA_PREFABS = ['_Common_LightSignal_Light_Green', '_Common_LightSignal_Light_Red'];
 
+// In-run pickups (the game's Pickup prefabs: coins, power-ups, boxes, tokens), the same in
+// every city. The studio places them. (AssemblyIngredient and InRunCollectible get their
+// model at runtime: none to show.)
+const PICKUP_PREFABS = ['Coin', 'Magnet', 'Jetpack', 'SuperSneakers', '2xScore', 'Pogostick', 'Hourglass', 'MysteryBox', 'SuperMysteryBox', 'MysteryPowerup', 'Key', 'SeasonToken', 'LetterToken', 'CharacterLetterToken'];
+
+/** Names of GameObjects whose MeshRenderer is off (the coin's double-coin look, swapped in by the 2x power-up). */
+function disabledRenderers(file) {
+  const docs = yamlDocs(read(file));
+  const names = new Map(docs.filter((d) => d.kind === '1').map((d) => [d.fid, d.doc.match(/m_Name: (.*)/)?.[1].trim() ?? '']));
+  return sortedStrings(
+    docs.filter((d) => d.kind === '23' && /\n {2}m_Enabled: 0/.test(d.doc)).map((d) => names.get(d.doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1])).filter(Boolean),
+  );
+}
+
 // ---------------------------------------------------------------- 1.x themes
 //
 // 1.x games have no *_Theme.asset: one MonoBehaviour per city maps generic prefabs
@@ -1212,6 +1226,10 @@ function parseMotions(file, guidIndex) {
     if (kind === 'RotationEffect') {
       const a = vec(doc, '_axis');
       if (a && num(doc, '_speed')) motion = { type: 'spin', axis: axis(a), speed: num(doc, '_speed') };
+    } else if (kind === 'PickupRotator') {
+      // Pickups turn about their up axis, degrees a second; _rotationOffset (degrees a unit
+      // along the run) staggers them, so a line of coins twists
+      if (num(doc, '_rotationSpeed')) motion = { type: 'spin', axis: [0, -1, 0], speed: num(doc, '_rotationSpeed'), offset: num(doc, '_rotationOffset') };
     } else if (kind === 'OffsetEffect') {
       const d = vec(doc, '_direction');
       // 2.x: _offsets, a ride from the start up to it and back (2.34 Copenhagen's lift)
@@ -2736,6 +2754,10 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   let empty = [];
   const transitionPrefabs = Object.values(boundaries).map((b) => b.transitions.map((t) => t.prefab));
   transitionPrefabs.push(EXTRA_PREFABS);
+  // (by name, and only the game's Pickup prefabs: 3.x tags them _pickupType, 2.x has their rotator)
+  const isPickup = (file) => !!file && /\n {2}_(pickupType|rotationSpeed):/.test(read(file));
+  const pickups = PICKUP_PREFABS.filter((n) => prefabGlbs.has(`${n}.glb`) && isPickup(find(`${n}.prefab`)));
+  transitionPrefabs.push(pickups);
   transitionPrefabs.push(modePrefabs(modes));
   transitionPrefabs.push(Object.values(themeConfigs).filter((c) => c.background).map((c) => c.background.prefab));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.effects ?? []).map((e) => e.prefab)));
@@ -2842,7 +2864,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     colorFixes += fixZeroColors(path.join(out, info.glb), prefabPath, guidIndex);
     const randomizers = parseRandomizers(prefabPath, guidIndex);
     if (Object.keys(randomizers).length) info.randomizers = randomizers;
-    const lodHidden = parseLodGroups(prefabPath);
+    // (pickups: the renderers they start with off, too)
+    const lodHidden = sortedStrings(new Set([...parseLodGroups(prefabPath), ...(pickups.includes(name) ? disabledRenderers(prefabPath) : [])]));
     if (lodHidden.length) info.lodHidden = lodHidden;
     const skinned = parseSkinnedMeshes(prefabPath, guidIndex).filter((sk) => {
       const src = meshGlbs.get(`${sk.mesh}.glb`);
@@ -2871,7 +2894,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       info.morphMeshes = morphMeshes;
       info.materials = sortedStrings(new Set([...(info.materials ?? []), ...morphMeshes.flatMap((m) => m.materials)]));
     }
-    const animators = parseAnimators(prefabPath, guidIndex);
+    // (without the tracks of nodes the viewer removes: the coin's swap to its double look)
+    const gone = (track) => track.path.split('/').some((part) => lodHidden.includes(part));
+    const animators = parseAnimators(prefabPath, guidIndex)
+      .map((a) => (a.tracks?.some(gone) ? { ...a, tracks: a.tracks.filter((t) => !gone(t)) } : a))
+      .filter((a) => !a.tracks || a.tracks.length);
     if (animators.length) {
       mkdirSync(path.join(out, 'anim'), { recursive: true });
       writeFileSync(path.join(out, 'anim', `${name}.json`), JSON.stringify(animators));
@@ -3040,6 +3067,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     slotDepths,
     chunks,
     modes,
+    pickups: pickups.filter((n) => prefabs[n]?.bbox),
     prefabs,
     materials,
   };
@@ -3055,6 +3083,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   log(`Mesh animations: ${sumKeys('meshAnimations')} in ${withKey('meshAnimations').length} prefabs`);
   log(`Placeholders: ${sumKeys('placeholders')} in ${withKey('placeholders').length} prefabs; effect players: ${sumKeys('effectPlayers')}`);
   log(`Particle systems: ${sumKeys('particles')} in ${withKey('particles').length} prefabs`);
+  log(`Pickups: ${manifest.pickups.join(', ') || 'none'}`);
   log(`Prefabs: ${Object.keys(prefabs).length} (${empty.length} without geometry, ${missing.length} missing glb)`);
   log(`Materials: ${Object.keys(materials).length}/${usedMats.size} resolved; shaders: ${JSON.stringify(shaders)}`);
   if (colorFixes) log(`  vertex colors restored: ${colorFixes} mesh parts (compressed meshes)`);
@@ -3071,6 +3100,7 @@ function splitByTheme(manifest, staging, out, log) {
     const names = new Set(Object.values(manifest.themes[theme]).flatMap((slots) => Object.values(slots).flat()));
     for (const t of manifest.boundaries[theme]?.transitions ?? []) names.add(t.prefab);
     for (const n of EXTRA_PREFABS) names.add(n);
+    for (const n of manifest.pickups) names.add(n);
     for (const n of modePrefabs(manifest.modes)) names.add(n);
     if (config.background) names.add(config.background.prefab);
     for (const e of config.effects ?? []) names.add(e.prefab);

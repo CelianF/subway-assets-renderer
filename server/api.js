@@ -127,6 +127,13 @@ async function placeEnv(srcDir, baseId, policy, fields, note = '') {
   }
   const env = { ...fields, id, ...(copy ? { copy } : {}) };
   if (!copy) delete env.copy;
+  // Maps built with the game's pickups lend them to maps built before (the studio's Pickups)
+  delete env.pickups;
+  try {
+    if (JSON.parse(await readFile(path.join(srcDir, 'manifest.json'), 'utf8')).pickups?.length) env.pickups = true;
+  } catch {
+    // no readable manifest: no pickups to lend
+  }
   // A short note tells copies apart on the home page ("pride", "before patch"…)
   const cleanNote = String(note ?? '').trim().slice(0, 60);
   if (copy && cleanNote) env.note = cleanNote;

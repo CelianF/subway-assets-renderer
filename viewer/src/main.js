@@ -147,24 +147,64 @@ const materials = new MaterialLibrary(manifest, DATA);
 const mergedEnvs = new Set();
 async function mergeEnvironment(envId) {
   if (mergedEnvs.has(envId)) return;
+  const other = await fetchManifest(envId);
+  borrowPrefabs(envId, other, Object.keys(other.prefabs), Object.keys(other.materials));
+  manifest.themes[other.theme] = other.themes[other.theme];
+  mergedEnvs.add(envId);
+}
+
+const fetchManifest = async (envId) => (await fetch(`/envs/${encodeURIComponent(envId)}/manifest.json`)).json();
+
+/**
+ * Copies another environment's prefabs into this manifest, with their materials (and
+ * `materialNames`), their file paths made absolute so they load from that environment's folder.
+ */
+function borrowPrefabs(envId, other, names, materialNames = []) {
   const base = `/envs/${encodeURIComponent(envId)}`;
-  const other = await (await fetch(`${base}/manifest.json`)).json();
   const abs = (url) => (url && !url.startsWith('/') ? `${base}/${url}` : url);
-  for (const [name, prefab] of Object.entries(other.prefabs)) {
-    if (manifest.prefabs[name]) continue;
-    const copy = structuredClone(prefab);
+  const mats = new Set(materialNames);
+  for (const name of names) {
+    if (manifest.prefabs[name] || !other.prefabs[name]) continue;
+    const copy = structuredClone(other.prefabs[name]);
     copy.glb = abs(copy.glb);
     for (const cfg of Object.values(copy.trackConfigs ?? {})) cfg.glb = abs(cfg.glb);
+    if (copy.animators) copy.animators = abs(copy.animators);
+    for (const sk of copy.skinned ?? []) sk.mesh = abs(sk.mesh);
+    for (const m of copy.morphMeshes ?? []) m.url = abs(m.url);
+    for (const a of Object.values(copy.meshAnimations ?? {})) a.frames = a.frames.map(abs);
+    for (const p of Object.values(copy.particles ?? {})) {
+      p.render.meshGlb = abs(p.render.meshGlb);
+      for (const v of p.render.variants ?? []) v.meshGlb = abs(v.meshGlb);
+    }
     manifest.prefabs[name] = copy;
+    for (const m of copy.materials ?? []) mats.add(m);
   }
-  for (const [name, mat] of Object.entries(other.materials)) {
-    if (manifest.materials[name]) continue;
-    const copy = structuredClone(mat);
+  for (const name of mats) {
+    if (manifest.materials[name] || !other.materials[name]) continue;
+    const copy = structuredClone(other.materials[name]);
     for (const t of Object.values(copy.textures)) t.url = abs(t.url);
     manifest.materials[name] = copy;
   }
-  manifest.themes[other.theme] = other.themes[other.theme];
-  mergedEnvs.add(envId);
+}
+
+/**
+ * The studio's pickups. Maps built before the pipeline kept them borrow them from an
+ * installed map that has them: same game version first, else the newest.
+ */
+let pickupsReady = null;
+function ensurePickups() {
+  pickupsReady ??= (async () => {
+    if (manifest.pickups?.length) return;
+    const version = (e) => (/^\d/.test(e.gameVersion ?? '') ? e.gameVersion : '0');
+    const donor = envList
+      .filter((e) => e.pickups && e.id !== ENV_ID)
+      .sort((a, b) => (b.gameVersion === envInfo.gameVersion) - (a.gameVersion === envInfo.gameVersion) || version(b).localeCompare(version(a), undefined, { numeric: true }))[0];
+    if (!donor) return;
+    const other = await fetchManifest(donor.id);
+    borrowPrefabs(donor.id, other, other.pickups ?? []);
+    manifest.pickups = (other.pickups ?? []).filter((n) => manifest.prefabs[n]);
+  })().catch((e) => console.warn('No pickups to borrow', e));
+  return pickupsReady;
 }
 
 /** Relative manifest paths live in this environment's folder; merged ones are absolute. */
@@ -593,7 +633,7 @@ function rideReach(obj, node, direction, bbox) {
 function resolveMotionNode(obj, m) {
   return m.path ? nodeByPath(obj, m.path) : findNode(obj, m.node);
 }
-function applyMotions(obj, list, seed, bbox = null) {
+function applyMotions(obj, list, seed, bbox = null, worldZ = 0) {
   const rng = mulberry32(seed ^ 0x6d6f7665);
   // One clock per piece: flicker patterns play in step (2.34 Copenhagen's gate frames take
   // turns, its tunnel LEDs chase right to left), each piece at its own time
@@ -604,6 +644,8 @@ function applyMotions(obj, list, seed, bbox = null) {
     if (m.type === 'offset' && !m.frequency) m = { ...m, frequency: 0.5, oneSided: true };
     const node = resolveMotionNode(obj, m);
     if (!node) continue; // its variant wasn't picked
+    // Pickups all turn together, each a little behind the one before it (degrees a unit along the run)
+    if (m.type === 'spin' && m.offset) node.rotateOnAxis(new THREE.Vector3(...m.axis).normalize(), (m.offset * worldZ * Math.PI) / 180);
     motions.add({
       root: obj,
       node,
@@ -834,7 +876,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   if (prefab.morphMeshes) await applyMorphMeshes(obj, prefab.morphMeshes);
   if (prefab.animators) await applyAnimators(obj, prefab.animators, variantSeed, animState);
   if (prefab.meshAnimations) await applyMeshAnimations(obj, prefab.meshAnimations, variantSeed);
-  if (prefab.motions) applyMotions(obj, prefab.motions, variantSeed, prefab.bbox);
+  if (prefab.motions) applyMotions(obj, prefab.motions, variantSeed, prefab.bbox, worldZ);
   else if (prefab.spinners) applyMotions(obj, prefab.spinners.map((sp) => ({ type: 'spin', ...sp })), variantSeed); // 0.1.7 manifests
   if (prefab.trails) applyTrails(obj, prefab.trails);
   if (prefab.builtinMeshes) addBuiltinMeshes(obj, prefab.builtinMeshes);
@@ -1028,6 +1070,7 @@ const state = {
   obstacles: params.get('obstacles') !== '0',
   trains: params.get('trains') !== '0',
   signals: params.get('signals') !== '0',
+  pickups: params.get('pickups') !== '0',
   walls: params.get('walls') !== '0',
   trainEnv: 'same', // environment id whose trains are used
   fog: params.get('fog') !== '0',
@@ -1082,13 +1125,14 @@ const layers = {
   obstacle: new THREE.Group(),
   wall: new THREE.Group(), // gate walls, open on one lane
   signal: new THREE.Group(),
+  pickup: new THREE.Group(), // studio coins, power-ups, boxes and tokens
   effect: new THREE.Group(), // ThemeConfig effects (Floor Is Lava's lava ground)
 };
 Object.values(layers).forEach((g) => scene.add(g));
 let buildId = 0;
 
 // Rebuilt on studio edits; rails too, since "no tracks" zones cut them
-const DYNAMIC_LAYERS = new Set(['train', 'obstacle', 'signal', 'wall', 'track']);
+const DYNAMIC_LAYERS = new Set(['train', 'obstacle', 'signal', 'pickup', 'wall', 'track']);
 let runLength = 0;
 
 /** Current layout for the given mode (studio placements or generated obstacles). */
@@ -1793,6 +1837,7 @@ function updateVisibility() {
   layers.train.visible = state.trains;
   layers.obstacle.visible = state.obstacles;
   layers.signal.visible = state.signals;
+  layers.pickup.visible = state.pickups;
   layers.wall.visible = true; // gate walls are part of the gate section
 }
 
@@ -2303,7 +2348,7 @@ async function enterStudio() {
     } else migrateStudioPlatforms();
     state.obstacleMode = 'studio';
   }
-  await studioFootprints();
+  await Promise.all([studioFootprints(), ensurePickups()]);
   fly.enabled = orbit.enabled = false;
   document.body.classList.add('studio');
   rebuild().then(() => (studio.enter(), timeDeck.place(), applyThemeLook(), applyBend()));
@@ -2453,7 +2498,24 @@ if (params.get('z')) {
 }
 setControlMode(state.controls);
 window.__viewer = { time, motions, fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild };
+if (state.obstacleMode === 'studio' && state.studio.some((it) => it.type === 'coins' || it.type === 'pickup')) await ensurePickups();
 await rebuild();
+
+/**
+ * The studio clips everything above the trains away; pickups on their roofs reach above
+ * that, so they get a pass of their own, unclipped, over the clipped scene.
+ */
+function renderStudio() {
+  layers.pickup.visible = false;
+  renderer.render(scene, studio.camera);
+  layers.pickup.visible = true;
+  const planes = renderer.clippingPlanes;
+  renderer.clippingPlanes = [];
+  renderer.autoClear = false;
+  renderer.render(layers.pickup, studio.camera);
+  renderer.autoClear = true;
+  renderer.clippingPlanes = planes;
+}
 
 // Scene time runs on the time deck's clock (frozen, slowed, stepped); a hitch (hidden tab)
 // counts as a tenth of a second at most
@@ -2472,7 +2534,8 @@ renderer.setAnimationLoop(() => {
   updateSkyline();
   updateCutaway();
   renderer.setRenderTarget(viewTarget);
-  renderer.render(scene, studio.active ? studio.camera : camera);
+  if (studio.active && layers.pickup.visible) renderStudio();
+  else renderer.render(scene, studio.active ? studio.camera : camera);
   renderer.setRenderTarget(null);
   renderer.render(blitScene, blitCamera);
 });

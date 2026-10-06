@@ -1,10 +1,11 @@
 import * as THREE from 'three';
-import { fitTrain, trainLength, RAMP_LENGTH, FIX_LABELS } from './layout.js';
+import { fitTrain, trainLength, RAMP_LENGTH, FIX_LABELS, coinPositions } from './layout.js';
 
 // Studio mode: a slightly tilted top view of the run with placement spots. Trains are
 // drawn from a start cell to an end cell on one track and snap to the longest train
 // that fits; obstacles take one cell; signal lights sit between two tracks; "no tracks"
-// zones remove the rails of a stretch of track. Everything above the trains is clipped
+// zones remove the rails of a stretch of track; coins are drawn in lines along a track,
+// other pickups take one cell (both float over the roof of a parked train). Everything above the trains is clipped
 // away so stations and tunnels don't hide the tracks.
 
 const CELL = 11.25;
@@ -28,6 +29,8 @@ const COLORS = {
   noTracks: 0xff4d4d,
   challenge: 0x4cd964,
   surge: 0xff7a1a,
+  coins: 0xffd23f,
+  pickup: 0xc77dff,
   hover: 0xffffff,
   remove: 0xff3030,
   selected: 0xffffff,
@@ -50,6 +53,14 @@ const FIX_TITLES = {
   platform: 'Every station gets its platforms back (whatever stands on the outer tracks there is cleared)',
 };
 const KIND_LABELS = { static: 'Parked', moving: 'Moving', falling: 'Lava' };
+// The game's pickups by prefab name, in the palette's groups
+const PICKUP_GROUPS = [
+  ['Power-ups', { Magnet: '🧲 Magnet', Jetpack: '🚀 Jetpack', SuperSneakers: '👟 Super Sneakers', '2xScore': '✖️ 2x Multiplier', Pogostick: '🦘 Pogo Stick', MysteryPowerup: '❓ Mystery power-up' }],
+  ['Boxes & tokens', { MysteryBox: '🎁 Mystery Box', SuperMysteryBox: '🎁 Super Mystery Box', Key: '🔑 Key', SeasonToken: '🏅 Season token', LetterToken: '🔤 Letter token', CharacterLetterToken: '🔤 Character token', Hourglass: '⏳ Hourglass' }],
+];
+const PICKUP_LABELS = Object.assign({}, ...PICKUP_GROUPS.map(([, labels]) => labels));
+const pickupLabel = (key) => (PICKUP_LABELS[key] ?? key).replace(/^\S+ /, '');
+const isPickup = (it) => it.type === 'coins' || it.type === 'pickup';
 /** Name of an obstacle tool: regular ones, else the game mode's piece names. */
 const labelOf = (key, cat) => LABELS[key] ?? cat?.modePieces?.[key] ?? key;
 const VARIANT_LABELS = { auto: 'Any', cargo: 'Cargo', passenger: 'Passenger', subway: 'Subway' };
@@ -111,6 +122,7 @@ export function createStudio(ctx) {
   let laneSpots = null;
   let signalSpots = null;
   const footprints = new THREE.Group();
+  const coinDot = new THREE.CircleGeometry(2.4, 16).rotateX(-Math.PI / 2);
   const hover = flat(18, CELL - 1, COLORS.hover, 0.45); // single cell / signal spot
   const span = flat(17, 1, COLORS.train, 0.45); // train or zone preview, scaled along Z
   hover.visible = span.visible = false;
@@ -147,6 +159,7 @@ export function createStudio(ctx) {
    */
   function spotShape() {
     if (tool.type === 'noTracks') return { w: 16, d: CELL - 3, dx: 0, dz: CELL / 2, xs: LANES };
+    if (isPickup(tool)) return { w: 7, d: 7, dx: 0, dz: CELL / 2, xs: LANES };
     if (tool.type !== 'obstacle') return null;
     const cat = ctx.getCatalog();
     if (isTrainPiece(tool.key, cat)) return null;
@@ -215,6 +228,20 @@ export function createStudio(ctx) {
     } else if (it.type === 'signal') {
       m = flat(5, 5, color ?? COLORS.signal[it.color ?? 'green'], opacity ?? 0.85);
       m.position.set(it.x, 1, it.z);
+    } else if (it.type === 'coins') {
+      // A strip along the track with a dot per coin
+      m = flat(3, it.z1 - it.z0, color ?? COLORS.coins, opacity ?? 0.3);
+      m.position.set(it.lane, 1.2, (it.z0 + it.z1) / 2);
+      for (const z of coinPositions(it)) {
+        const dot = new THREE.Mesh(coinDot, overlayMat(color ?? COLORS.coins, opacity ?? 0.9));
+        dot.renderOrder = 5001;
+        dot.frustumCulled = false;
+        dot.position.set(0, 0.1, z - m.position.z);
+        m.add(dot);
+      }
+    } else if (it.type === 'pickup') {
+      m = flat(7, 7, color ?? COLORS.pickup, opacity ?? 0.85);
+      m.position.set(it.lane, 1.2, it.z);
     } else if (it.type === 'startTrain') {
       m = flat(17, 130, color ?? COLORS.train, opacity ?? 0.35);
       m.position.set(it.lane, 1, it.z + 35);
@@ -262,6 +289,8 @@ export function createStudio(ctx) {
     if (it.type === 'train') return describeTrain(it);
     if (it.type === 'obstacle') return labelOf(it.key, ctx.getCatalog());
     if (it.type === 'signal') return `Signal light (${it.color ?? 'green'})`;
+    if (it.type === 'coins') return `Coin line, ${coinPositions(it).length} coins`;
+    if (it.type === 'pickup') return pickupLabel(it.key);
     if (it.type === 'noTracks') return `No tracks zone, ${Math.round((it.z1 - it.z0) / CELL)} tiles`;
     if (FULL_ZONES.includes(it.type)) return `${zoneLabel(it.type)} zone, ${Math.round((it.z1 - it.z0) / CELL)} tiles`;
     return it.type;
@@ -326,13 +355,15 @@ export function createStudio(ctx) {
         if (s.z >= it.z0 && s.z < it.z1) return i; // across the whole width
       } else if (it.type === 'signal') {
         if (Math.abs(s.x - it.x) < 4 && cellOf(it.z) === s.cell) return i;
+      } else if (it.type === 'pickup') {
+        if (s.laneOk && it.lane === s.lane && cellOf(it.z) === s.cell) return i;
       } else if (it.type === 'obstacle') {
         // Anywhere on its footprint (at least its tile on its track)
         const r = rectOf(it, cat);
         const onTile = s.laneOk && it.lane === s.lane && cellOf(it.z) === s.cell;
         if (onTile || (s.x >= r.x0 && s.x <= r.x1 && s.z >= r.z0 && s.z <= r.z1)) return i;
       } else if (s.laneOk && it.lane === s.lane) {
-        if ((it.type === 'train' || it.type === 'noTracks') && s.z >= it.z0 && s.z < it.z1) return i;
+        if ((it.type === 'train' || it.type === 'noTracks' || it.type === 'coins') && s.z >= it.z0 && s.z < it.z1) return i;
         if (it.type === 'startTrain' && s.z >= it.z - 30 && s.z < it.z + 100) return i;
       }
     }
@@ -403,6 +434,18 @@ export function createStudio(ctx) {
       setInfo(pending ? `${zoneLabel(tool.type)} over ${tiles} tiles · click the end (Esc cancels)` : `Click where the ${zoneLabel(tool.type)} zone starts`);
       return;
     }
+    if (tool.type === 'coins') {
+      // One track: the start's (before the first click, a single coin)
+      const lane = pending?.lane ?? s.lane;
+      const range = pending ? spanTo(s) : { z0: s.cellZ, z1: s.cellZ + CELL };
+      span.visible = true;
+      span.material.color.set(COLORS.coins);
+      span.scale.set(6 / 17, 1, range.z1 - range.z0);
+      span.position.set(lane, 1.4, (range.z0 + range.z1) / 2);
+      const n = coinPositions(range).length;
+      setInfo(pending ? `${n} coin${n > 1 ? 's' : ''} · release, or click the end (Esc cancels)` : 'Drag along a track for a line of coins, or click its start then its end');
+      return;
+    }
     if (tool.type === 'noTracks' && pending) {
       // Every track between the start's and this one
       const range = spanTo(s);
@@ -436,6 +479,12 @@ export function createStudio(ctx) {
     }
     hover.visible = true;
     hover.material.color.set(COLORS.hover);
+    if (tool.type === 'pickup') {
+      hover.material.color.set(COLORS.pickup);
+      hover.scale.set(7 / 18, 1, 7 / (CELL - 1));
+      hover.position.set(s.lane, 1.5, s.cellZ + CELL / 2);
+      return;
+    }
     if (tool.type === 'obstacle') {
       // The piece's real footprint where it would go
       const cat = ctx.getCatalog();
@@ -491,7 +540,14 @@ export function createStudio(ctx) {
       return commit([...rest, zone]);
     }
     if (tool.type === 'noTracks') return removeTracks(s);
+    if (tool.type === 'coins') return addCoins(s);
     if (!s.laneOk) return;
+    if (tool.type === 'pickup') {
+      const i = list.findIndex((it) => it.type === 'pickup' && it.lane === s.lane && cellOf(it.z) === s.cell);
+      if (i >= 0) list[i] = { ...list[i], key: tool.key };
+      else list.push({ type: 'pickup', key: tool.key, lane: s.lane, z: s.cellZ + CELL / 2 });
+      return commit(list);
+    }
     if (tool.type === 'train') {
       if (!pending) {
         pending = { lane: s.lane, cellZ: s.cellZ };
@@ -541,6 +597,21 @@ export function createStudio(ctx) {
     commit(list);
   }
 
+  /** A line of coins from the start (pending) to s, on the start's track; lines that meet merge. */
+  function addCoins(s) {
+    const { z0, z1 } = spanTo(s);
+    const lane = pending.lane;
+    pending = null;
+    span.visible = false;
+    let line = { type: 'coins', lane, z0, z1 };
+    const list = ctx.getList().filter((it) => {
+      if (it.type !== 'coins' || it.lane !== lane || !overlaps(line.z0, line.z1, it.z0 - 0.1, it.z1 + 0.1)) return true;
+      line = { ...line, z0: Math.min(line.z0, it.z0), z1: Math.max(line.z1, it.z1) };
+      return false;
+    });
+    commit([...list, line]);
+  }
+
   function commit(list, verb = 'Placed') {
     if (selected >= list.length) selected = -1;
     ctx.setList(list);
@@ -550,11 +621,13 @@ export function createStudio(ctx) {
 
   // ------------------------------------------------------------ input
   let dragFrom = null;
+  const DRAG_TOOLS = ['noTracks', 'coins'];
   canvas.addEventListener('pointerdown', (e) => {
     if (!active || e.button !== 0) return;
     dragFrom = { x: e.clientX, y: e.clientY, viewZ, moved: false };
-    // "No tracks": a drag selects tiles, across tracks too (a click then a click works as well)
-    const s = tool.type === 'noTracks' && pick(e);
+    // "No tracks" and coins: a drag selects tiles (no tracks: across tracks too); a click
+    // then a click works as well
+    const s = DRAG_TOOLS.includes(tool.type) && pick(e);
     if (s) {
       dragFrom.select = true;
       dragFrom.second = !!pending;
@@ -580,8 +653,10 @@ export function createStudio(ctx) {
     dragFrom = null;
     if (from.select) {
       const s = pick(e);
-      if (pending && s && (wasDrag || from.second)) removeTracks(s);
-      else if (pending) setInfo('Start set: drag, or click the end (across tracks too)');
+      if (pending && s && (wasDrag || from.second)) {
+        if (tool.type === 'coins') addCoins(s);
+        else removeTracks(s);
+      } else if (pending) setInfo(tool.type === 'coins' ? 'Start set: click the end on the same track' : 'Start set: drag, or click the end (across tracks too)');
       onMove(e);
       return;
     }
@@ -668,6 +743,8 @@ export function createStudio(ctx) {
         ['obstacles', '🚧 Obstacles', () => setTool({ type: 'obstacle', key: Object.keys(cat.obstacles)[0] })],
         ...(Object.keys(cat.walls).length ? [['walls', '🧱 Walls', () => setTool({ type: 'obstacle', key: Object.keys(cat.walls)[0] })]] : []),
         ...(cat.signal ? [['lights', '🚦 Lights', () => setTool({ type: 'signal', color: 'green' })]] : []),
+        // Coins, power-ups, boxes and tokens
+        ...(cat.pickups.length ? [['pickups', '🪙 Pickups', () => setTool(cat.pickups.includes('Coin') ? { type: 'coins' } : { type: 'pickup', key: cat.pickups[0] })]] : []),
         // The game mode's own pieces (moving/vanishing obstacles, hurdles, speed pads…)
         ...(modeKeys.length ? [['mode', cat.modeLabel, () => setTool({ type: 'obstacle', key: modeKeys[0] })]] : []),
       ];
@@ -680,7 +757,11 @@ export function createStudio(ctx) {
             category = key;
             // Keep the asset already chosen in that family, else its first one
             const family = familyOf(cat)[key];
-            const keep = key === 'trains' ? placeTool.type === 'train' || isTrainPiece(placeTool.key, cat) : key === 'lights' ? placeTool.type === 'signal' : placeTool.type === 'obstacle' && family?.includes(placeTool.key);
+            const keep =
+              key === 'trains' ? placeTool.type === 'train' || isTrainPiece(placeTool.key, cat)
+              : key === 'lights' ? placeTool.type === 'signal'
+              : key === 'pickups' ? isPickup(placeTool)
+              : placeTool.type === 'obstacle' && family?.includes(placeTool.key);
             if (keep) setTool(placeTool);
             else first();
           }),
@@ -713,6 +794,14 @@ export function createStudio(ctx) {
         }
       }
       if (category === 'lights') rows.push(row('Lights', ...SIGNAL_TOOLS.map(([color, label]) => btn(label, isTool('signal', { color }), () => setTool({ type: 'signal', color })))));
+      if (category === 'pickups') {
+        const pickupButtons = (labels) => Object.entries(labels).filter(([key]) => cat.pickups.includes(key)).map(([key, label]) => btn(label, isTool('pickup', { key }), () => setTool({ type: 'pickup', key })));
+        PICKUP_GROUPS.forEach(([group, labels], i) => {
+          const coins = i === 0 && cat.pickups.includes('Coin') ? [btn('🪙 Coin line', tool.type === 'coins', () => setTool({ type: 'coins' }))] : [];
+          const buttons = pickupButtons(labels);
+          if (coins.length || buttons.length) rows.push(row(group, ...coins, ...buttons));
+        });
+      }
     } else if (mode === 'edit' && selected >= 0) {
       rows.push(editRow(cat, btn, select));
     } else if (mode === 'track') {
@@ -757,7 +846,7 @@ export function createStudio(ctx) {
     // Main bar (bottom): modes, status, game mode, done
     const hints = {
       place: 'Pick an asset above, then click the tiles',
-      edit: 'Click a train, obstacle, light or zone to change it',
+      edit: 'Click a train, obstacle, light, pickup or zone to change it',
       remove: 'Click something to remove it',
       challenge: "Pick the runner's lane, then click the start then the end of the stretch where the challenge loops",
       noTracks: 'Drag over the tiles (across tracks too), or click the start then the end',
@@ -820,7 +909,7 @@ export function createStudio(ctx) {
     const it = ctx.getList()[selected];
     const row = (...children) => el('div', { class: 'studio-row edit-row' }, el('span', { class: 'studio-label' }, 'Edit'), ...children);
     const del = el('button', { class: 'danger', onclick: deleteSelected }, 'Delete');
-    if (!it) return row(el('span', { class: 'studio-info' }, 'Click a train, obstacle, light or zone to change it'));
+    if (!it) return row(el('span', { class: 'studio-info' }, 'Click a train, obstacle, light, pickup or zone to change it'));
 
     if (it.type === 'obstacle') {
       // A piece turns into the others of its family (obstacles, walls, platforms, mode pieces)
@@ -829,6 +918,10 @@ export function createStudio(ctx) {
         ? [el('span', { class: 'studio-label' }, 'State'), ...PIECE_STATES.map(([state, label]) => btn(label, (it.state ?? 'revealed') === state, () => replaceSelected({ ...it, state })))]
         : [];
       return row(...family.map((key) => btn(labelOf(key, cat), it.key === key, () => editObstacle(key))), ...states, del);
+    }
+    if (it.type === 'pickup') {
+      // A pickup turns into any other
+      return row(...cat.pickups.filter((key) => key !== 'Coin').map((key) => btn(PICKUP_LABELS[key] ?? key, it.key === key, () => replaceSelected({ ...it, key }))), del);
     }
     if (it.type === 'signal') {
       return row(...SIGNAL_TOOLS.map(([color, label]) => btn(label, (it.color ?? 'green') === color, () => replaceSelected({ ...it, color }))), del);
