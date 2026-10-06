@@ -126,17 +126,44 @@ export function createStudio(ctx) {
       mesh.frustumCulled = false;
       return mesh;
     };
-    laneSpots = instanced(new THREE.PlaneGeometry(16, CELL - 3).rotateX(-Math.PI / 2), 0xffffff, 0.14, LANES, 0.5);
     signalSpots = instanced(new THREE.CircleGeometry(1.8, 12).rotateX(-Math.PI / 2), COLORS.signal.green, 0.5, SIGNAL_X, 0.6);
-    overlay.add(laneSpots, signalSpots);
+    overlay.add(signalSpots);
+    spotsFor = (shape) => {
+      const geo = new THREE.PlaneGeometry(shape.w, shape.d).rotateX(-Math.PI / 2).translate(shape.dx, 0, shape.dz - CELL / 2);
+      return instanced(geo, 0xffffff, 0.14, shape.xs, 0.5);
+    };
+    spotKey = null;
     updateSpotVisibility();
+  }
+  let spotsFor = null;
+  let spotKey = null;
+
+  /**
+   * Where the current tool can go, in its own shape: a barrier's box, a pillar's square, a
+   * track's lane for "no tracks"; none for trains and pieces across the run (platforms) or
+   * zones, which show their own preview.
+   */
+  function spotShape() {
+    if (tool.type === 'noTracks') return { w: 16, d: CELL - 3, dx: 0, dz: CELL / 2, xs: LANES };
+    if (tool.type !== 'obstacle') return null;
+    const cat = ctx.getCatalog();
+    if (isTrainPiece(tool.key, cat)) return null;
+    const r = rectOf({ key: tool.key, lane: 0, z: CELL / 2 }, cat);
+    if (r.x1 - r.x0 > 40) return null;
+    return { w: Math.max(r.x1 - r.x0, 4), d: Math.max(Math.min(r.z1 - r.z0, CELL - 3), 4), dx: (r.x0 + r.x1) / 2, dz: (r.z0 + r.z1) / 2, xs: cat.sizes?.[tool.key]?.wide ? [0] : LANES };
   }
 
   /** Only the spots the current tool can use. */
   function updateSpotVisibility() {
-    if (!laneSpots) return;
-    laneSpots.visible = ['train', 'obstacle', 'noTracks', ...FULL_ZONES].includes(tool.type);
+    if (!signalSpots) return;
     signalSpots.visible = tool.type === 'signal';
+    const shape = spotShape();
+    const key = shape && JSON.stringify(shape);
+    if (key === spotKey) return;
+    spotKey = key;
+    if (laneSpots) overlay.remove(laneSpots), laneSpots.geometry.dispose();
+    laneSpots = shape ? spotsFor(shape) : null;
+    if (laneSpots) overlay.add(laneSpots);
   }
 
   /** Real footprint length of a train (ramp + wagons) drawn over [z0, z1]. */
@@ -339,7 +366,7 @@ export function createStudio(ctx) {
     if (!s) return;
 
     if (tool.type === 'edit') {
-      const i = itemAt(s, { zones: false });
+      const i = itemAt(s);
       if (i >= 0 && i !== selected) {
         removeHighlight = footprintOf(ctx.getList()[i], COLORS.selected, 0.35);
         removeHighlight.position.y = 2;
@@ -374,24 +401,32 @@ export function createStudio(ctx) {
       setInfo(pending ? `${zoneLabel(tool.type)} over ${tiles} tiles · click the end (Esc cancels)` : `Click where the ${zoneLabel(tool.type)} zone starts`);
       return;
     }
+    if (tool.type === 'noTracks' && pending) {
+      // Every track between the start's and this one
+      const range = spanTo(s);
+      const [x0, x1] = [Math.min(pending.lane, s.lane), Math.max(pending.lane, s.lane)];
+      span.visible = true;
+      span.material.color.set(COLORS.noTracks);
+      span.scale.set((x1 - x0 + 19) / 17, 1, range.z1 - range.z0);
+      span.position.set((x0 + x1) / 2, 1.4, (range.z0 + range.z1) / 2);
+      const tracks = LANES.filter((x) => x >= x0 && x <= x1).length;
+      setInfo(`No tracks over ${Math.round((range.z1 - range.z0) / CELL)} tiles × ${tracks} track${tracks > 1 ? 's' : ''} · release, or click the end (Esc cancels)`);
+      return;
+    }
     if (!s.laneOk) return;
-    if (tool.type === 'train' || (tool.type === 'noTracks' && pending)) {
+    if (tool.type === 'train') {
       // Before the first click a train shows its shortest size; afterwards its snapped size
       let range;
       if (!pending) range = { z0: s.cellZ, z1: s.cellZ + trainSpan({ ...tool, z0: 0, z1: 0 }) };
       else if (s.lane === pending.lane) range = spanTo(s);
       else return;
       span.visible = true;
-      span.material.color.set(tool.type === 'train' ? COLORS.train : COLORS.noTracks);
+      span.material.color.set(COLORS.train);
       span.scale.set(1, 1, range.z1 - range.z0);
       span.position.set(s.lane, 1.4, (range.z0 + range.z1) / 2);
       const tiles = Math.ceil((range.z1 - range.z0) / CELL - 0.01);
       if (pending) {
-        setInfo(
-          tool.type === 'train'
-            ? `${describeTrain({ ...tool, ...range })} · ${tiles} tiles · click the end (Esc cancels)`
-            : `No tracks over ${tiles} tiles · click the end (Esc cancels)`,
-        );
+        setInfo(`${describeTrain({ ...tool, ...range })} · ${tiles} tiles · click the end (Esc cancels)`);
       } else {
         setInfo(`${describeTrain({ ...tool, ...range })} takes ${tiles} tiles · click the start tile`);
       }
@@ -415,7 +450,7 @@ export function createStudio(ctx) {
   function apply(s) {
     const list = [...ctx.getList()];
     if (tool.type === 'edit') {
-      selected = itemAt(s, { zones: false }); // zones aren't editable: remove and redraw them
+      selected = itemAt(s); // pieces first, then the zone under them
       drawFootprints();
       renderPalette();
       setInfo(selected >= 0 ? describeItem(list[selected]) : 'Click something to edit it');
@@ -453,18 +488,19 @@ export function createStudio(ctx) {
       });
       return commit([...rest, zone]);
     }
+    if (tool.type === 'noTracks') return removeTracks(s);
     if (!s.laneOk) return;
-    if (tool.type === 'train' || tool.type === 'noTracks') {
+    if (tool.type === 'train') {
       if (!pending) {
         pending = { lane: s.lane, cellZ: s.cellZ };
-        setInfo(tool.type === 'train' ? 'Start set: click the end tile on the same track' : 'Zone start set: click its end on the same track');
+        setInfo('Start set: click the end tile on the same track');
         return;
       }
       if (s.lane !== pending.lane) return setInfo('The end must be on the same track as the start');
       const { z0, z1 } = spanTo(s);
       pending = null;
       span.visible = false;
-      if (tool.type === 'train') {
+      {
         const blocker = list.find((it) => (it.type === 'train' || it.type === 'startTrain') && it.lane === s.lane && overlaps(z0, z1, it.z0 ?? it.z - 30, it.z1 ?? it.z + 100));
         if (blocker) return setInfo('Another train already uses these tiles');
         // "Any" picks a skin now, so the train keeps it from then on
@@ -473,20 +509,32 @@ export function createStudio(ctx) {
         list.push({ type: 'train', lane: s.lane, z0, z1, kind: tool.kind, variant, ramp: !!(tool.ramp && ctx.getCatalog().ramp) });
         return commit(list);
       }
-      // Overlapping zones on a track merge into one
-      let zone = { type: 'noTracks', lane: s.lane, z0, z1 };
-      const rest = list.filter((it) => {
-        if (it.type !== 'noTracks' || it.lane !== s.lane || !overlaps(zone.z0, zone.z1, it.z0 - 0.1, it.z1 + 0.1)) return true;
-        zone = { ...zone, z0: Math.min(zone.z0, it.z0), z1: Math.max(zone.z1, it.z1) };
-        return false;
-      });
-      return commit([...rest, zone]);
     }
     // Obstacles: max one of each kind per tile; pieces across the track sit on the middle one
     const lane = ctx.getCatalog().sizes?.[tool.key]?.wide ? 0 : s.lane;
     const taken = list.some((it) => it.type === 'obstacle' && it.key === tool.key && it.lane === lane && cellOf(it.z) === s.cell);
     if (taken) return setInfo(`There is already a ${labelOf(tool.key, ctx.getCatalog()).toLowerCase()} on this tile`);
     list.push({ type: 'obstacle', key: tool.key, lane, z: s.cellZ + CELL / 2 });
+    commit(list);
+  }
+
+  /** "No tracks" from the start (pending) to s: every track in between, over the tiles between. */
+  function removeTracks(s) {
+    const { z0, z1 } = spanTo(s);
+    const [x0, x1] = [Math.min(pending.lane, s.lane), Math.max(pending.lane, s.lane)];
+    pending = null;
+    span.visible = false;
+    let list = [...ctx.getList()];
+    for (const lane of LANES.filter((x) => x >= x0 && x <= x1)) {
+      // Overlapping zones on a track merge into one
+      let zone = { type: 'noTracks', lane, z0, z1 };
+      list = list.filter((it) => {
+        if (it.type !== 'noTracks' || it.lane !== lane || !overlaps(zone.z0, zone.z1, it.z0 - 0.1, it.z1 + 0.1)) return true;
+        zone = { ...zone, z0: Math.min(zone.z0, it.z0), z1: Math.max(zone.z1, it.z1) };
+        return false;
+      });
+      list.push(zone);
+    }
     commit(list);
   }
 
@@ -500,14 +548,22 @@ export function createStudio(ctx) {
   // ------------------------------------------------------------ input
   let dragFrom = null;
   canvas.addEventListener('pointerdown', (e) => {
-    if (active && e.button === 0) dragFrom = { y: e.clientY, viewZ, moved: false };
+    if (!active || e.button !== 0) return;
+    dragFrom = { x: e.clientX, y: e.clientY, viewZ, moved: false };
+    // "No tracks": a drag selects tiles, across tracks too (a click then a click works as well)
+    const s = tool.type === 'noTracks' && pick(e);
+    if (s) {
+      dragFrom.select = true;
+      dragFrom.second = !!pending;
+      pending ??= { lane: s.lane, cellZ: s.cellZ };
+    }
   });
   canvas.addEventListener('pointermove', (e) => {
     if (!active) return;
     if (dragFrom) {
       const dy = e.clientY - dragFrom.y;
-      if (Math.abs(dy) > 4) dragFrom.moved = true;
-      if (dragFrom.moved) {
+      if (Math.abs(dy) > 4 || Math.abs(e.clientX - dragFrom.x) > 4) dragFrom.moved = true;
+      if (dragFrom.moved && !dragFrom.select) {
         viewZ = dragFrom.viewZ + ((dy / canvas.clientHeight) * (cam.top - cam.bottom)) / Math.cos(TILT);
         updateCamera();
       }
@@ -517,7 +573,15 @@ export function createStudio(ctx) {
   canvas.addEventListener('pointerup', (e) => {
     if (!active || !dragFrom) return;
     const wasDrag = dragFrom.moved;
+    const from = dragFrom;
     dragFrom = null;
+    if (from.select) {
+      const s = pick(e);
+      if (pending && s && (wasDrag || from.second)) removeTracks(s);
+      else if (pending) setInfo('Start set: drag, or click the end (across tracks too)');
+      onMove(e);
+      return;
+    }
     const s = !wasDrag && pick(e);
     if (s) {
       apply(s);
@@ -684,10 +748,10 @@ export function createStudio(ctx) {
     // Main bar (bottom): modes, status, game mode, done
     const hints = {
       place: 'Pick an asset above, then click the tiles',
-      edit: 'Click a train, obstacle or light to change it',
+      edit: 'Click a train, obstacle, light or zone to change it',
       remove: 'Click something to remove it',
-      noTracks: 'Click the start then the end of a stretch of track',
       challenge: "Pick the runner's lane, then click the start then the end of the stretch where the challenge loops",
+      noTracks: 'Drag over the tiles (across tracks too), or click the start then the end',
       surge: 'Click the start then the end of the stretch where the floor is activated',
     };
     const hintKey = mode === 'track' ? tool.type : mode;
@@ -747,7 +811,7 @@ export function createStudio(ctx) {
     const it = ctx.getList()[selected];
     const row = (...children) => el('div', { class: 'studio-row edit-row' }, el('span', { class: 'studio-label' }, 'Edit'), ...children);
     const del = el('button', { class: 'danger', onclick: deleteSelected }, 'Delete');
-    if (!it) return row(el('span', { class: 'studio-info' }, 'Click a train, obstacle or light to change it'));
+    if (!it) return row(el('span', { class: 'studio-info' }, 'Click a train, obstacle, light or zone to change it'));
 
     if (it.type === 'obstacle') {
       // A piece turns into the others of its family (obstacles, walls, platforms, mode pieces)
@@ -756,6 +820,15 @@ export function createStudio(ctx) {
     }
     if (it.type === 'signal') {
       return row(...SIGNAL_TOOLS.map(([color, label]) => btn(label, (it.color ?? 'green') === color, () => replaceSelected({ ...it, color }))), del);
+    }
+    if (it.type === 'challenge') {
+      // The lane its runner loops along
+      return row(
+        el('span', { class: 'studio-info' }, describeItem(it)),
+        el('span', { class: 'studio-label' }, 'Runner'),
+        ...RUNNER_LANES.map(([x, label]) => btn(label, (it.lane ?? 0) === x, () => replaceSelected({ ...it, lane: x }))),
+        del,
+      );
     }
     if (it.type !== 'train') return row(el('span', { class: 'studio-info' }, describeItem(it)), del);
 

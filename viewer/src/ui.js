@@ -244,7 +244,7 @@ export function createUI(manifest, actions) {
       'div',
       { class: 'tool-group' },
       el('button', { title: 'Seed, game mode, map sections and building pieces (1)', onclick: () => actions.openGeneration() }, '🗺 Generation'),
-      el('button', { title: 'Camera, fog, skyline, bend and materials (2)', onclick: () => actions.openView() }, '🎨 View'),
+      el('button', { title: 'Camera, fog, skyline, glass and bend (2)', onclick: () => actions.openView() }, '🎨 View'),
       el('button', { title: 'Place trains and obstacles yourself (3)', onclick: () => actions.openStudio() }, '✏️ Studio'),
       actions.timeButton ?? null,
       // Piece browser: a debug tool, only with ?debug=true

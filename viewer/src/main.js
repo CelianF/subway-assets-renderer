@@ -1168,12 +1168,11 @@ let challengeRuns = []; // per studio zone: { z0, z1, lane, segments: [{ node, m
 // Not riding along: the trail (tiled over the zones), the reward drop at milestones, the
 // start's snow
 const CHALLENGE_STILL = /_Segment_\d+$|_GrassSegment_\d+$|_Milestone_Drop$|_StaticSnow$/;
+// Thrown from the runner's body, about its middle
+const CHALLENGE_FROM_BODY = /_Presents_Trail$/;
+const RUNNER_BODY = 8;
 // Riding on the track's axis rather than in the runner's lane
 const CHALLENGE_GROUND = /^(FollowGround|FollowZ|TreeRoot)$/;
-// The runners, seen in the viewer (not in screenshots)
-const runnerMarkers = new THREE.Group();
-scene.add(runnerMarkers);
-const runnerMarkerMat = new THREE.MeshBasicMaterial({ color: 0xffcc33, transparent: true, opacity: 0.8, depthWrite: false });
 
 /**
  * ThemeEffectTextureIndent's mask (16×16, one per snow segment): the runner's path painted in
@@ -1236,7 +1235,6 @@ function challengeSegment(template, k) {
 
 async function placeChallenge(length, id) {
   challengeGroup.clear(); // (the runs' particles go with their effect)
-  runnerMarkers.clear();
   challengeRuns = [];
   const effect = !state.inspect && challengeEffect();
   const looping = state.obstacleMode === 'studio';
@@ -1268,13 +1266,13 @@ async function placeChallenge(length, id) {
     if (fx) {
       run.fx = fx.clone();
       run.fx.traverse((o) => CHALLENGE_GROUND.test(o.name) && (o.position.x -= run.lane));
+      // The gifts pop out of the runner (the effect's root is its feet: they'd start in the snow)
+      run.fx.traverse((o) => CHALLENGE_FROM_BODY.test(o.name) && (o.position.y += RUNNER_BODY));
       challengeGroup.add(run.fx);
       // (made with particles off too: shown once they're on)
       await attachRunnerParticles(run.fx, manifest.prefabs[effect.prefab].particles, { anchored: true });
       if (id !== buildId) return;
     }
-    run.marker = new THREE.Mesh(new THREE.ConeGeometry(2.5, 7, 12).rotateX(Math.PI), runnerMarkerMat);
-    runnerMarkers.add(run.marker);
     challengeRuns.push(run);
   }
   updateChallenge(time.now);
@@ -1306,7 +1304,6 @@ function updateChallenge(now) {
     }
     run.painted = Math.max(run.painted, z);
     run.fx?.position.set(run.lane, 0, z);
-    run.marker.position.set(run.lane, 12, z);
   }
 }
 
@@ -1532,9 +1529,10 @@ async function attachRunnerParticles(obj, particles, { anchored = false } = {}) 
     if (!anchored) e.drift = new THREE.Vector3(0, 0, -RUN_SPEED).applyQuaternion(e.node.getWorldQuaternion(new THREE.Quaternion()).invert());
     e.travel = RUN_SPEED;
     // Imported before rate over distance was kept: a looping system that never emits over
-    // time nor in bursts emitted on distance; a stand-in rate until the map is re-imported
+    // time nor in bursts emitted on distance; 2.27 Christmas gifts' rate (0.05 a unit) until
+    // the map is re-imported
     const d = e.def;
-    if (!d.distanceRate && d.loop && !d.rate.max && !d.bursts.length) e.def = { ...d, distanceRate: { mode: 0, min: 0.04, max: 0.04 } };
+    if (!d.distanceRate && d.loop && !d.rate.max && !d.bursts.length) e.def = { ...d, distanceRate: { mode: 0, min: 0.05, max: 0.05 } };
   }
   return emitters;
 }
@@ -1791,7 +1789,6 @@ function renderScreenshot() {
   shotCam.updateProjectionMatrix();
 
   sky.visible = !screenshot.transparent;
-  runnerMarkers.visible = false;
   const screenRes = globals.uResolution.value.clone();
   globals.uResolution.value.set(width, height);
   renderer.setRenderTarget(target);
@@ -1803,7 +1800,6 @@ function renderScreenshot() {
   renderer.setRenderTarget(null);
   renderer.setClearColor(0x000000, 1);
   sky.visible = true;
-  runnerMarkers.visible = true;
   globals.uResolution.value.copy(screenRes);
   target.dispose();
 
@@ -2104,6 +2100,10 @@ const view = createWorkbar(
             { type: 'toggle', label: 'Weather & effects along the run', obj: state, key: 'weather', visible: () => !!(followEffectsOf(state.theme).length || themeWeather()), onChange: applyThemeLook },
           ],
         },
+        {
+          title: 'Glass',
+          controls: [{ type: 'slider', label: 'Opacity', obj: state, key: 'glass', min: 0, max: 1, step: 0.01, onChange: (v) => materials.setGlassOpacity(v) }],
+        },
       ],
     },
     {
@@ -2120,15 +2120,6 @@ const view = createWorkbar(
         {
           title: 'Reset',
           controls: [{ type: 'button', label: 'Straight', action: () => ((state.bend = state.bendVertical = 0), applyBend(), view.refresh()) }],
-        },
-      ],
-    },
-    {
-      title: 'Materials',
-      columns: [
-        {
-          title: 'Glass',
-          controls: [{ type: 'slider', label: 'Opacity', obj: state, key: 'glass', min: 0, max: 1, step: 0.01, onChange: (v) => materials.setGlassOpacity(v) }],
         },
       ],
     },
