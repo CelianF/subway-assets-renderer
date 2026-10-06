@@ -1269,6 +1269,9 @@ function applyThemeLook() {
  * mesh's vertex colors (decoded by the builder: the glb lost them). Older manifests have
  * no mode: gradient, lightly tinted.
  */
+// The runner's speed at the start of a run (DefaultSpeedConfig._startSpeed)
+const RUN_SPEED = 110;
+
 async function loadSkyline(bg) {
   const prefab = manifest.prefabs[bg.prefab];
   if (!prefab?.glb || !prefab.bbox) return;
@@ -1351,6 +1354,20 @@ async function loadSkyline(bg) {
       o.renderOrder = queue ? -1000 + (queue - 2000) / 1000 : -1500;
     }
   });
+  // Its particles ride along, unfogged like the skyline (3.70 Haunted Hood's DistantFog: a
+  // ground fog patch over the tracks, ~600 ahead of the runner). The skyline follows the
+  // runner, so a world-space system leaves its puffs behind as the runner comes on: they
+  // drift back at the game's run speed, which spreads the fog along the whole run
+  if (prefab.particles && state.particles) {
+    const table = sanitizedTable(Object.entries(prefab.particles));
+    const emitters = await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
+    obj.traverse((o) => o.userData.particles && o.material.uniforms && (o.material.uniforms = { ...o.material.uniforms, uFogOn: { value: 0 } }));
+    for (const e of emitters) {
+      if (e.def.local) continue;
+      const toNode = e.node.getWorldQuaternion(new THREE.Quaternion()).invert();
+      e.drift = new THREE.Vector3(0, 0, -RUN_SPEED).applyQuaternion(toNode);
+    }
+  }
   obj.userData.distance = bg.distance ?? 1000;
   skylineGroup.add(obj);
 }

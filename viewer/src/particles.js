@@ -384,6 +384,7 @@ class Emitter {
     this.subs = []; // { emitter, type: 0 birth | 2 death, probability, inheritColor }
     this.sources = null; // as a sub-emitter: where its parent's particles start it
     this.spawnOffset = null; // weather: emission follows the camera
+    this.drift = null; // node-space units/s every particle moves by (world-space systems on a moving node)
     this.count = 0;
     this.time = 0;
     this.emitAcc = 0;
@@ -630,6 +631,11 @@ class Emitter {
       pos[p] += (v[p] + ex) * dt;
       pos[p + 1] += (v[p + 1] + ey) * dt;
       pos[p + 2] += (v[p + 2] + ez) * dt;
+      if (this.drift) {
+        pos[p] += this.drift.x * dt;
+        pos[p + 1] += this.drift.y * dt;
+        pos[p + 2] += this.drift.z * dt;
+      }
       if (vel?.orbital) this.orbit(i, lt, dt);
       // Direction of travel from the actual move, orbits included
       this.heading[p] = (pos[p] - x0) / dt;
@@ -788,6 +794,7 @@ export async function attachParticles(root, particles, materials, nodeKey, meshG
       e.subs.push({ emitter: sub, type: link.type, probability: link.probability, inheritColor: !!link.inheritColor });
     }
   }
+  return made;
 }
 
 let weather = null;

@@ -117,6 +117,9 @@ varying vec3 vNormalW;
 #ifdef USE_COLOR
 varying vec3 vColor;
 #endif
+#ifdef USE_COLOR_ALPHA
+varying float vColorA; // RGBA vertex colors: their alpha fades transparent pieces (3.70 Haunted Hood smoke)
+#endif
 #include <clipping_planes_pars_vertex>
 #include <skinning_pars_vertex>
 #include <morphtarget_pars_vertex>
@@ -185,6 +188,9 @@ void main() {
   vViewDir = normalize(-mv.xyz);
 #ifdef USE_COLOR
   vColor = color.rgb; // vec3 or vec4 (RGBA vertex colors) depending on the mesh
+#endif
+#ifdef USE_COLOR_ALPHA
+  vColorA = color.a;
 #endif
   gl_Position = projectionMatrix * mv;
   vec4 mvPosition = mv;
@@ -277,6 +283,9 @@ vec3 sampleCubeStrip(sampler2D strip, vec3 d) {
 #ifdef USE_COLOR
 varying vec3 vColor;
 #endif
+#ifdef USE_COLOR_ALPHA
+varying float vColorA; // RGBA vertex colors: their alpha fades transparent pieces (3.70 Haunted Hood smoke)
+#endif
 ${FOG_GLSL}
 ${CUT_GLSL}
 
@@ -306,6 +315,9 @@ ${CUT_MAIN}
 #endif
 #ifdef USE_COLOR
   c.rgb *= vColor;
+#endif
+#if defined(USE_COLOR_ALPHA) && FADE_MODE == 1
+  c.a *= vColorA;
 #endif
 #ifdef REFLECTIONS
 #ifdef CUBE_STRIP
