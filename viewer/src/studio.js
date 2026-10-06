@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { fitTrain, trainLength, RAMP_LENGTH, FIX_LABELS, coinPositions } from './layout.js';
+import { fitTrain, trainLength, RAMP_LENGTH, FIX_LABELS, coinPositions, arcPositions, COIN_SPACING } from './layout.js';
 
 // Studio mode: a slightly tilted top view of the run with placement spots. Trains are
 // drawn from a start cell to an end cell on one track and snap to the longest train
@@ -55,12 +55,18 @@ const FIX_TITLES = {
 const KIND_LABELS = { static: 'Parked', moving: 'Moving', falling: 'Lava' };
 // The game's pickups by prefab name, in the palette's groups
 const PICKUP_GROUPS = [
-  ['Power-ups', { Magnet: '🧲 Magnet', Jetpack: '🚀 Jetpack', SuperSneakers: '👟 Super Sneakers', '2xScore': '✖️ 2x Multiplier', Pogostick: '🦘 Pogo Stick', MysteryPowerup: '❓ Mystery power-up' }],
-  ['Boxes & tokens', { MysteryBox: '🎁 Mystery Box', SuperMysteryBox: '🎁 Super Mystery Box', Key: '🔑 Key', SeasonToken: '🏅 Season token', LetterToken: '🔤 Letter token', CharacterLetterToken: '🔤 Character token', Hourglass: '⏳ Hourglass' }],
+  ['Power-ups', { Magnet: '🧲 Magnet', Jetpack: '🚀 Jetpack', SuperSneakers: '👟 Super Sneakers', '2xScore': '✖️ 2x Multiplier', Pogostick: '🦘 Pogo Stick', MysteryPowerup: '❓ Mystery power-up', Hourglass: '⏳ Hourglass' }],
+  ['Boxes & tokens', { MysteryBox: '🎁 Mystery Box', SuperMysteryBox: '🎁 Super Mystery Box', Key: '🔑 Key', SeasonToken: '🏅 Season token', LetterToken: '🔤 Letter token', CharacterLetterToken: '🔤 Character token' }],
+  // Trick or Treat's candies and stinky fish (they shrink the gap to the chased one, or grow it), the race's own
+  ['Events', { ChaseTargetNormalPickup: '🍬 Candy', ChaseTargetBigPickup: '🍭 Lollipop', ChaseTargetNegativePickup: '🐟 Stinky fish', Race_Board_Charge: '⚡ Board charge', Race_Mystery_Box: '🎁 Race Mystery Box' }],
 ];
 const PICKUP_LABELS = Object.assign({}, ...PICKUP_GROUPS.map(([, labels]) => labels));
 const pickupLabel = (key) => (PICKUP_LABELS[key] ?? key).replace(/^\S+ /, '');
-const isPickup = (it) => it.type === 'coins' || it.type === 'pickup';
+// Coins the lines and arcs can be made of (the team event's green and red, Pride's)
+const COIN_SKINS = { Coin: 'Gold coins', GreenCoin: 'Green coins', RedCoin: 'Red coins', PrideCoin: 'Pride coins' };
+const LETTERS = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'];
+const isPickup = (it) => ['coins', 'coinArc', 'pickup'].includes(it.type);
+const tokenLabel = (name) => (name === 'point' ? 'Season point' : name.replace(/^Hunttoken_/, '').replace(/_/g, ' '));
 /** Name of an obstacle tool: regular ones, else the game mode's piece names. */
 const labelOf = (key, cat) => LABELS[key] ?? cat?.modePieces?.[key] ?? key;
 const VARIANT_LABELS = { auto: 'Any', cargo: 'Cargo', passenger: 'Passenger', subway: 'Subway' };
@@ -239,6 +245,19 @@ export function createStudio(ctx) {
         dot.position.set(0, 0.1, z - m.position.z);
         m.add(dot);
       }
+    } else if (it.type === 'coinArc') {
+      // Its stretch of track, a dot per coin, the middle one (the spot) bigger
+      const coins = arcPositions(it, cat.coinPatterns?.arcs?.[0]);
+      m = flat(3, coins.at(-1).z - coins[0].z, color ?? COLORS.coins, opacity ?? 0.3);
+      m.position.set(it.lane, 1.2, it.z);
+      coins.forEach((c, i) => {
+        const dot = new THREE.Mesh(coinDot, overlayMat(color ?? COLORS.coins, opacity ?? 0.9));
+        dot.renderOrder = 5001;
+        dot.frustumCulled = false;
+        dot.position.set(0, 0.1, c.z - it.z);
+        if (i === (coins.length - 1) / 2) dot.scale.setScalar(1.6);
+        m.add(dot);
+      });
     } else if (it.type === 'pickup') {
       m = flat(7, 7, color ?? COLORS.pickup, opacity ?? 0.85);
       m.position.set(it.lane, 1.2, it.z);
@@ -290,7 +309,8 @@ export function createStudio(ctx) {
     if (it.type === 'obstacle') return labelOf(it.key, ctx.getCatalog());
     if (it.type === 'signal') return `Signal light (${it.color ?? 'green'})`;
     if (it.type === 'coins') return `Coin line, ${coinPositions(it).length} coins`;
-    if (it.type === 'pickup') return pickupLabel(it.key);
+    if (it.type === 'coinArc') return `Jump arc, ${arcPositions(it, ctx.getCatalog().coinPatterns?.arcs?.[0]).length} coins`;
+    if (it.type === 'pickup') return `${pickupLabel(it.key)}${it.letter ? ` ${it.letter}` : ''}${it.key === 'SeasonToken' && it.token ? ` (${tokenLabel(it.token)})` : ''}`;
     if (it.type === 'noTracks') return `No tracks zone, ${Math.round((it.z1 - it.z0) / CELL)} tiles`;
     if (FULL_ZONES.includes(it.type)) return `${zoneLabel(it.type)} zone, ${Math.round((it.z1 - it.z0) / CELL)} tiles`;
     return it.type;
@@ -357,6 +377,9 @@ export function createStudio(ctx) {
         if (Math.abs(s.x - it.x) < 4 && cellOf(it.z) === s.cell) return i;
       } else if (it.type === 'pickup') {
         if (s.laneOk && it.lane === s.lane && cellOf(it.z) === s.cell) return i;
+      } else if (it.type === 'coinArc') {
+        const coins = arcPositions(it, cat.coinPatterns?.arcs?.[0]);
+        if (s.laneOk && it.lane === s.lane && s.z >= coins[0].z - CELL / 2 && s.z <= coins.at(-1).z + CELL / 2) return i;
       } else if (it.type === 'obstacle') {
         // Anywhere on its footprint (at least its tile on its track)
         const r = rectOf(it, cat);
@@ -442,8 +465,18 @@ export function createStudio(ctx) {
       span.material.color.set(COLORS.coins);
       span.scale.set(6 / 17, 1, range.z1 - range.z0);
       span.position.set(lane, 1.4, (range.z0 + range.z1) / 2);
-      const n = coinPositions(range).length;
+      const n = coinPositions({ ...range, spacing: tool.spacing }).length;
       setInfo(pending ? `${n} coin${n > 1 ? 's' : ''} · release, or click the end (Esc cancels)` : 'Drag along a track for a line of coins, or click its start then its end');
+      return;
+    }
+    if (tool.type === 'coinArc') {
+      // The arc's stretch, centered on the tile
+      const coins = arcPositions({ z: s.cellZ + CELL / 2 }, ctx.getCatalog().coinPatterns?.arcs?.[0]);
+      span.visible = true;
+      span.material.color.set(COLORS.coins);
+      span.scale.set(6 / 17, 1, coins.at(-1).z - coins[0].z);
+      span.position.set(s.lane, 1.4, s.cellZ + CELL / 2);
+      setInfo('Click the tile the arc centers on (the game puts it about 3 tiles past a jump barrier)');
       return;
     }
     if (tool.type === 'noTracks' && pending) {
@@ -542,10 +575,12 @@ export function createStudio(ctx) {
     if (tool.type === 'noTracks') return removeTracks(s);
     if (tool.type === 'coins') return addCoins(s);
     if (!s.laneOk) return;
-    if (tool.type === 'pickup') {
-      const i = list.findIndex((it) => it.type === 'pickup' && it.lane === s.lane && cellOf(it.z) === s.cell);
-      if (i >= 0) list[i] = { ...list[i], key: tool.key };
-      else list.push({ type: 'pickup', key: tool.key, lane: s.lane, z: s.cellZ + CELL / 2 });
+    if (tool.type === 'pickup' || tool.type === 'coinArc') {
+      // One per tile: clicking a taken one swaps it
+      const next = { type: tool.type, lane: s.lane, z: s.cellZ + CELL / 2, ...pickupOptions(tool) };
+      const i = list.findIndex((it) => it.type === tool.type && it.lane === s.lane && cellOf(it.z) === s.cell);
+      if (i >= 0) list[i] = next;
+      else list.push(next);
       return commit(list);
     }
     if (tool.type === 'train') {
@@ -597,15 +632,28 @@ export function createStudio(ctx) {
     commit(list);
   }
 
-  /** A line of coins from the start (pending) to s, on the start's track; lines that meet merge. */
+  /** What a pickup tool puts on its items: the pickup, its letter or hunt token, the coins' skin and spacing. */
+  function pickupOptions(t) {
+    const cat = ctx.getCatalog();
+    return {
+      ...(t.key ? { key: t.key } : {}),
+      ...(t.coin && t.coin !== 'Coin' ? { coin: t.coin } : {}),
+      ...(t.spacing && t.spacing !== COIN_SPACING ? { spacing: t.spacing } : {}),
+      ...(cat.letterPickups.includes(t.key) ? { letter: t.letter ?? 'A' } : {}),
+      ...(t.key === 'SeasonToken' && cat.huntTokens.length ? { token: t.token ?? cat.huntTokens[0] } : {}),
+    };
+  }
+
+  /** A line of coins from the start (pending) to s, on the start's track; lines that meet (alike) merge. */
   function addCoins(s) {
     const { z0, z1 } = spanTo(s);
     const lane = pending.lane;
     pending = null;
     span.visible = false;
-    let line = { type: 'coins', lane, z0, z1 };
+    let line = { type: 'coins', lane, z0, z1, ...pickupOptions(tool) };
+    const alike = (it) => (it.coin ?? 'Coin') === (line.coin ?? 'Coin') && (it.spacing ?? COIN_SPACING) === (line.spacing ?? COIN_SPACING);
     const list = ctx.getList().filter((it) => {
-      if (it.type !== 'coins' || it.lane !== lane || !overlaps(line.z0, line.z1, it.z0 - 0.1, it.z1 + 0.1)) return true;
+      if (it.type !== 'coins' || it.lane !== lane || !alike(it) || !overlaps(line.z0, line.z1, it.z0 - 0.1, it.z1 + 0.1)) return true;
       line = { ...line, z0: Math.min(line.z0, it.z0), z1: Math.max(line.z1, it.z1) };
       return false;
     });
@@ -795,12 +843,28 @@ export function createStudio(ctx) {
       }
       if (category === 'lights') rows.push(row('Lights', ...SIGNAL_TOOLS.map(([color, label]) => btn(label, isTool('signal', { color }), () => setTool({ type: 'signal', color })))));
       if (category === 'pickups') {
-        const pickupButtons = (labels) => Object.entries(labels).filter(([key]) => cat.pickups.includes(key)).map(([key, label]) => btn(label, isTool('pickup', { key }), () => setTool({ type: 'pickup', key })));
-        PICKUP_GROUPS.forEach(([group, labels], i) => {
-          const coins = i === 0 && cat.pickups.includes('Coin') ? [btn('🪙 Coin line', tool.type === 'coins', () => setTool({ type: 'coins' }))] : [];
+        // Coins: lines (regular or close) and jump arcs, of any coin the map has
+        if (cat.pickups.includes('Coin')) {
+          const coinTool = (type) => ({ type, coin: tool.coin ?? 'Coin', spacing: tool.spacing ?? COIN_SPACING });
+          rows.push(
+            row(
+              'Coins',
+              btn('🪙 Coin line', tool.type === 'coins', () => setTool(coinTool('coins'))),
+              btn('⤴️ Jump arc', tool.type === 'coinArc', () => setTool(coinTool('coinArc'))),
+              ...coinOptions(cat, tool, select, (changes) => setTool({ ...tool, ...changes })),
+            ),
+          );
+        }
+        const pickupButtons = (labels) =>
+          Object.entries(labels)
+            .filter(([key]) => cat.pickups.includes(key))
+            .map(([key, label]) => btn(label, isTool('pickup', { key }), () => setTool({ type: 'pickup', key, letter: tool.letter, token: tool.token })));
+        for (const [group, labels] of PICKUP_GROUPS) {
           const buttons = pickupButtons(labels);
-          if (coins.length || buttons.length) rows.push(row(group, ...coins, ...buttons));
-        });
+          // The chosen pickup's own settings next to it: a hunt letter, the season's token
+          const own = tool.type === 'pickup' && tool.key in labels ? pickupSettings(cat, tool, select, (changes) => setTool({ ...tool, ...changes })) : [];
+          if (buttons.length) rows.push(row(group, ...buttons, ...own));
+        }
       }
     } else if (mode === 'edit' && selected >= 0) {
       rows.push(editRow(cat, btn, select));
@@ -904,6 +968,55 @@ export function createStudio(ctx) {
     ['off', '⚫ Off'],
   ];
 
+  /**
+   * The game's coin line spacings: the usual one and the closest (CoinLineSpawner: 3 over 60,
+   * 30 apart; 5 over 100, 25 apart).
+   */
+  function coinSpacings(cat) {
+    const gaps = (cat.coinPatterns?.lines ?? []).filter((l) => l.items > 1).map((l) => Math.round((l.length / (l.items - 1)) * 10) / 10);
+    if (!gaps.length) return [[COIN_SPACING, 'Regular'], [25, 'Close']];
+    const count = (g) => gaps.filter((x) => x === g).length;
+    const regular = gaps.reduce((a, b) => (count(b) > count(a) ? b : a));
+    const close = Math.min(...gaps);
+    return close < regular ? [[regular, 'Regular'], [close, 'Close']] : [[regular, 'Regular']];
+  }
+
+  /** A coin tool's or item's settings: spacing (lines), which coins (when the map has several). */
+  function coinOptions(cat, it, select, change) {
+    const out = [];
+    if (it.type === 'coins') {
+      const spacings = coinSpacings(cat);
+      const current = it.spacing ?? COIN_SPACING;
+      if (spacings.length > 1) {
+        const s = select(String(current), spacings.map(([v, label]) => [String(v), `${label} · ${v} apart`]), (v) => change({ spacing: Number(v) }));
+        s.title = 'Spacing';
+        out.push(s);
+      }
+    }
+    const skins = Object.keys(COIN_SKINS).filter((k) => cat.pickups.includes(k));
+    if (skins.length > 1) {
+      const s = select(it.coin ?? 'Coin', skins.map((k) => [k, COIN_SKINS[k]]), (coin) => change({ coin }));
+      s.title = 'Coins';
+      out.push(s);
+    }
+    return out;
+  }
+
+  /** A pickup's own settings: a hunt letter's letter, the season token's hunt token. */
+  function pickupSettings(cat, it, select, change) {
+    if (cat.letterPickups.includes(it.key)) {
+      const s = select(it.letter ?? 'A', LETTERS.map((l) => [l, `Letter ${l}`]), (letter) => change({ letter }));
+      s.title = 'Letter';
+      return [s];
+    }
+    if (it.key === 'SeasonToken' && cat.huntTokens.length) {
+      const s = select(it.token ?? cat.huntTokens[0], [...cat.huntTokens, 'point'].map((n) => [n, tokenLabel(n)]), (token) => change({ token }));
+      s.title = 'Hunt token';
+      return [s];
+    }
+    return [];
+  }
+
   /** Settings of the selected item (edit mode). */
   function editRow(cat, btn, select) {
     const it = ctx.getList()[selected];
@@ -920,8 +1033,22 @@ export function createStudio(ctx) {
       return row(...family.map((key) => btn(labelOf(key, cat), it.key === key, () => editObstacle(key))), ...states, del);
     }
     if (it.type === 'pickup') {
-      // A pickup turns into any other
-      return row(...cat.pickups.filter((key) => key !== 'Coin').map((key) => btn(PICKUP_LABELS[key] ?? key, it.key === key, () => replaceSelected({ ...it, key }))), del);
+      // A pickup turns into any other (with a letter or hunt token where it takes one)
+      const turn = (key) => replaceSelected({ type: 'pickup', lane: it.lane, z: it.z, ...pickupOptions({ ...it, key }) });
+      return row(
+        ...cat.pickups.filter((key) => !(key in COIN_SKINS)).map((key) => btn(PICKUP_LABELS[key] ?? key, it.key === key, () => turn(key))),
+        ...pickupSettings(cat, it, select, (changes) => replaceSelected({ ...it, ...changes })),
+        del,
+      );
+    }
+    if (it.type === 'coins' || it.type === 'coinArc') {
+      const edit = (changes) => {
+        const next = { ...it, ...changes };
+        if (next.coin === 'Coin') delete next.coin;
+        if (next.spacing === COIN_SPACING) delete next.spacing;
+        replaceSelected(next);
+      };
+      return row(el('span', { class: 'studio-info' }, describeItem(it)), ...coinOptions(cat, it, select, edit), del);
     }
     if (it.type === 'signal') {
       return row(...SIGNAL_TOOLS.map(([color, label]) => btn(label, (it.color ?? 'green') === color, () => replaceSelected({ ...it, color }))), del);

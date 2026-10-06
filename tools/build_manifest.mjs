@@ -733,18 +733,83 @@ function parseThemeEffect(file, guidIndex) {
 // Prefabs the viewer needs beyond theme slots
 const EXTRA_PREFABS = ['_Common_LightSignal_Light_Green', '_Common_LightSignal_Light_Red'];
 
-// In-run pickups (the game's Pickup prefabs: coins, power-ups, boxes, tokens), the same in
-// every city. The studio places them. (AssemblyIngredient and InRunCollectible get their
-// model at runtime: none to show.)
-const PICKUP_PREFABS = ['Coin', 'Magnet', 'Jetpack', 'SuperSneakers', '2xScore', 'Pogostick', 'Hourglass', 'MysteryBox', 'SuperMysteryBox', 'MysteryPowerup', 'Key', 'SeasonToken', 'LetterToken', 'CharacterLetterToken'];
+// In-run pickups (the game's Pickup prefabs: coins, power-ups, boxes, tokens, the event
+// modes' own), the same in every city. The studio places them. (AssemblyIngredient,
+// InRunCollectible and CityTourPickup get their model at runtime: none to show.)
+const PICKUP_PREFABS = [
+  'Coin', 'GreenCoin', 'RedCoin', 'PrideCoin', 'Magnet', 'Jetpack', 'SuperSneakers', '2xScore', 'Pogostick', 'Hourglass', 'MysteryBox', 'SuperMysteryBox', 'MysteryPowerup',
+  'Key', 'SeasonToken', 'LetterToken', 'CharacterLetterToken',
+  'ChaseTargetNormalPickup', 'ChaseTargetBigPickup', 'ChaseTargetNegativePickup', // Trick or Treat: candy, lollipop, stinky fish
+  'Race_Board_Charge', 'Race_Mystery_Box',
+];
 
-/** Names of GameObjects whose MeshRenderer is off (the coin's double-coin look, swapped in by the 2x power-up). */
+/**
+ * Names of GameObjects a pickup starts without: renderers off (the coin's double-coin look,
+ * swapped in by the 2x power-up) and inactive children (the race charge's double).
+ */
 function disabledRenderers(file) {
   const docs = yamlDocs(read(file));
   const names = new Map(docs.filter((d) => d.kind === '1').map((d) => [d.fid, d.doc.match(/m_Name: (.*)/)?.[1].trim() ?? '']));
-  return sortedStrings(
-    docs.filter((d) => d.kind === '23' && /\n {2}m_Enabled: 0/.test(d.doc)).map((d) => names.get(d.doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1])).filter(Boolean),
-  );
+  const goOf = (d) => d.doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+  const children = new Set(docs.filter((d) => d.kind === '4' && !/m_Father: \{fileID: 0\}/.test(d.doc)).map(goOf));
+  return sortedStrings([
+    ...docs.filter((d) => d.kind === '23' && /\n {2}m_Enabled: 0/.test(d.doc)).map((d) => names.get(goOf(d))),
+    ...docs.filter((d) => d.kind === '1' && /m_IsActive: 0/.test(d.doc) && children.has(d.fid)).map((d) => names.get(d.fid)),
+  ].filter(Boolean));
+}
+
+/**
+ * What a pickup's script picks at runtime: one of its _randomModels (Trick or Treat's two
+ * candies), the letter mesh of a hunt letter (_letterMeshes, A to Z, on _letterMeshFilter),
+ * the season hunt token's holder (the season point when no hunt runs).
+ */
+function parsePickupScript(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map(docs.filter((d) => d.kind === '1').map((d) => [d.fid, d.doc.match(/m_Name: (.*)/)?.[1].trim() ?? '']));
+  const goOf = new Map(docs.filter((d) => d.kind !== '1').map((d) => [d.fid, d.doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1]]));
+  const parentOf = new Map();
+  for (const d of docs.filter((d) => d.kind === '4')) parentOf.set(goOf.get(d.fid), goOf.get(d.doc.match(/m_Father: \{fileID: (\d+)/)?.[1]));
+  const list = (doc, key) => [...(doc.split(`\n  ${key}:`)[1]?.split(/\n {2}\w/)[0] ?? '').matchAll(/\{fileID: (\d+)(?:, guid: (\w+))?/g)];
+  const out = {};
+  for (const { doc } of docs.filter((d) => d.kind === '114')) {
+    const models = list(doc, '_randomModels').map(([, fid]) => fid).filter((fid) => names.has(fid));
+    if (models.length > 1) out.randomizers = { [names.get(parentOf.get(models[0]))]: { probability: 1, weights: Object.fromEntries(models.map((fid) => [names.get(fid), 1])) } };
+    const letters = list(doc, '_letterMeshes').map(([, , g]) => g && guidIndex.get(g)).filter(Boolean).map(stem);
+    const filter = doc.match(/_letterMeshFilter: \{fileID: (\d+)/)?.[1];
+    if (letters.length && names.has(goOf.get(filter))) out.letters = { node: names.get(goOf.get(filter)), meshes: letters };
+    const holder = names.get(doc.match(/_seasonHuntTokenHolder: \{fileID: (\d+)/)?.[1]);
+    const point = names.get(doc.match(/_seasonPointHolder: \{fileID: (\d+)/)?.[1]);
+    if (holder) out.tokenSlot = { holder, point };
+  }
+  return out;
+}
+
+/**
+ * The game's coin patterns (CurveSpawner assets): lines of N coins over a length, and the
+ * jump arcs (JumpCurve: an AnimationCurve of the height, 0 to 1 along the arc).
+ * { lines: [{ items, length }], arcs: [{ items, length, height, keys }] }
+ */
+function parseCoinPatterns(byName, guidIndex) {
+  const lines = [];
+  const arcs = [];
+  for (const [n, p] of byName) {
+    if (!/^Coin(Line|Curve)Spawner.*\.asset$/.test(n)) continue;
+    const doc = read(p);
+    const curve = guidIndex.get(doc.match(/_curve: \{fileID: \d+, guid: (\w+)/)?.[1] ?? '');
+    if (!curve || !existsSync(curve)) continue;
+    const c = read(curve);
+    const f = (text, key) => num(text.match(new RegExp(`\\n\\s*${key}: ([-\\d.eE]+)`))?.[1] ?? '0');
+    const items = f(doc, '_baseNumItems');
+    const length = f(c, '_zScale') + f(c, '_fixedLengthOffset');
+    if (!items || !length) continue;
+    if (/^CoinLine/.test(n)) lines.push({ items, length: round(length, 3) });
+    else if (!arcs.length) {
+      // (every arc spawner shares JumpCurve; they differ in how it stretches with speed)
+      const keys = [...c.matchAll(/time: ([-\d.eE]+)\s+value: ([-\d.eE]+)\s+inSlope: ([-\d.eE]+)\s+outSlope: ([-\d.eE]+)/g)].map((m) => m.slice(1).map((v) => round(num(v), 5)));
+      arcs.push({ items, length: round(length, 3), height: f(c, '_yScale'), keys });
+    }
+  }
+  return { lines: lines.sort((a, b) => a.length - b.length || a.items - b.items), arcs };
 }
 
 // ---------------------------------------------------------------- 1.x themes
@@ -2643,7 +2708,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   // its model can share a name (2.2: prefabs/tracks/X and models/tracks/X): the prefab's
   // export carries its materials, the model's only Default-Material.
   const allGlbs = [...walk(path.join(root, 'Files'))].filter((p) => p.endsWith('.glb')).sort(byDepth);
-  const hasMaterials = (p) => glbJson(p).materials?.some((m) => m.name !== 'Default-Material') ?? false;
+  // (a bare mesh's filler is "Default-Material" or, in 3.70's Mesh/ folder, "DefaultMaterial")
+  const hasMaterials = (p) => glbJson(p).materials?.some((m) => !/^Default-?Material$/.test(m.name ?? '')) ?? false;
   const byNamePreferring = (prefer) => {
     const map = new Map();
     for (const p of allGlbs) {
@@ -2757,7 +2823,10 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   // (by name, and only the game's Pickup prefabs: 3.x tags them _pickupType, 2.x has their rotator)
   const isPickup = (file) => !!file && /\n {2}_(pickupType|rotationSpeed):/.test(read(file));
   const pickups = PICKUP_PREFABS.filter((n) => prefabGlbs.has(`${n}.glb`) && isPickup(find(`${n}.prefab`)));
-  transitionPrefabs.push(pickups);
+  // The season hunt tokens the game ships (3.70: the bat); the others are downloaded per season
+  const huntTokens = [...byName.keys()].filter((n) => /^Hunttoken_[^.]+\.prefab$/.test(n)).map(stem).filter((n) => prefabGlbs.has(`${n}.glb`));
+  transitionPrefabs.push(pickups, huntTokens);
+  const coinPatterns = parseCoinPatterns(byName, guidIndex);
   transitionPrefabs.push(modePrefabs(modes));
   transitionPrefabs.push(Object.values(themeConfigs).filter((c) => c.background).map((c) => c.background.prefab));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.effects ?? []).map((e) => e.prefab)));
@@ -2862,8 +2931,15 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     const prefabPath = prefabFile(name);
     if (!prefabPath || !info.glb) continue;
     colorFixes += fixZeroColors(path.join(out, info.glb), prefabPath, guidIndex);
-    const randomizers = parseRandomizers(prefabPath, guidIndex);
+    const script = pickups.includes(name) ? parsePickupScript(prefabPath, guidIndex) : {};
+    const randomizers = { ...parseRandomizers(prefabPath, guidIndex), ...script.randomizers };
     if (Object.keys(randomizers).length) info.randomizers = randomizers;
+    if (script.tokenSlot) info.tokenSlot = script.tokenSlot;
+    if (script.letters) {
+      const letters = script.letters.meshes.map((m) => meshGlbs.get(`${m}.glb`));
+      for (const src of letters.filter(Boolean)) copyIfNewer(src, path.join(outMesh, path.basename(src)));
+      if (letters.every(Boolean)) info.letters = { node: script.letters.node, meshes: letters.map((src) => `mesh/${path.basename(src)}`) };
+    }
     // (pickups: the renderers they start with off, too)
     const lodHidden = sortedStrings(new Set([...parseLodGroups(prefabPath), ...(pickups.includes(name) ? disabledRenderers(prefabPath) : [])]));
     if (lodHidden.length) info.lodHidden = lodHidden;
@@ -3068,6 +3144,9 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     chunks,
     modes,
     pickups: pickups.filter((n) => prefabs[n]?.bbox),
+    // (a hunt token is a model a few units across; menu-sized ones are left out)
+    huntTokens: huntTokens.filter((n) => prefabs[n]?.bbox && prefabs[n].bbox[1][0] - prefabs[n].bbox[0][0] > 2),
+    coinPatterns,
     prefabs,
     materials,
   };
@@ -3083,7 +3162,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   log(`Mesh animations: ${sumKeys('meshAnimations')} in ${withKey('meshAnimations').length} prefabs`);
   log(`Placeholders: ${sumKeys('placeholders')} in ${withKey('placeholders').length} prefabs; effect players: ${sumKeys('effectPlayers')}`);
   log(`Particle systems: ${sumKeys('particles')} in ${withKey('particles').length} prefabs`);
-  log(`Pickups: ${manifest.pickups.join(', ') || 'none'}`);
+  log(`Pickups: ${manifest.pickups.join(', ') || 'none'}; hunt tokens: ${manifest.huntTokens.join(', ') || 'none'}; coin lines: ${coinPatterns.lines.length}, arcs: ${coinPatterns.arcs.length}`);
   log(`Prefabs: ${Object.keys(prefabs).length} (${empty.length} without geometry, ${missing.length} missing glb)`);
   log(`Materials: ${Object.keys(materials).length}/${usedMats.size} resolved; shaders: ${JSON.stringify(shaders)}`);
   if (colorFixes) log(`  vertex colors restored: ${colorFixes} mesh parts (compressed meshes)`);
@@ -3100,7 +3179,7 @@ function splitByTheme(manifest, staging, out, log) {
     const names = new Set(Object.values(manifest.themes[theme]).flatMap((slots) => Object.values(slots).flat()));
     for (const t of manifest.boundaries[theme]?.transitions ?? []) names.add(t.prefab);
     for (const n of EXTRA_PREFABS) names.add(n);
-    for (const n of manifest.pickups) names.add(n);
+    for (const n of [...manifest.pickups, ...manifest.huntTokens]) names.add(n);
     for (const n of modePrefabs(manifest.modes)) names.add(n);
     if (config.background) names.add(config.background.prefab);
     for (const e of config.effects ?? []) names.add(e.prefab);
@@ -3122,6 +3201,7 @@ function splitByTheme(manifest, staging, out, log) {
       ...Object.values(prefabs).map((p) => p.animators).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => (p.skinned ?? []).map((sk) => sk.mesh)),
       ...Object.values(prefabs).flatMap((p) => (p.morphMeshes ?? []).map((m) => m.url)),
+      ...Object.values(prefabs).flatMap((p) => p.letters?.meshes ?? []),
       ...Object.values(materials).flatMap((m) => Object.values(m.textures).map((t) => t.url)).filter(Boolean),
       ...(config.sky?.texture ? [config.sky.texture] : []),
       ...(config.effects ?? []).map((e) => e.activated?.meshGlb).filter(Boolean),

@@ -72,17 +72,42 @@ export const trainLength = (cars) => 70 + 60 * (cars - 1);
 const RAMP_LENGTH = 76; // ramp wagon in front of a train (origin 36 behind its start)
 const RAMP_RISE = 66; // its slope reaches the roof 66 in (3.70 Train_Ramp: z -36.7 to 30)
 
-// Pickups float over the ground (the game's spawn points: coin lines at 6, power-ups at 7),
-// coins every 30 or so (Coin_Line_N_over_L: N coins over L, 3 over 60 … 9 over 240)
+// Pickups float over the ground (the game's spawn points: coin lines at 6, jump arcs at 8,
+// power-ups at 7), coins every 30 or so (CoinLineSpawner: N coins over L, 3 over 60 … 9
+// over 240; 5 over 100 is the close one)
 const COIN_HEIGHT = 6;
+const ARC_HEIGHT = 8;
 const PICKUP_HEIGHT = 7;
-const COIN_SPACING = 30;
+export const COIN_SPACING = 30;
+// 3.70's JumpCurve (7 coins, 98.4 + 3.6 long, 19.9 high), for maps without the game's patterns
+const JUMP_ARC = { items: 7, length: 102, height: 19.9, keys: [[0, 0, 3.7149, 3.7149], [1.00012, -0.00428, -3.96897, -3.96897]] };
 
 /** Where a studio coin line's coins go: evenly from its first tile's middle to its last's. */
 export function coinPositions(it) {
   const length = Math.max(0, it.z1 - it.z0 - CELL);
-  const n = Math.max(1, Math.round(length / COIN_SPACING) + 1);
+  const n = Math.max(1, Math.round(length / (it.spacing || COIN_SPACING)) + 1);
   return Array.from({ length: n }, (_, i) => it.z0 + CELL / 2 + (n > 1 ? (length * i) / (n - 1) : 0));
+}
+
+/**
+ * A jump arc's coins, centered on its spot like the game's curve spawner (its _scaleT 0.5
+ * stays put): [{ z, y }], y above the spot's height. The height follows the curve's
+ * keys (Unity's Hermite AnimationCurve, time 0 to 1 along the arc).
+ */
+export function arcPositions(it, arc = JUMP_ARC) {
+  const { items, length, height, keys } = arc ?? JUMP_ARC;
+  const value = (t) => {
+    const k = keys.findIndex((key, i) => i === keys.length - 1 || keys[i + 1][0] >= t);
+    const [t0, v0, , out0] = keys[Math.min(k, keys.length - 2)];
+    const [t1, v1, in1] = keys[Math.min(k + 1, keys.length - 1)];
+    const dt = t1 - t0 || 1;
+    const u = Math.min(1, Math.max(0, (t - t0) / dt));
+    return (2 * u ** 3 - 3 * u ** 2 + 1) * v0 + (u ** 3 - 2 * u ** 2 + u) * dt * out0 + (-2 * u ** 3 + 3 * u ** 2) * v1 + (u ** 3 - u ** 2) * dt * in1;
+  };
+  return Array.from({ length: items }, (_, i) => {
+    const t = items > 1 ? i / (items - 1) : 0.5;
+    return { z: it.z - length / 2 + t * length, y: Math.max(0, value(t)) * height };
+  });
 }
 
 /** Generation filters ("advanced generation"); everything on by default. */
@@ -501,8 +526,11 @@ export function studioCatalog(manifest, themeName, trainTheme = null, gen = null
     modePieces,
     // Pieces with two states (raised / dropped) the studio can show or animate
     statePieces: Object.keys(modePieces).filter((slot) => (slots[slot] ?? []).some((n) => manifest.prefabs[n]?.reveal)),
-    // The game's pickups (coins, power-ups, boxes, tokens), by prefab name
+    // The game's pickups (coins, power-ups, boxes, tokens), by prefab name, and what they can show
     pickups: (manifest.pickups ?? []).filter((n) => manifest.prefabs[n]?.bbox),
+    huntTokens: (manifest.huntTokens ?? []).filter((n) => manifest.prefabs[n]?.bbox),
+    letterPickups: (manifest.pickups ?? []).filter((n) => manifest.prefabs[n]?.letters),
+    coinPatterns: manifest.coinPatterns ?? null,
     modes: gameModes(manifest),
   };
 }
@@ -1017,17 +1045,23 @@ export function generateLayout(
         else place(slot, [it.lane, y, it.z], layer, extra);
         if (base) place(base, [it.lane, y, it.z], layerOf(base), { ...extra, ...(layerOf(base) === 'train' ? { group: `studio${it.lane}@${it.z}` } : {}) });
       } else if (it.type === 'coins') {
-        for (const cz of coinPositions(it)) placePickup('Coin', it.lane, cz, COIN_HEIGHT);
+        for (const cz of coinPositions(it)) placePickup(it.coin ?? 'Coin', it.lane, cz, COIN_HEIGHT);
+      } else if (it.type === 'coinArc') {
+        // (the whole arc rises from its spot's height: a roof's, when it starts on a train)
+        const base = roofAt(it.lane, it.z) + ARC_HEIGHT;
+        for (const c of arcPositions(it, manifest.coinPatterns?.arcs?.[0])) placePickup(it.coin ?? 'Coin', it.lane, c.z, base + c.y, true);
       } else if (it.type === 'pickup') {
-        placePickup(it.key, it.lane, it.z, PICKUP_HEIGHT);
+        placePickup(it.key, it.lane, it.z, PICKUP_HEIGHT, false, { ...(it.letter ? { letter: it.letter } : {}), ...(it.token ? { token: it.token } : {}) });
       }
     }
     placeRng = rng;
   }
 
-  function placePickup(prefab, x, pz, height) {
+  /** `absolute`: height is the pickup's own (an arc's coins), not above the roof under it. */
+  function placePickup(prefab, x, pz, height, absolute = false, extra = {}) {
+    if (!manifest.prefabs[prefab]?.bbox && /Coin$/.test(prefab)) prefab = 'Coin'; // a coin skin this map lacks
     if (!manifest.prefabs[prefab]?.bbox) return;
-    items.push({ prefab, slot: 'pickup', layer: 'pickup', pos: [x, roofAt(x, pz) + height, pz], variantSeed: Math.floor(placeRng() * 2 ** 31) });
+    items.push({ prefab, slot: 'pickup', layer: 'pickup', pos: [x, (absolute ? 0 : roofAt(x, pz)) + height, pz], variantSeed: Math.floor(placeRng() * 2 ** 31), ...extra });
   }
 
   /** Height under a pickup: a parked train's roof (up its ramp), else the ground. */

@@ -171,6 +171,7 @@ function borrowPrefabs(envId, other, names, materialNames = []) {
     if (copy.animators) copy.animators = abs(copy.animators);
     for (const sk of copy.skinned ?? []) sk.mesh = abs(sk.mesh);
     for (const m of copy.morphMeshes ?? []) m.url = abs(m.url);
+    if (copy.letters) copy.letters.meshes = copy.letters.meshes.map(abs);
     for (const a of Object.values(copy.meshAnimations ?? {})) a.frames = a.frames.map(abs);
     for (const p of Object.values(copy.particles ?? {})) {
       p.render.meshGlb = abs(p.render.meshGlb);
@@ -201,8 +202,10 @@ function ensurePickups() {
       .sort((a, b) => (b.gameVersion === envInfo.gameVersion) - (a.gameVersion === envInfo.gameVersion) || version(b).localeCompare(version(a), undefined, { numeric: true }))[0];
     if (!donor) return;
     const other = await fetchManifest(donor.id);
-    borrowPrefabs(donor.id, other, other.pickups ?? []);
+    borrowPrefabs(donor.id, other, [...(other.pickups ?? []), ...(other.huntTokens ?? [])]);
     manifest.pickups = (other.pickups ?? []).filter((n) => manifest.prefabs[n]);
+    manifest.huntTokens = (other.huntTokens ?? []).filter((n) => manifest.prefabs[n]);
+    manifest.coinPatterns = other.coinPatterns ?? null;
   })().catch((e) => console.warn('No pickups to borrow', e));
   return pickupsReady;
 }
@@ -897,6 +900,36 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   return obj;
 }
 
+/**
+ * What a pickup's script picks at runtime, as the studio set it: a hunt letter's mesh
+ * (LetterPickup.UpdateLetterModel: one of 26, A to Z), and the season token's hunt token in
+ * its holder (the map's first, 3.70's bat, unless the season point is asked for).
+ */
+async function customizePickup(obj, prefab, it) {
+  const index = it.letter ? it.letter.toUpperCase().charCodeAt(0) - 65 : -1;
+  const letterNode = prefab.letters && index >= 0 && findNode(obj, prefab.letters.node);
+  if (letterNode && prefab.letters.meshes[index]) {
+    let geometry = null;
+    (await loadGlb(prefab.letters.meshes[index])).traverse((o) => (geometry ??= o.isMesh ? o.geometry : null));
+    const meshes = [];
+    letterNode.traverse((o) => o.isMesh && meshes.push(o));
+    if (geometry && meshes.length) {
+      meshes[0].geometry = geometry;
+      meshes.slice(1).forEach((m) => (m.visible = false)); // (the old letter's unused submesh)
+    }
+  }
+  const token = prefab.tokenSlot && it.token !== 'point' ? it.token ?? manifest.huntTokens?.[0] : null;
+  const holder = token && manifest.prefabs[token] && findNode(obj, prefab.tokenSlot.holder);
+  if (holder) {
+    const model = await instantiate(token, null, 'pickup', it.variantSeed);
+    if (model) {
+      holder.add(model);
+      const point = findNode(obj, prefab.tokenSlot.point);
+      if (point) point.visible = false;
+    }
+  }
+}
+
 /** A mesh particle's glb as one geometry. */
 async function particleMesh(url) {
   let geometry = null;
@@ -1158,6 +1191,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
     items.map(async (it) => {
       try {
         const obj = await instantiate(it.prefab, it.trackType, it.layer, it.variantSeed, it.signalSeed, it.signalColor, it.cut, it.pos[2], it.variants, it.animState);
+        if (obj && it.layer === 'pickup') await customizePickup(obj, manifest.prefabs[it.prefab], it);
         if (obj) {
           obj.position.set(...it.pos);
           if (it.scale) obj.scale.setScalar(it.scale);
@@ -2498,7 +2532,7 @@ if (params.get('z')) {
 }
 setControlMode(state.controls);
 window.__viewer = { time, motions, fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild };
-if (state.obstacleMode === 'studio' && state.studio.some((it) => it.type === 'coins' || it.type === 'pickup')) await ensurePickups();
+if (state.obstacleMode === 'studio' && state.studio.some((it) => ['coins', 'coinArc', 'pickup'].includes(it.type))) await ensurePickups();
 await rebuild();
 
 /**
