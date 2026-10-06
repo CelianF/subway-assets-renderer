@@ -12,6 +12,8 @@ const ZONE_WIDTH = 62; // full-width zones: across the three tracks
 // Full-width zones the map offers (ctx.zoneKinds): an event challenge (Green Jam,
 // Christmas) or the No Floor mode's activated floor (spiked vines, hot lava)
 const FULL_ZONES = ['challenge', 'surge'];
+// A challenge zone's runner: the game's left is +X
+const RUNNER_LANES = [[20, '⬅ Left'], [0, 'Center'], [-20, 'Right ➡']];
 const LANES = [20, 0, -20]; // left, middle, right (glTF X; the game's left is +X)
 const SIGNAL_X = [30, 10, -10, -30]; // outer left edge, between tracks, outer right edge
 const CLIP_HEIGHT = 34;
@@ -175,6 +177,12 @@ export function createStudio(ctx) {
     } else if (FULL_ZONES.includes(it.type)) {
       m = flat(ZONE_WIDTH, it.z1 - it.z0, color ?? COLORS[it.type], opacity ?? 0.16);
       m.position.set(0, 0.6, (it.z0 + it.z1) / 2);
+      if (it.type === 'challenge') {
+        // The lane its runner loops along
+        const lane = flat(4, it.z1 - it.z0, color ?? COLORS[it.type], 0.5);
+        lane.position.set(it.lane ?? 0, 0.1, 0);
+        m.add(lane);
+      }
     } else if (it.type === 'signal') {
       m = flat(5, 5, color ?? COLORS.signal[it.color ?? 'green'], opacity ?? 0.85);
       m.position.set(it.x, 1, it.z);
@@ -437,7 +445,7 @@ export function createStudio(ctx) {
       pending = null;
       span.visible = false;
       // Overlapping zones merge into one
-      let zone = { type: tool.type, z0, z1 };
+      let zone = { type: tool.type, z0, z1, ...(tool.type === 'challenge' ? { lane: tool.lane ?? 0 } : {}) };
       const rest = list.filter((it) => {
         if (it.type !== zone.type || !overlaps(zone.z0, zone.z1, it.z0 - 0.1, it.z1 + 0.1)) return true;
         zone = { ...zone, z0: Math.min(zone.z0, it.z0), z1: Math.max(zone.z1, it.z1) };
@@ -643,7 +651,14 @@ export function createStudio(ctx) {
       rows.push(
         row(
           'Track',
-          ...zoneTools.map(([type, label]) => btn(label, tool.type === type, () => setTool({ type }))),
+          ...zoneTools.map(([type, label]) => btn(label, tool.type === type, () => setTool({ type, lane: trackTool.lane ?? 0 }))),
+          // The lane the zone's runner loops along (the snow's trench, the grass and colors follow it)
+          ...(tool.type === 'challenge'
+            ? [
+                el('span', { class: 'studio-label' }, 'Runner'),
+                ...RUNNER_LANES.map(([x, label]) => btn(label, (tool.lane ?? 0) === x, () => setTool({ ...tool, lane: x }))),
+              ]
+            : []),
           el('span', { class: 'studio-sep' }),
           // Obstacles the auto run has and the studio list may lack (pillars, platforms…)
           ...fixKeys.map((key) =>
@@ -672,7 +687,7 @@ export function createStudio(ctx) {
       edit: 'Click a train, obstacle or light to change it',
       remove: 'Click something to remove it',
       noTracks: 'Click the start then the end of a stretch of track',
-      challenge: 'Click the start then the end of the stretch where the challenge runs',
+      challenge: "Pick the runner's lane, then click the start then the end of the stretch where the challenge loops",
       surge: 'Click the start then the end of the stretch where the floor is activated',
     };
     const hintKey = mode === 'track' ? tool.type : mode;

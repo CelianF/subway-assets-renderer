@@ -37,7 +37,7 @@ export function setBendDegrees(horizontal, vertical = 0) {
 }
 
 const MAX_CUTS = 32;
-export const MAX_ALT_ZONES = 16; // studio challenge zones (setAltZones)
+export const MAX_ALT_ZONES = 16; // studio challenge zones, a runner each (setChallengeRunners)
 
 // Depth bias, in steps towards the camera. three flips the slope factor for the reversed
 // depth buffer but not the constant units, so those are flipped here
@@ -59,12 +59,14 @@ export const globals = {
   uBend: bend,
   uResolution: { value: new THREE.Vector2(1920, 1080) }, // render target size (screen-space masks)
   uAltRatio: { value: 0 }, // _AlternateColorRatio (New York "Play2Plant" variant textures)
-  // Challenge zones (setAltZones): (z0, z1, runner z, looping) where the main textures show,
-  // the alternate ones elsewhere; a looping zone only shows them around its runner, from
-  // uAltReach.x behind it to .y ahead. Count -1: no zones, uAltRatio everywhere
-  uAltZoneCount: { value: -1 },
-  uAltZones: { value: Array.from({ length: MAX_ALT_ZONES }, () => new THREE.Vector4()) },
-  uAltReach: { value: new THREE.Vector2() },
+  // Challenge runners (setChallengeRunners): (x, y, z, size) per studio zone's runner. The
+  // main textures show around them, the alternate ones elsewhere (2.x SYBO/Bend/Combined's
+  // _PlayerPos and _ColorSize); event grass rises near them (MeshNearPlayer's _MeshSize).
+  // Count -1: no runners, uAltRatio everywhere and the grass up
+  uRunnerCount: { value: -1 },
+  uRunners: { value: Array.from({ length: MAX_ALT_ZONES }, () => new THREE.Vector4()) },
+  uColorSize: { value: new THREE.Vector2(40, 60) },
+  uMeshSize: { value: new THREE.Vector2(40, 60) },
   // Studio "no tracks" zones: (track x, z0, z1); rails hide inside, fill ground shows only inside
   uCutCount: { value: 0 },
   uCuts: { value: Array.from({ length: MAX_CUTS }, () => new THREE.Vector3()) },
@@ -72,24 +74,22 @@ export const globals = {
 
 /**
  * Event challenge cities (3.19 New York Play2Plant's Green Jam, St Petersburg's Christmas):
- * the main textures are the challenge look (green city, Christmas decorations), the
- * alternate ones the city without it (grey, plain). Inside the zones the challenge shows;
- * null: no challenge, the main textures everywhere.
+ * the main textures are the challenge look (green city), the alternate ones the city without
+ * it (grey). null: no challenge running, the main textures everywhere; a list: the runners
+ * the look shows around (none: grey all over). `sizes`: ThemeEffectMeshShader's smoothstep
+ * start/end times its grey and mesh multipliers (2.25 Green Jam: 40 to 60, ×1).
  */
-export function setAltZones(zones, reach = null) {
-  if (!zones) {
-    globals.uAltZoneCount.value = -1;
-    globals.uAltRatio.value = 0;
-    return;
+export function setChallengeRunners(count, sizes = null) {
+  globals.uRunnerCount.value = count == null ? -1 : Math.min(count, MAX_ALT_ZONES);
+  if (count == null) globals.uAltRatio.value = 0;
+  if (sizes) {
+    globals.uColorSize.value.set(...sizes.color);
+    globals.uMeshSize.value.set(...sizes.mesh);
   }
-  const list = zones.slice(0, MAX_ALT_ZONES);
-  list.forEach(([z0, z1], i) => globals.uAltZones.value[i].set(z0, z1, z0, reach ? 1 : 0));
-  globals.uAltZoneCount.value = list.length;
-  if (reach) globals.uAltReach.value.set(reach[0], reach[1]);
 }
-/** Where zone `i`'s runner is (looping zones: the look shows around it). */
-export function setAltRunner(i, z) {
-  globals.uAltZones.value[i].z = z;
+/** Runner i at (x, y, z); `size` scales its reach (the effect growing in when it starts). */
+export function setChallengeRunner(i, x, y, z, size = 1) {
+  globals.uRunners.value[i].set(x, y, z, size);
 }
 
 /**
@@ -123,6 +123,20 @@ export function setFog({ color, start, end } = {}, enabled = true, scale = 1) {
 
 // ---------------------------------------------------------------- shaders
 
+// Distance to a challenge runner as 2.x SYBO/Bend/Combined and MeshNearPlayer measure it
+// (from their compiled code): around a point 10 ahead of the runner, sideways counting 1.5×;
+// the ramp is their smoothstep from size.x to size.y (0 near, 1 far)
+const RUNNER_GLSL = /* glsl */ `
+float runnerSphere(vec3 w, vec4 r) {
+  vec3 d = w - vec3(r.x, r.y, r.z + 10.0);
+  return abs(d.x) * 0.5 + length(d);
+}
+float runnerRamp(float dist, vec2 size) {
+  float t = clamp((dist - size.x) / max(size.y - size.x, 1e-4), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+`;
+
 const COMBINED_VERTEX = /* glsl */ `
 uniform vec2 uBend;
 uniform float uTime;
@@ -151,6 +165,15 @@ uniform vec2 uWaterSpeed; // speed x, speed z
 uniform sampler2D uDisplaceTex;
 uniform vec2 uDisplaceScroll;
 uniform float uMeshDisplace;
+#endif
+#ifdef NEAR_PLAYER
+uniform int uRunnerCount;
+uniform vec4 uRunners[${MAX_ALT_ZONES}];
+uniform vec2 uMeshSize;
+${RUNNER_GLSL}
+#endif
+#ifdef SNOW_PLOW
+uniform sampler2D uIndentTex; // the runner's path through this segment (ThemeEffectTextureIndent)
 #endif
 varying vec2 vUv;
 varying float vDepth;
@@ -218,6 +241,26 @@ void main() {
 #endif
 #ifdef LAVA
   p.y += (texture2D(uDisplaceTex, uv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5) * uMeshDisplace;
+#endif
+#ifdef NEAR_PLAYER
+  // 2.x SYBO/Bend/MeshNearPlayer (Green Jam grass): sunk 12 below, rising near a runner, the
+  // nearer of its sphere and a band across the run 10 behind it
+  if (uRunnerCount >= 0) {
+    vec3 wn = (modelMatrix * vec4(p, 1.0)).xyz;
+    float t = 1.0;
+    for (int i = 0; i < ${MAX_ALT_ZONES}; i++) {
+      if (i >= uRunnerCount) break;
+      vec4 r = uRunners[i];
+      float band = abs(wn.y) * 0.9 + abs(r.z - 10.0 - wn.z);
+      t = min(t, runnerRamp(min(band, runnerSphere(wn, r)), uMeshSize * r.w));
+    }
+    p.y -= 12.0 * t;
+  }
+#endif
+#ifdef SNOW_PLOW
+  // 2.x SYBO/Bend/PlayerSnowPlow (St Petersburg's Christmas snow): pushed 8 down where the
+  // runner went, from the mask its effect paints
+  p.y -= texture2D(uIndentTex, uv).r * 8.0;
 #endif
 #ifdef WATER_WAVE
   // Bend/Wave (1.x water): two sine swells across the surface (world space, sizes in units)
@@ -316,9 +359,9 @@ uniform float uTime;
 uniform sampler2D uAltTex;
 uniform sampler2D uAltRef;
 uniform float uAltRatio;
-uniform int uAltZoneCount;
-uniform vec4 uAltZones[${MAX_ALT_ZONES}];
-uniform vec2 uAltReach;
+uniform int uRunnerCount;
+uniform vec4 uRunners[${MAX_ALT_ZONES}];
+uniform vec2 uColorSize;
 uniform sampler2D uMaskTex;
 uniform vec2 uResolution;
 uniform vec4 uUvWobble; // 1.x water: x amplitude, x frequency, y amplitude, y frequency
@@ -358,22 +401,18 @@ varying float vColorA; // RGBA vertex colors: their alpha fades transparent piec
 #endif
 ${FOG_GLSL}
 ${CUT_GLSL}
-// Alternate texture share here: the challenge zones' look fades in over 40 at their edges
-// (and at the edges of the window around a looping zone's runner)
-float altWindow(float z0, float z1) {
-  return smoothstep(z0 - 20.0, z0 + 20.0, vWorld.z) * (1.0 - smoothstep(z1 - 20.0, z1 + 20.0, vWorld.z));
-}
+${RUNNER_GLSL}
+// Alternate texture share here (2.x SYBO/Bend/Combined, ALTERNATE_COLORS_ENABLED): the main
+// texture weighs clamp(_AlternateColorValue - t + 1) with t the runner's smoothstep, 0 while
+// the challenge greys the world: the colors come back around each runner
 float altRatio() {
-  if (uAltZoneCount < 0) return uAltRatio;
-  float inside = 0.0;
+  if (uRunnerCount < 0) return uAltRatio;
+  float near = 0.0;
   for (int i = 0; i < ${MAX_ALT_ZONES}; i++) {
-    if (i >= uAltZoneCount) break;
-    vec4 zone = uAltZones[i];
-    float shown = altWindow(zone.x, zone.y);
-    if (zone.w > 0.5) shown *= altWindow(zone.z - uAltReach.x, zone.z + uAltReach.y);
-    inside = max(inside, shown);
+    if (i >= uRunnerCount) break;
+    near = max(near, 1.0 - runnerRamp(runnerSphere(vWorld, uRunners[i]), uColorSize * uRunners[i].w));
   }
-  return 1.0 - inside;
+  return 1.0 - near;
 }
 
 void main() {
@@ -588,6 +627,8 @@ export function createSky() {
 const textureLoader = new THREE.TextureLoader();
 const textureCache = new Map();
 const WHITE = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+const BLACK = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+BLACK.needsUpdate = true;
 WHITE.needsUpdate = true;
 
 const pendingTextures = new Set();
@@ -783,6 +824,8 @@ export class MaterialLibrary {
     if (maskTex) defines.SCREEN_MASK = '';
     const wave = /(^|\/)(Legacy\/)?VertexWave|^Bend\/Wave \(Vertex Color Control\)/.test(def.shader); // 1.x flags
     if (f._HasGradient) defines.GRADIENT = '';
+    if (/MeshNearPlayer$/.test(def.shader)) defines.NEAR_PLAYER = '';
+    if (/PlayerSnowPlow$|Texture Indentation$/.test(def.shader)) defines.SNOW_PLOW = '';
     if (wave) defines.WAVE = '';
     const wave2x = def.shader === 'SYBO/Bend/VertexWave';
     if (wave2x) defines.WAVE_2X = '';
@@ -815,6 +858,7 @@ export class MaterialLibrary {
         uAltTex: { value: altTex ?? WHITE },
         uAltRef: { value: this.tex(def, '_AlternateRef') ?? refTex ?? WHITE },
         uMaskTex: { value: maskTex ?? WHITE },
+        uIndentTex: { value: BLACK }, // (each snow segment gets its own: ThemeEffectTextureIndent)
         // 2.x: directions mirrored on X like the glb
         uWaveDir: { value: new THREE.Vector3(...(c._WaveDirection ?? [0, 0, 0]).slice(0, 3)).multiply(wave2x ? new THREE.Vector3(-1, 1, 1) : new THREE.Vector3(1, 1, 1)) },
         uWavePlane: { value: new THREE.Vector3(...(c._WavePlaneNormal ?? [0, 0, 0]).slice(0, 3)).multiply(wave2x ? new THREE.Vector3(-1, 1, 1) : new THREE.Vector3(1, 1, 1)) },

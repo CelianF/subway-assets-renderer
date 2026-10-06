@@ -695,6 +695,17 @@ function parseThemeEffect(file, guidIndex) {
     };
     const activated = parseNoFloorStates(doc, guidIndex);
     if (activated) effect.activated = activated;
+    // ThemeEffectMeshShader (Green Jam): how far from the runner the colors and grass reach
+    const field = (k) => doc.match(new RegExp(`${k}: ([-\\d.e]+)`))?.[1];
+    if (field('_smoothStepStart') != null) {
+      effect.nearPlayer = {
+        start: num(field('_smoothStepStart')),
+        end: num(field('_smoothStepEnd')),
+        grey: num(field('_greySmoothMultiplier') ?? '1'),
+        mesh: num(field('_meshSmoothMultiplier') ?? '1'),
+        spawnTime: num(field('_spawnTime') ?? '0'),
+      };
+    }
     return effect;
   }
   // Effects that follow the runner at an offset, while running (ThemeEffectFollowPlayer:

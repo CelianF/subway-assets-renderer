@@ -5,7 +5,7 @@ import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
-import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setAltZones, setAltRunner, MAX_ALT_ZONES, setReversedDepth, texturesReady, zoneClipped, makeZoneUniforms } from './materials.js';
+import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setChallengeRunners, setChallengeRunner, MAX_ALT_ZONES, setReversedDepth, texturesReady, zoneClipped, makeZoneUniforms } from './materials.js';
 import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
@@ -1144,26 +1144,64 @@ async function addThemeEffects(length, id) {
 }
 
 /**
- * Event challenges (3.19 New York Play2Plant's Green Jam, St Petersburg's Christmas): while
- * one runs, the city takes its challenge look around the runner (green instead of grey,
- * Christmas decorations), a trail (grass, snow) leapfrogs under it and the effect's own
- * particles ride along (gifts thrown ahead, poles with garlands and blinking baubles, growing
- * trees, sparkles). Auto runs show the look all along, still; the studio's zones each replay
- * the event in a loop: a runner of their own runs from the zone's start to its end, on the
- * scene clock (the time bar freezes or slows it).
+ * Event challenges (2.25 New York Play2Plant's Green Jam, 2.27 St Petersburg's Christmas), as
+ * their effects work in the game (ThemeEffectMeshShader / ThemeEffectTextureIndent, with the
+ * shaders' compiled code): Green Jam greys the city and brings its colors back around the
+ * runner, its grass rising near it; Christmas lays snow on the track that the runner plows a
+ * trench through. The effect's particles ride along: on the track's axis (FollowGround,
+ * FollowZ: poles, garlands, trees) or in the runner's lane (FollowCharacter, the rest: gifts,
+ * sparkles, butterflies).
+ *
+ * There is no runner in the viewer: each studio zone gets one of its own, in the lane picked
+ * for the zone, running from its start to its end and starting over, on the scene clock (the
+ * time bar freezes, slows or steps it). Auto runs show the look all along, still.
  */
 const CHALLENGE_LABELS = { ThemeEffectGreenJam: '🌱 Green Jam', ThemeEffectChristmas: '🎄 Christmas' };
 const challengeEffect = () => (manifest.themeConfigs?.[state.theme]?.effects ?? []).find((e) => e.segments?.length && e.script in CHALLENGE_LABELS);
+// 2.25 Green Jam's ThemeEffectMeshShader: the colors and grass reach 40 to 60 from the runner
+// and grow in over 2 s when the effect starts
+const NEAR_PLAYER = { start: 40, end: 60, grey: 1, mesh: 1, spawnTime: 2 };
 const challengeGroup = new THREE.Group();
 scene.add(challengeGroup);
 let challengeParts = null; // { theme, segments: [node], fx: node | null }: loaded once per map
-let challengeRuns = []; // per studio zone: { z0, z1, segments: [copy], fx, slot }
-// Riding along: the effect without its trail (leapfrogged apart), the reward drop at
-// milestones and the start's snow
-const CHALLENGE_STILL = /_Segment_\d+$|_Milestone_Drop$|_StaticSnow$/;
-// The look around the runner: from half a segment behind it to a segment and a half ahead,
-// over the two trail segments
-const CHALLENGE_REACH = [0.5, 1.5];
+let challengeRuns = []; // per studio zone: { z0, z1, lane, segments: [{ node, mask }], fx, slot, lap, painted }
+// Not riding along: the trail (tiled over the zones), the reward drop at milestones, the
+// start's snow
+const CHALLENGE_STILL = /_Segment_\d+$|_GrassSegment_\d+$|_Milestone_Drop$|_StaticSnow$/;
+// Riding on the track's axis rather than in the runner's lane
+const CHALLENGE_GROUND = /^(FollowGround|FollowZ|TreeRoot)$/;
+// The runners, seen in the viewer (not in screenshots)
+const runnerMarkers = new THREE.Group();
+scene.add(runnerMarkers);
+const runnerMarkerMat = new THREE.MeshBasicMaterial({ color: 0xffcc33, transparent: true, opacity: 0.8, depthWrite: false });
+
+/**
+ * ThemeEffectTextureIndent's mask (16×16, one per snow segment): the runner's path painted in
+ * as it goes, the snow pushed down there by its shader. The segment's UVs put the lanes at
+ * u 0.25 / 0.5 / 0.75 (u = 0.5 + x / 80) and run v along it.
+ */
+const INDENT_SIZE = 16;
+function makeIndentMask() {
+  const data = new Uint8Array(INDENT_SIZE * INDENT_SIZE * 4);
+  const tex = new THREE.DataTexture(data, INDENT_SIZE, INDENT_SIZE);
+  tex.magFilter = tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return { tex, data };
+}
+function clearIndent(mask) {
+  mask.data.fill(0);
+  mask.tex.needsUpdate = true;
+}
+/** Plows the mask at (x, v): two columns deep, the bilinear filter tapers the trench's sides. */
+function paintIndent(mask, x, v) {
+  const col = Math.floor((0.5 + x / 80) * INDENT_SIZE - 0.5);
+  const row = Math.min(INDENT_SIZE - 1, Math.max(0, Math.floor(v * INDENT_SIZE)));
+  for (const c of [col, col + 1]) {
+    if (c < 0 || c >= INDENT_SIZE) continue;
+    mask.data[(row * INDENT_SIZE + c) * 4] = 255;
+  }
+  mask.tex.needsUpdate = true;
+}
 
 async function loadChallengeParts(effect) {
   const prefab = manifest.prefabs[effect.prefab];
@@ -1182,21 +1220,30 @@ async function loadChallengeParts(effect) {
   return { theme: state.theme, segments, fx };
 }
 
-/** [z0, z1) zones where the challenge shows, or null when the map has none. */
-function challengeZones(length) {
-  if (!challengeEffect() || state.inspect) return null;
-  if (state.obstacleMode !== 'studio') return [[0, length]];
-  return state.studio.filter((it) => it.type === 'challenge').map((it) => [it.z0, it.z1]).sort((a, b) => a[0] - b[0]);
+/** A trail segment for a zone; snow gets its own mask to plow (its material shares the rest). */
+function challengeSegment(template, k) {
+  const copy = template.clone();
+  let mask = null;
+  copy.traverse((o) => {
+    if (!o.isMesh || !o.material.defines || !('SNOW_PLOW' in o.material.defines)) return;
+    mask ??= makeIndentMask();
+    const base = o.material;
+    o.material = base.clone();
+    o.material.uniforms = { ...base.uniforms, uIndentTex: { value: mask.tex } };
+  });
+  return { node: copy, mask, k };
 }
 
-/** Auto runs: the trail tiled all along. Studio: a looping runner per zone (updateChallenge). */
 async function placeChallenge(length, id) {
-  const zones = challengeZones(length);
-  const looping = state.obstacleMode === 'studio';
-  setAltZones(zones, looping ? CHALLENGE_REACH.map((k) => k * (challengeEffect()?.segmentSize ?? 100)) : null);
   challengeGroup.clear(); // (the runs' particles go with their effect)
+  runnerMarkers.clear();
   challengeRuns = [];
-  const effect = zones && challengeEffect();
+  const effect = !state.inspect && challengeEffect();
+  const looping = state.obstacleMode === 'studio';
+  const zones = !effect ? [] : looping ? state.studio.filter((it) => it.type === 'challenge').sort((a, b) => a.z0 - b.z0).slice(0, MAX_ALT_ZONES) : [{ z0: 0, z1: length }];
+  // No runner in auto runs: the look all along
+  const near = { ...NEAR_PLAYER, ...effect?.nearPlayer };
+  setChallengeRunners(effect && looping ? zones.length : null, { color: [near.start * near.grey, near.end * near.grey], mesh: [near.start * near.mesh, near.end * near.mesh] });
   if (!effect) return;
   if (challengeParts?.theme !== state.theme) {
     const parts = await loadChallengeParts(effect);
@@ -1205,52 +1252,61 @@ async function placeChallenge(length, id) {
   }
   const { segments, fx } = challengeParts;
   const size = effect.segmentSize;
-  if (!looping) {
-    if (!segments.length) return;
-    for (const [z0, z1] of zones) {
-      for (let z = z0, k = 0; z < z1; z += size, k++) {
-        const copy = segments[k % segments.length].clone();
-        copy.position.set(0, copy.position.y, z);
-        challengeGroup.add(copy);
+  for (const [slot, zone] of zones.entries()) {
+    // The trail over the whole zone (segments centred on their slots, alternating)
+    const segs = [];
+    if (segments.length) {
+      for (let z = zone.z0, k = 0; z < zone.z1; z += size, k++) {
+        const seg = challengeSegment(segments[k % segments.length], k);
+        seg.node.position.set(0, seg.node.position.y, z + size / 2);
+        challengeGroup.add(seg.node);
+        segs.push(seg);
       }
     }
-    return;
-  }
-  for (const [slot, [z0, z1]] of zones.slice(0, MAX_ALT_ZONES).entries()) {
-    // Two segments at least: one under the runner, the next ahead
-    const trail = [0, 1].map((k) => segments[k % segments.length]?.clone()).filter(Boolean);
-    for (const t of trail) challengeGroup.add(t);
-    let fxCopy = null;
+    if (!looping) continue;
+    const run = { z0: zone.z0, z1: zone.z1, lane: zone.lane ?? 0, segments: segs, fx: null, slot, lap: null, painted: null };
     if (fx) {
-      fxCopy = fx.clone();
-      challengeGroup.add(fxCopy);
+      run.fx = fx.clone();
+      run.fx.traverse((o) => CHALLENGE_GROUND.test(o.name) && (o.position.x -= run.lane));
+      challengeGroup.add(run.fx);
       // (made with particles off too: shown once they're on)
-      await attachRunnerParticles(fxCopy, manifest.prefabs[effect.prefab].particles, { anchored: true });
+      await attachRunnerParticles(run.fx, manifest.prefabs[effect.prefab].particles, { anchored: true });
       if (id !== buildId) return;
     }
-    challengeRuns.push({ z0, z1, trail, fx: fxCopy, slot });
+    run.marker = new THREE.Mesh(new THREE.ConeGeometry(2.5, 7, 12).rotateX(Math.PI), runnerMarkerMat);
+    runnerMarkers.add(run.marker);
+    challengeRuns.push(run);
   }
   updateChallenge(time.now);
   applyThemeLook();
 }
 
-/** Each zone's runner at scene time `now`: the look's window, the trail and the effect follow. */
+/** Each zone's runner at scene time `now`: the colors, grass, snow and particles follow it. */
 function updateChallenge(now) {
   if (!challengeRuns.length) return;
-  const size = challengeEffect()?.segmentSize ?? 100;
+  const effect = challengeEffect();
+  const size = effect?.segmentSize ?? 100;
+  const spawn = { ...NEAR_PLAYER, ...effect?.nearPlayer }.spawnTime;
   for (const run of challengeRuns) {
     const length = Math.max(run.z1 - run.z0, 1);
-    const z = run.z0 + ((((now * RUN_SPEED) % length) + length) % length);
-    setAltRunner(run.slot, z);
-    // Leapfrogged as in the game: the segment under the runner and the next one, the one
-    // left behind jumping ahead
-    const under = Math.floor((z - run.z0) / size);
-    for (let n = under; n < under + run.trail.length; n++) {
-      const seg = run.trail[n % run.trail.length];
-      seg.position.z = run.z0 + n * size;
-      seg.visible = seg.position.z < run.z1;
+    const travelled = Math.max(0, now) * RUN_SPEED;
+    const lap = Math.floor(travelled / length);
+    const z = run.z0 + (travelled - lap * length);
+    // A new lap: fresh snow, the effect growing in again
+    if (lap !== run.lap) {
+      for (const seg of run.segments) if (seg.mask) clearIndent(seg.mask);
+      run.lap = lap;
+      run.painted = run.z0;
     }
-    run.fx?.position.set(0, 0, z);
+    setChallengeRunner(run.slot, run.lane, 0, z, Math.min(1, (z - run.z0) / RUN_SPEED / spawn));
+    // The plow, every few units travelled (ThemeEffectTextureIndent: _distanceForIndent 5)
+    for (let at = run.painted; at <= z; at += 5) {
+      const seg = run.segments[Math.floor((at - run.z0) / size)];
+      if (seg?.mask) paintIndent(seg.mask, run.lane, (at - run.z0 - seg.k * size) / size);
+    }
+    run.painted = Math.max(run.painted, z);
+    run.fx?.position.set(run.lane, 0, z);
+    run.marker.position.set(run.lane, 12, z);
   }
 }
 
@@ -1735,6 +1791,7 @@ function renderScreenshot() {
   shotCam.updateProjectionMatrix();
 
   sky.visible = !screenshot.transparent;
+  runnerMarkers.visible = false;
   const screenRes = globals.uResolution.value.clone();
   globals.uResolution.value.set(width, height);
   renderer.setRenderTarget(target);
@@ -1746,6 +1803,7 @@ function renderScreenshot() {
   renderer.setRenderTarget(null);
   renderer.setClearColor(0x000000, 1);
   sky.visible = true;
+  runnerMarkers.visible = true;
   globals.uResolution.value.copy(screenRes);
   target.dispose();
 
@@ -2043,7 +2101,7 @@ const view = createWorkbar(
           title: 'Particles',
           controls: [
             { type: 'toggle', label: 'Smoke, glows, sparks', obj: state, key: 'particles', onChange: () => (rebuild(), applyThemeLook()) },
-            { type: 'toggle', label: 'Weather & effects along the run', obj: state, key: 'weather', visible: () => !!(followEffectsOf(state.theme).length || themeWeather() || challengeEffect()), onChange: applyThemeLook },
+            { type: 'toggle', label: 'Weather & effects along the run', obj: state, key: 'weather', visible: () => !!(followEffectsOf(state.theme).length || themeWeather()), onChange: applyThemeLook },
           ],
         },
       ],
