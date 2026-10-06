@@ -372,6 +372,36 @@ ${CUT_MAIN}
 }
 `;
 
+// Bend/Panning Texture And Double Alpha (2.x) and SYBO/Bend/Legacy/Texture And Double Alpha
+// (Seattle's fountain jets): a panning color texture, its alpha a panning mask times a
+// static fade along the jet. A panner's
+// "time" picks the component of Unity's _Time (0: t/20, 1: t, 2: 2t, 3: 3t)
+const DOUBLE_ALPHA_FRAGMENT = /* glsl */ `
+uniform sampler2D uMap;
+uniform sampler2D uAlphaTex;
+uniform sampler2D uStaticAlpha;
+uniform vec4 uPan; // main xy, alpha zw (UV per second, Unity's V up)
+uniform float uMultiplier;
+uniform float uTime;
+varying vec2 vUv;
+varying float vDepth;
+${FOG_GLSL}
+${CUT_GLSL}
+
+vec2 pan(vec2 speed) {
+  vec2 u = vec2(vUv.x, 1.0 - vUv.y) + speed * uTime;
+  return vec2(u.x, 1.0 - u.y);
+}
+
+void main() {
+${CUT_MAIN}
+  vec4 c = texture2D(uMap, pan(uPan.xy));
+  c.rgb *= uMultiplier;
+  c.a *= texture2D(uAlphaTex, pan(uPan.zw)).a * texture2D(uStaticAlpha, vUv).a;
+  gl_FragColor = vec4(mix(c.rgb, uFogColor, fogFactor(vDepth)), c.a);
+}
+`;
+
 // SYBO/Bend/Specials/NoFloorLava: noise-distorted scrolling lava, channels remapped to colors
 const LAVA_FRAGMENT = /* glsl */ `
 uniform sampler2D uMap;
@@ -606,6 +636,7 @@ export class MaterialLibrary {
     else if (!def) mat = this.fromFallback(name, fallback);
     else if (def.shader === 'SYBO/Bend/Specials/Fountain') mat = this.fountain(name, def);
     else if (def.shader === 'SYBO/Bend/Specials/NoFloorLava') mat = this.lava(name, def);
+    else if (/Bend\/(Legacy\/|Panning )Texture And Double Alpha$/.test(def.shader)) mat = this.doubleAlpha(name, def);
     else mat = this.combined(name, translateLegacy(def)); // incl. VertexWave, ScreenMask and pre-3.0 Bend/* shaders
     if (cut && mat.defines) {
       mat.defines.TRACK_CUT = cut;
@@ -726,6 +757,33 @@ export class MaterialLibrary {
       },
     });
     this.applyRenderState(mat, name, def);
+    return mat;
+  }
+
+  doubleAlpha(name, def) {
+    const f = def.floats;
+    const c = def.colors;
+    const TIME = [1 / 20, 1, 2, 3];
+    const speed = (k, time) => (c[k] ?? [0, 0]).slice(0, 2).map((v) => v * (TIME[f[time] ?? 0] ?? 1));
+    const mat = new THREE.ShaderMaterial({
+      name,
+      defines: {},
+      clipping: true,
+      vertexShader: COMBINED_VERTEX,
+      fragmentShader: DOUBLE_ALPHA_FRAGMENT,
+      uniforms: {
+        ...globals,
+        uMainST: { value: new THREE.Vector4(1, 1, 0, 0) },
+        uMap: { value: this.tex(def, '_MainTexture') ?? WHITE },
+        uAlphaTex: { value: this.tex(def, '_AlphaTex') ?? WHITE },
+        uStaticAlpha: { value: this.tex(def, '_StaticAlphaTex') ?? WHITE },
+        uPan: { value: new THREE.Vector4(...speed('_MainTexturePannerSpeed', '_MainTexturePannerTime'), ...speed('_AlphaPannerSpeed', '_AlphaPannerTime')) },
+        uMultiplier: { value: f._ColorMultiplier ?? 1 },
+      },
+    });
+    // Alpha blended (2.x's shader has no blend properties)
+    const blend = { _SrcMode: f._SrcMode ?? 5, _DstMode: f._DstMode ?? 10, _ZWrite: 0, _CullMode: f._CullMode ?? 0 };
+    this.applyRenderState(mat, name, { ...def, floats: { ...f, ...blend }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 3000 });
     return mat;
   }
 

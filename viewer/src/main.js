@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
+import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
@@ -195,8 +196,15 @@ function loadGlb(url, { cutaway = null } = {}) {
 function prepareGeometry(root) {
   root.traverse((o) => {
     if (!o.isMesh) return;
-    const geo = o.geometry;
-    if (!geo.attributes.normal) geo.computeVertexNormals();
+    let geo = o.geometry;
+    if (!geo.attributes.normal) {
+      // 3.x meshes ship without normals and with their hard edges welded: smoothing them
+      // all would bend the reflections across flat panels (3.70 Seattle's greenhouse glass
+      // went cloudy). Reflective/rim meshes get creased normals, like Unity's 60° import.
+      const f = manifest.materials[o.material?.name]?.floats;
+      if (f?._HasReflections || f?._HasRim) geo = o.geometry = toCreasedNormals(geo);
+      else geo.computeVertexNormals();
+    }
     const wantsColors = manifest.materials[o.material?.name]?.floats?._HasVertexColors;
     if (wantsColors && !geo.attributes.color) {
       geo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(geo.attributes.position.count * 3).fill(1), 3));
@@ -807,14 +815,17 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   if (prefab.placeholders) await fillPlaceholders(obj, prefab.placeholders, { layer, seed: variantSeed, cutMode, signalSeed, signalColor });
   if (prefab.particles && state.particles) {
     const table = sanitizedTable(Object.entries(prefab.particles));
-    await attachParticles(obj, table, materials, (n) => nodeKey(table, n), async (url) => {
-      let geometry = null;
-      (await loadGlb(url)).traverse((o) => o.isMesh && (geometry ??= o.geometry));
-      return geometry;
-    });
+    await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
   }
   if (signalSeed != null) await applySignalColor(obj, signalSeed, signalColor);
   return obj;
+}
+
+/** A mesh particle's glb as one geometry. */
+async function particleMesh(url) {
+  let geometry = null;
+  (await loadGlb(url)).traverse((o) => o.isMesh && (geometry ??= o.geometry));
+  return geometry;
 }
 
 // RandomizerHold.cs: the road's look follows this sequence, a step every 3000 units
@@ -990,7 +1001,7 @@ const state = {
   glass: 1,
   skyline: true,
   particles: params.get('particles') !== '0', // smoke, steam, glows, sparks
-  weather: params.get('weather') !== '0', // snow along the whole run (themes that snow at the start)
+  weather: params.get('weather') !== '0', // snow or leaves along the whole run (from the start train's)
   skylineOpacity: 1,
   skylineDistance: 1,
   obstacleMode: params.get('obstacleMode') ?? 'random',
@@ -1195,17 +1206,34 @@ function coveredRanges(items) {
 }
 
 /** The theme's largest looping box of snow (2.27 North Pole: around the start train only). */
-function themeSnow() {
+/**
+ * What falls along the whole run: the theme's start-train snow (a big looping box), else
+ * its start-train leaves (Vancouver: a 3-unit sphere above the bag, 1-2 s lives), spread
+ * over a box around the camera like the snow and living long enough to drift into view.
+ */
+function themeWeather() {
   let best = null;
   let volume = 0;
+  let leaves = null;
   for (const p of Object.values(manifest.prefabs)) {
     for (const [name, def] of Object.entries(p.particles ?? {})) {
-      if (!/snow/i.test(name) || !def.loop || def.shape?.type !== 5) continue;
-      const v = def.shape.box.reduce((a, b) => a * b, 1);
-      if (v > volume) [best, volume] = [def, v];
+      if (!def.loop) continue;
+      if (/snow/i.test(name) && def.shape?.type === 5) {
+        const v = def.shape.box.reduce((a, b) => a * b, 1);
+        if (v > volume) [best, volume] = [def, v];
+      } else if (/lea(f|ves)|petal|blossom/i.test(name)) leaves ??= def;
     }
   }
-  return best;
+  if (best || !leaves) return best;
+  return {
+    ...leaves,
+    // Leaves barely sink: the box sits around the camera's height, not above it like snow's
+    shape: { type: 5, box: [140, 60, 180], position: [0, -30, 0], rotation: [0, 0, 0] },
+    rate: { mode: 0, min: 50, max: 50 },
+    lifetime: { mode: 3, min: 3, max: 5 },
+    delay: { mode: 0, min: 0, max: 0 },
+    max: 250,
+  };
 }
 let weatherTheme = null;
 
@@ -1213,7 +1241,7 @@ function applyThemeLook() {
   const cfg = manifest.themeConfigs?.[state.theme] ?? {};
   if (weatherTheme !== state.theme) {
     weatherTheme = state.theme;
-    setWeather(scene, themeSnow(), materials);
+    setWeather(scene, themeWeather(), materials, particleMesh);
   }
   setWeatherVisible(state.particles && state.weather && !state.inspect && !studio?.active);
   // No fog/skyline while inspecting: the camera frames pieces from far away
@@ -1697,7 +1725,7 @@ const rendering = createWorkbar(
           title: 'Particles',
           controls: [
             { type: 'toggle', label: 'Smoke, glows, sparks', obj: state, key: 'particles', onChange: () => (rebuild(), applyThemeLook()) },
-            { type: 'toggle', label: 'Snow along the run', obj: state, key: 'weather', visible: () => !!themeSnow(), onChange: applyThemeLook },
+            { type: 'toggle', label: 'Snow or leaves along the run', obj: state, key: 'weather', visible: () => !!themeWeather(), onChange: applyThemeLook },
           ],
         },
       ],

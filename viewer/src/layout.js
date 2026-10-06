@@ -696,7 +696,9 @@ export function generateLayout(
       if (slot === 'boundary_epic_start' && items.length > before) {
         // Showcase: the landmark's random groups set to one variant each time
         if (variants) items[before].variants = variants;
-        whole = (manifest.prefabs[items[before].prefab]?.bbox?.[1][2] ?? 0) > 2.5 * (z - z0);
+        // (by its main mesh: a prop parked further along doesn't make it whole)
+        const start = manifest.prefabs[items[before].prefab];
+        whole = (start?.mainDepth ?? start?.bbox?.[1][2] ?? 0) > 2.5 * (z - z0);
       } else if (whole) items.splice(before);
     }
   }

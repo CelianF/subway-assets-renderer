@@ -316,7 +316,10 @@ function particleLook(materials, name, renderMode = 0) {
   const atlas = /_environment[^/]*$/i.test(def?.textures?._MainTex?.url ?? '');
   const vertexColors = shader !== 'SYBO/Bend/Combined' || renderMode !== 4 || !atlas || !!f._HasVertexColors || !!def?.keywords?.includes('VERTEX_COLORS_ENABLED');
   // Pre-3.0 particle shaders (Bend/Particle_AlphaBlend) name their texture _Texture
-  const map = def ? materials.tex(def, '_MainTex') ?? materials.tex(def, '_Texture') : null;
+  let map = def ? materials.tex(def, '_MainTex') ?? materials.tex(def, '_Texture') : null;
+  // A mesh particle whose material has no texture is plain (Unity's "white" default), not
+  // the soft dot: Vancouver's train start leaves came out black around a colored middle
+  if (!map && def && renderMode === 4) map = WHITE;
   return { map, src, dst, fadeMode, tint, vertexColors };
 }
 
@@ -378,7 +381,7 @@ class Emitter {
     this.ids = new Int32Array(this.max); // stable particle ids, for birth sub-emitters
     this.index = new Map(); // id -> slot
     this.nextId = 1;
-    this.subs = []; // { emitter, type: 0 birth | 2 death, probability }
+    this.subs = []; // { emitter, type: 0 birth | 2 death, probability, inheritColor }
     this.sources = null; // as a sub-emitter: where its parent's particles start it
     this.spawnOffset = null; // weather: emission follows the camera
     this.count = 0;
@@ -450,7 +453,7 @@ class Emitter {
     this.gravityLocal = null;
   }
 
-  spawn(offset = null) {
+  spawn(offset = null, tint = null) {
     if (this.count >= this.max) return;
     const i = this.count++;
     const id = this.nextId++;
@@ -479,15 +482,16 @@ class Emitter {
     this.rot[i] = -sample(d.rotation, t);
     this.spin[i] = d.rotationOverLife ? -sample(d.rotationOverLife, 0) : 0;
     const col = sampleColor(d.color, t, Math.random(), new THREE.Vector4());
+    if (tint) col.multiply(tint);
     this.color0.set([col.x, col.y, col.z, col.w], i * 4);
     this.rand.set([Math.random(), Math.random()], i * 2);
     randomUnit(dir);
     this.axis.set([dir.x, dir.y, dir.z], i * 3);
-    for (const sub of this.subs) if (sub.type === 0 && Math.random() < sub.probability) sub.emitter.start(this, id, i);
+    for (const sub of this.subs) if (sub.type === 0 && Math.random() < sub.probability) sub.emitter.start(this, id, i, sub.inheritColor);
   }
 
   /** As a sub-emitter: one run of this system, at (and following, for births) a parent particle. */
-  start(parent, id, i) {
+  start(parent, id, i, inheritColor = false) {
     if (!parent.toSub) parent.toSub = new Map();
     if (!parent.toSub.has(this)) {
       // Parent particle space -> this emitter's space (pieces never move)
@@ -496,7 +500,8 @@ class Emitter {
       parent.toSub.set(this, new THREE.Matrix4().copy(this.node.matrixWorld).invert().multiply(parent.node.matrixWorld));
     }
     const pos = new THREE.Vector3().fromArray(parent.local.pos, i * 3).applyMatrix4(parent.toSub.get(this));
-    this.sources.push({ parent, follow: id, pos, time: 0, acc: 0, bursts: new Set() });
+    const tint = inheritColor ? new THREE.Vector4().fromArray(parent.color0, i * 4) : null;
+    this.sources.push({ parent, follow: id, pos, tint, time: 0, acc: 0, bursts: new Set() });
   }
 
   /** Emission for each run its parent started: rate and bursts over the system's duration. */
@@ -512,13 +517,13 @@ class Emitter {
       if (s.time > d.duration && !(d.loop && s.follow != null)) return false;
       const t = Math.min(s.time / Math.max(d.duration, 1e-3), 1);
       s.acc += sample(d.rate, t) * dt;
-      for (; s.acc >= 1; s.acc -= 1) this.spawn(s.pos);
+      for (; s.acc >= 1; s.acc -= 1) this.spawn(s.pos, s.tint);
       d.bursts.forEach((b, k) => {
         for (let n = 0; n < (b.cycles || 1); n++) {
           if (s.time >= b.time + n * b.interval && !s.bursts.has(`${k}:${n}`)) {
             s.bursts.add(`${k}:${n}`);
             const count = Math.round(sample(b.count, 0));
-            for (let m = 0; m < count; m++) this.spawn(s.pos);
+            for (let m = 0; m < count; m++) this.spawn(s.pos, s.tint);
           }
         }
       });
@@ -593,7 +598,7 @@ class Emitter {
     for (let i = this.count - 1; i >= 0; i--) {
       this.age[i] += dt;
       if (this.age[i] >= this.life[i]) {
-        for (const sub of this.subs) if (sub.type === 2 && Math.random() < sub.probability) sub.emitter.start(this, null, i);
+        for (const sub of this.subs) if (sub.type === 2 && Math.random() < sub.probability) sub.emitter.start(this, null, i, sub.inheritColor);
         this.kill(i);
         continue;
       }
@@ -750,7 +755,11 @@ export async function attachParticles(root, particles, materials, nodeKey, meshG
   const nodes = [];
   root.traverse((o) => {
     const key = nodeKey(o.name);
-    if (key) nodes.push([o, particles[key]]);
+    if (!key) return;
+    // A system inside a same-named holder: the holder doesn't get a copy
+    let nested = 0;
+    for (let p = o.parent; p; p = p.parent) if (nodeKey(p.name) === key) nested++;
+    if (nested === (particles[key].nested ?? 0)) nodes.push([o, particles[key]]);
   });
   const made = [];
   for (const [node, def] of nodes) {
@@ -776,7 +785,7 @@ export async function attachParticles(root, particles, materials, nodeKey, meshG
       const sub = named.find((s) => within(s.node, e.node)) ?? named[0];
       if (!sub) continue;
       sub.sources ??= [];
-      e.subs.push({ emitter: sub, type: link.type, probability: link.probability });
+      e.subs.push({ emitter: sub, type: link.type, probability: link.probability, inheritColor: !!link.inheritColor });
     }
   }
 }
@@ -788,16 +797,27 @@ let weather = null;
  * Pole); this emitter uses that snow and lays its flakes around the camera instead, in
  * world space, so they fall in place as the camera moves.
  */
-export function setWeather(scene, def, materials) {
+export async function setWeather(scene, def, materials, meshGeometry) {
+  const token = ++weatherToken;
   if (weather) {
     weather.root.removeFromParent();
+    emitters.delete(weather);
     weather = null;
   }
   if (!def) return;
+  // Mesh particles (Vancouver's leaves): every mesh the system picks from
+  let geometry = null;
+  if (def.render.mode === 4) {
+    const urls = def.render.variants?.length > 1 ? def.render.variants.map((v) => v.meshGlb) : [def.render.meshGlb];
+    const all = await Promise.all(urls.map((url) => (url ? meshGeometry(url) : null)));
+    if (token !== weatherToken || !all.every(Boolean)) return;
+    geometry = all.length > 1 ? all : all[0];
+  }
   const group = new THREE.Group();
   group.name = 'weather';
+  group.visible = weatherVisible;
   scene.add(group);
-  weather = new Emitter(group, group, { ...def, local: true, prewarm: false }, materials, null);
+  weather = new Emitter(group, group, { ...def, local: true, prewarm: false }, materials, geometry);
   weather.spawnOffset = new THREE.Vector3();
   weather.weather = true;
   weather.covered = (z) => weatherCover.some(([a, b]) => z >= a && z < b);
@@ -811,7 +831,11 @@ export function setWeatherCover(ranges) {
 }
 let weatherCover = [];
 
+let weatherToken = 0;
+let weatherVisible = true;
+
 export function setWeatherVisible(visible) {
+  weatherVisible = visible;
   if (weather) weather.root.visible = visible;
 }
 
@@ -825,7 +849,7 @@ export function updateParticles(dt, camera) {
       // Just ahead of and above the camera, where the flakes are seen
       const ahead = camera.getWorldDirection(at).setY(0).normalize().multiplyScalar(60);
       e.spawnOffset.copy(cam).add(ahead).add(new THREE.Vector3(0, 30, 0));
-      e.object.visible = e.root.visible;
+      for (const part of e.parts ?? [e]) part.object.visible = e.root.visible;
       if (e.root.visible) {
         e.step(dt);
         e.upload();

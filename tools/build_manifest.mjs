@@ -2118,6 +2118,20 @@ function parseParticles(file, guidIndex) {
   for (const { doc, kind } of docs) if (kind === '199') renderers.set(goOf(doc), parseUnityYaml(doc));
   const systemGo = new Map(); // ParticleSystem fileID -> GameObject (for sub-emitter links)
   for (const { doc, kind, fid } of docs) if (kind === '198') systemGo.set(fid, goOf(doc));
+  // GameObject -> parent GameObject, to tell apart a system from a same-named node around it
+  const transformGo = new Map();
+  const fatherOf = new Map();
+  for (const { doc, kind, fid } of docs) if (kind === '4' || kind === '224') transformGo.set(fid, goOf(doc));
+  for (const { doc, kind } of docs) {
+    if (kind !== '4' && kind !== '224') continue;
+    const father = doc.match(/m_Father: \{fileID: (\d+)/)?.[1];
+    if (father && father !== '0') fatherOf.set(goOf(doc), transformGo.get(father));
+  }
+  const sameNamedAbove = (go) => {
+    let n = 0;
+    for (let p = fatherOf.get(go); p; p = fatherOf.get(p)) if (names.get(p) === names.get(go)) n++;
+    return n;
+  };
   const out = {};
   for (const { doc, kind } of docs) {
     if (kind !== '198') continue;
@@ -2203,13 +2217,18 @@ function parseParticles(file, guidIndex) {
       },
     };
     // Sub-emitters (fireworks): systems started by this one's particles, at their birth
-    // (type 0, following them) or death (type 2). Named after their nodes.
+    // (type 0, following them) or death (type 2). Named after their nodes. `properties`
+    // bit 1 = InheritColor (Mumbai Holi's powder bursts take their splash's color).
     // (fileIDs read as text: 18 digits don't survive as numbers)
     const subBlock = mod('SubModule') ? doc.split('\n  SubModule:')[1]?.split(/\n  \w/)[0] ?? '' : '';
-    const subs = [...subBlock.matchAll(/emitter: \{fileID: (\d+)\}\n\s+type: (\d+)(?:\n\s+properties: \d+)?(?:\n\s+emitProbability: ([\d.]+))?/g)]
-      .map(([, fid, type, prob]) => ({ node: names.get(systemGo.get(fid)), type: Number(type), probability: prob != null ? Number(prob) : 1 }))
+    const subs = [...subBlock.matchAll(/emitter: \{fileID: (\d+)\}\n\s+type: (\d+)(?:\n\s+properties: (\d+))?(?:\n\s+emitProbability: ([\d.]+))?/g)]
+      .map(([, fid, type, props, prob]) => ({ node: names.get(systemGo.get(fid)), type: Number(type), probability: prob != null ? Number(prob) : 1, ...(Number(props) & 1 ? { inheritColor: true } : {}) }))
       .filter((e) => e.node && (e.type === 0 || e.type === 2));
     if (subs.length) out[names.get(go)].subEmitters = subs;
+    // Mumbai Holi's "Powder_splashes" system sits inside a "Powder_splashes" holder: only
+    // the node with as many same-named ancestors gets it (the holder isn't rotated upright)
+    const nested = sameNamedAbove(go);
+    if (nested) out[names.get(go)].nested = nested;
   }
   return out;
 }
@@ -2274,6 +2293,7 @@ function glbStats(file) {
   const accessors = gltf.accessors ?? [];
   const lo = [Infinity, Infinity, Infinity];
   const hi = [-Infinity, -Infinity, -Infinity];
+  const main = { footprint: -1, z: 0 }; // the mesh covering the most ground
 
   const visit = (i, parentXf) => {
     const node = nodes[i];
@@ -2285,16 +2305,24 @@ function glbStats(file) {
       return parentXf([0, 1, 2].map((k) => q[k] + t[k]));
     };
     if ('mesh' in node) {
+      const nlo = [Infinity, Infinity, Infinity];
+      const nhi = [-Infinity, -Infinity, -Infinity];
       for (const prim of meshes[node.mesh].primitives) {
         const acc = accessors[prim.attributes.POSITION];
         for (let corner = 0; corner < 8; corner++) {
           const p = xf([0, 1, 2].map((k) => ((corner >> k) & 1 ? acc.max : acc.min)[k]));
           for (let k = 0; k < 3; k++) {
-            lo[k] = Math.min(lo[k], p[k]);
-            hi[k] = Math.max(hi[k], p[k]);
+            nlo[k] = Math.min(nlo[k], p[k]);
+            nhi[k] = Math.max(nhi[k], p[k]);
           }
         }
       }
+      for (let k = 0; k < 3; k++) {
+        lo[k] = Math.min(lo[k], nlo[k]);
+        hi[k] = Math.max(hi[k], nhi[k]);
+      }
+      const footprint = (nhi[0] - nlo[0]) * (nhi[2] - nlo[2]);
+      if (footprint > main.footprint) Object.assign(main, { footprint, z: nhi[2] });
     }
     for (const c of node.children ?? []) visit(c, xf);
   };
@@ -2305,6 +2333,9 @@ function glbStats(file) {
     meshes: meshes.length,
     materials: sortedStrings(new Set((gltf.materials ?? []).map((m) => m.name ?? ''))),
     bbox: hasGeo ? [lo.map((v) => round(v, 3)), hi.map((v) => round(v, 3))] : null,
+    // Where the main mesh ends, when props reach further: 3.70 Vancouver's epic_start is
+    // 368 deep but parks a car at 1049, which made it look like a whole 3-slot landmark
+    ...(hasGeo && hi[2] - main.z > 1 ? { mainDepth: round(main.z, 3) } : {}),
   };
 }
 
