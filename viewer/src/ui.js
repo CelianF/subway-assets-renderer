@@ -35,6 +35,7 @@ export const prettyTheme = (t) => t.replace(/^\d+\.\d+_/, '').replace(/([a-z])([
  * @param actions { getState, env, inspect(names), exitInspect, screenshot() -> {blob, name, width, height},
  *                   thumbnail() -> dataURL, saveThumbnail(dataURL), openGeneration, openView, openStudio,
  *                   timeButton: toolbar button of the time deck (time.js),
+ *                   camerasButton: toolbar button of the saved camera spots (cameras.js),
  *                   shotOptions: settings.js controls }
  */
 export function createUI(manifest, actions) {
@@ -194,6 +195,7 @@ export function createUI(manifest, actions) {
           ['F', 'Freeze / play'],
           ['. (Shift)', 'Next frame (10 frames)'],
           ['[ / ]', 'Slower / faster'],
+          ['5 / C', 'Cameras: save spots, jump back'],
           ['Tab', 'Hide / show the interface'],
           ['P', 'Screenshot'],
           ...(DEBUG ? [['B', 'Piece browser']] : []),
@@ -247,6 +249,7 @@ export function createUI(manifest, actions) {
       el('button', { title: 'Camera, fog, skyline, glass and bend (2)', onclick: () => actions.openView() }, '🎨 View'),
       el('button', { title: 'Place trains and obstacles yourself (3)', onclick: () => actions.openStudio() }, '✏️ Studio'),
       actions.timeButton ?? null,
+      actions.camerasButton ?? null,
       // Piece browser: a debug tool, only with ?debug=true
       DEBUG ? el('button', { title: 'Piece browser (B)', onclick: () => toggleBrowser() }, '🧱 Pieces') : null,
     ),

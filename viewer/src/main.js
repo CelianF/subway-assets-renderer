@@ -11,6 +11,7 @@ import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
 import { createTime, createTimeDeck } from './time.js';
+import { createCameraDeck } from './cameras.js';
 import { addCredit } from './credit.js';
 import { attachParticles, updateParticles, setWeather, setWeatherVisible, setWeatherCover } from './particles.js';
 
@@ -2292,6 +2293,7 @@ async function studioFootprints() {
 async function enterStudio() {
   generation.close();
   view.close();
+  cameraDeck.close();
   timeDeck.place();
   if (state.obstacleMode !== 'studio') {
     // Start from the run on screen when nothing was placed yet
@@ -2335,13 +2337,29 @@ function exitStudio() {
 }
 
 // The toolbar's work modes: one open at a time (Time also stacks on the studio's palette)
-const openGeneration = () => (view.close(), timeDeck.close(), generation.toggle());
-const openView = () => (generation.close(), timeDeck.close(), view.toggle());
+const openGeneration = () => (view.close(), timeDeck.close(), cameraDeck.close(), generation.toggle());
+const openView = () => (generation.close(), timeDeck.close(), cameraDeck.close(), view.toggle());
 const openStudio = () => (studio.active ? exitStudio() : enterStudio());
 const time = createTime();
 const timeDeck = createTimeDeck(document.getElementById('ui'), time, {
   host: () => (studio.active ? studio.palette : null),
-  onOpen: () => (generation.close(), view.close()),
+  onOpen: () => (generation.close(), view.close(), cameraDeck.close()),
+});
+
+// Saved camera spots (cameras.js): the fly camera's place, heading and field of view
+const cameraDeck = createCameraDeck(document.getElementById('ui'), {
+  key: `cameras:${ENV_ID}`,
+  get: () => ({ pos: camera.position.toArray(), quat: camera.quaternion.toArray(), fov: camera.fov }),
+  go: (spot) => {
+    if (studio.active) exitStudio(); // the studio has its own top camera
+    camera.position.fromArray(spot.pos);
+    camera.quaternion.fromArray(spot.quat);
+    fly.velocity.set(0, 0, 0);
+    setFov(spot.fov ?? state.fov);
+    setControlMode(state.controls); // orbit re-centers in front of the new view
+  },
+  onOpen: () => (generation.close(), view.close(), timeDeck.close(), studio.active && exitStudio()),
+  toast: (msg) => ui.toast(msg),
 });
 
 const ui = createUI(manifest, {
@@ -2360,8 +2378,9 @@ const ui = createUI(manifest, {
   openView,
   openStudio,
   timeButton: timeDeck.button,
+  camerasButton: cameraDeck.button,
   // The header's Back button while a bar or the studio is open
-  closePanels: () => (generation.close(), view.close(), timeDeck.close(), studio.active && exitStudio()),
+  closePanels: () => (generation.close(), view.close(), timeDeck.close(), cameraDeck.close(), studio.active && exitStudio()),
   shotOptions,
   thumbnail: themeThumbnail,
   saveThumbnail: async (dataUrl) => {

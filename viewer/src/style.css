@@ -697,3 +697,24 @@ body.studio #view {
 .toolbar button.time-on {
   color: var(--accent);
 }
+
+/* ---------------------------------------------------------------- cameras bar (cameras.js) */
+
+.cameras-count {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.cameras-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cameras-spot > button:first-of-type {
+  min-width: 56px;
+  font-variant-numeric: tabular-nums;
+}
+.cameras-spot .caret {
+  padding: 5px 8px;
+  color: var(--muted);
+}
