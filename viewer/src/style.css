@@ -544,34 +544,6 @@ body.studio #view {
   padding-top: 8px;
   border-top: 1px solid var(--panel-border);
 }
-/* The main bar's tools button and its menu (modes, then run-wide actions) */
-.studio-tools {
-  position: relative;
-}
-.studio-menu {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 10px);
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 190px;
-  padding: 8px;
-  background: #1b2029;
-  border: 1px solid var(--panel-border);
-  border-radius: var(--radius);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-}
-.studio-menu button {
-  text-align: left;
-}
-.studio-menu hr {
-  width: 100%;
-  margin: 4px 0;
-  border: 0;
-  border-top: 1px solid var(--panel-border);
-}
 .studio-sep {
   flex: 1;
 }
@@ -619,6 +591,20 @@ body.studio #view {
 .studio-info {
   color: var(--muted);
   margin-left: 8px;
+}
+/* The main bar's status text gives way so the bar stays on one line */
+.studio-modes {
+  flex-wrap: nowrap;
+}
+.studio-modes > .studio-info {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.studio-modes > button,
+.studio-modes > select {
+  flex: none;
 }
 .studio-hint {
   flex: 1;

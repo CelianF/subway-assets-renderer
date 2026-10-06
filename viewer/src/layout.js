@@ -15,6 +15,7 @@ const TRACK_TYPE_NAMES = {
   TrackShadowStartEnd: /_shadow_start_end$/,
 };
 const LANES = [-20, 0, 20]; // WorldConstants.CellWidth = 20
+const TRAIN_ROOF = 28; // trains' roofs (3.70 static trains: 28.4–28.8 high; the No Floor barriers stand at 28)
 
 export function mulberry32(seed) {
   let a = seed >>> 0;
@@ -397,13 +398,27 @@ const STUDIO_WALLS = { pillar: true, platform: true };
  * { x0, x1, z0, z1, wide } (wide: spans the tracks, so it sits on the middle one).
  * A vanishing piece shows the size of the piece under it.
  */
+/** The prefab a studio tool's footprint is measured on: its slot's first piece with a model. */
+const sizePrefab = (manifest, slots, key) => {
+  const slot = OBSTACLE_SLOTS[key] ?? key;
+  return (slots[VANISH_BASE[slot] ?? slot] ?? []).find((n) => manifest.prefabs[n]?.bbox) ?? null;
+};
+
+/** Prefabs whose footprints the studio's tools use (the viewer measures them: studioFootprints). */
+export function studioSizePrefabs(manifest, themeName, trainTheme = null, gen = null) {
+  const cat = studioCatalog(manifest, themeName, trainTheme, gen);
+  const slots = themeSlots(manifest, themeName, trainTheme, gen);
+  return [...new Set([...Object.keys(OBSTACLE_SLOTS), ...Object.keys(cat.modePieces)].map((key) => sizePrefab(manifest, slots, key)).filter(Boolean))];
+}
+
 function pieceSizes(manifest, slots, keys) {
   const out = {};
   for (const key of keys) {
-    const slot = OBSTACLE_SLOTS[key] ?? key;
-    const bb = (slots[VANISH_BASE[slot] ?? slot] ?? []).map((n) => manifest.prefabs[n]?.bbox).find(Boolean);
-    if (!bb) continue;
-    const [[x0, , z0], [x1, , z1]] = bb;
+    const prefab = manifest.prefabs[sizePrefab(manifest, slots, key)];
+    if (!prefab) continue;
+    // The piece itself, without its drop shadow (prefab.footprint, measured by the viewer),
+    // else its whole bounding box
+    const [[x0, , z0], [x1, , z1]] = prefab.footprint ?? prefab.bbox;
     // (ghost trails and glows can reach far: a piece is never longer than a 5-car train)
     out[key] = { x0, x1, z0: Math.max(z0, -40), z1: Math.min(z1, 400), wide: x1 - x0 > 45 };
   }
@@ -1009,6 +1024,8 @@ export function generateLayout(
       }
       if (pl.mirror && !mirrored.has(pl.mirror)) mirrored.set(pl.mirror, rng() < pl.mirrorProbability);
     }
+    // Where each kept placement goes (one option per random group, mirrored subtrees flipped)
+    const kept = [];
     for (const pl of chunk.placements) {
       if (pl.group && choice.get(pl.group) !== pl.option) continue;
       if (pl.slot.startsWith('special_gate')) continue; // gate walls need a gate section around them
@@ -1016,6 +1033,18 @@ export function generateLayout(
       // (never pushed off the tracks: the race's Ramps1 has a ramp under a mirror node one
       // lane over; pieces modeled beside the tracks, like bushes, still swap sides)
       if (pl.mirror && mirrored.get(pl.mirror) && Math.abs(2 * pl.mirrorX - x) <= Math.max(20.5, Math.abs(x))) x = 2 * pl.mirrorX - x;
+      kept.push({ pl, x, y, pz });
+    }
+    // No Floor: the runner is on the train roofs, so a barrier the chunk leaves on the floor
+    // where a parked train stands goes up on its roof (3.70 NF_Chunk_Tunnel_Finisher_*: roll
+    // barriers at the start of 5-car trains), where the mode's own barriers stand
+    if (gen.mode === 'noFloor') {
+      const parked = kept.filter((k) => /^train_static_\d$/.test(k.pl.slot)).map((k) => ({ x: k.x, z0: k.pz - 10, z1: k.pz + trainLength(Number(k.pl.slot.slice(-1))) }));
+      for (const k of kept) {
+        if (layerOf(k.pl.slot) === 'obstacle' && k.y < 1 && parked.some((t) => t.x === k.x && k.pz >= t.z0 && k.pz < t.z1)) k.y = TRAIN_ROOF;
+      }
+    }
+    for (const { pl, x, y, pz } of kept) {
       const key = `${pl.slot}@${x},${pz + cz}`;
       if (seen.has(key)) continue; // a chase entity and its themed child share a spot
       if (nearStation(x, pz + cz, pz + cz + (layerOf(pl.slot) === 'train' ? 300 : 30))) continue;

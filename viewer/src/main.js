@@ -5,8 +5,8 @@ import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
-import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setAltZones, setReversedDepth, texturesReady } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems } from './layout.js';
+import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setAltZones, setReversedDepth, texturesReady, zoneClipped, makeZoneUniforms } from './materials.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
@@ -1197,6 +1197,8 @@ const surgeEffect = () => (state.gen.mode === 'noFloor' ? floorEffect() : null);
 const surgeLabel = (effect) => (effect.activated.mesh ? '🌿 Vine spikes' : '🔥 Hot lava');
 const floorGroup = new THREE.Group();
 let floorTemplate = null; // { theme, normal, active, table }: one segment in each state
+// Where the activated state shows: each state's materials are cut exactly at the zones' ends
+const floorZones = makeZoneUniforms();
 
 async function loadFloorTemplate(effect) {
   const prefab = manifest.prefabs[effect.prefab];
@@ -1212,6 +1214,7 @@ async function loadFloorTemplate(effect) {
     copy.traverse((o) => o.isMesh && applyMaterial(o, materials.get(o.material.name, o.material)));
     return copy;
   };
+  const clip = (node, side) => node.traverse((o) => o.isMesh && o.material.uniforms && (o.material = zoneClipped(o.material, side, floorZones)));
   const normal = strip(/_Active$|^Collider$/);
   const active = strip(/_Default$|^Collider$/);
   const { mesh, meshGlb, colors, meshDisplace } = effect.activated;
@@ -1220,13 +1223,17 @@ async function loadFloorTemplate(effect) {
     if (!o.isMesh || o.userData.particles) return;
     if (geometry && (o === active || o.parent === active)) o.geometry = geometry;
     if (colors || meshDisplace != null) {
-      // Its own material: the activated colors and ripple
-      o.material = o.material.clone();
+      // Its own material: the activated colors and ripple (the rest still shared: time, fog)
+      const base = o.material;
+      o.material = base.clone();
+      if (base.uniforms) o.material.uniforms = { ...base.uniforms };
       const u = o.material.uniforms;
       if (u && colors) for (const k of ['R', 'G', 'B']) if (u[`uColor${k}`] && colors[k]) u[`uColor${k}`] = { value: new THREE.Vector3(...colors[k].slice(0, 3)) };
       if (u?.uMeshDisplace && meshDisplace != null) u.uMeshDisplace = { value: meshDisplace };
     }
   });
+  clip(normal, 'outside');
+  clip(active, 'inside');
   const table = prefab.particles ? sanitizedTable(Object.entries(prefab.particles)) : null;
   return { theme: state.theme, normal, active, table };
 }
@@ -1242,14 +1249,24 @@ async function placeFloor(length, id) {
     floorTemplate = template;
   }
   if (!floorTemplate) return;
-  const zones = surgeEffect() && state.obstacleMode === 'studio' ? state.studio.filter((it) => it.type === 'surge') : [];
+  const zones = surgeEffect() && state.obstacleMode === 'studio' ? state.studio.filter((it) => it.type === 'surge').slice(0, floorZones.list.value.length) : [];
+  zones.forEach((zone, i) => floorZones.list.value[i].set(zone.z0, zone.z1));
+  floorZones.count.value = zones.length;
   const { normal, active, table } = floorTemplate;
-  for (let z = -effect.segmentSize; z < length + effect.segmentSize; z += effect.segmentSize) {
-    const mid = z + effect.segmentSize / 2;
-    const copy = (zones.some((zone) => mid >= zone.z0 && mid < zone.z1) ? active : normal).clone();
-    copy.position.set(0, normal.position.y, z);
-    floorGroup.add(copy);
-    if (table && state.particles) await attachParticles(copy, table, materials, (n) => nodeKey(table, n), particleMesh);
+  const size = effect.segmentSize;
+  // (a segment's model reaches past its slot: both states where a zone comes near)
+  const near = (z) => zones.some((zone) => zone.z0 < z + 2 * size && zone.z1 > z - size);
+  const inside = (z) => zones.some((zone) => zone.z0 <= z && zone.z1 >= z + size);
+  for (let z = -size; z < length + size; z += size) {
+    for (const [template, shown] of [[normal, !inside(z)], [active, near(z)]]) {
+      if (!shown) continue;
+      const copy = template.clone();
+      copy.position.set(0, normal.position.y, z);
+      floorGroup.add(copy);
+      // Bubbles and cinders: the default ones off the zones, the active ones in them
+      const ownParticles = template === normal ? !zones.some((zone) => zone.z0 < z + size && zone.z1 > z) : zones.some((zone) => zone.z0 <= z + size / 2 && zone.z1 > z + size / 2);
+      if (table && state.particles && ownParticles) await attachParticles(copy, table, materials, (n) => nodeKey(table, n), particleMesh);
+    }
     if (id !== buildId) return;
   }
 }
@@ -1768,7 +1785,10 @@ function setGameMode(key, skin = null) {
   state.gen.mode = key;
   state.gen.skin = skin ?? skinsOf()[0]?.[0] ?? null;
   generation.refresh();
-  return rebuild().then(() => studio.refresh());
+  return rebuild().then(async () => {
+    if (studio.active) await studioFootprints(); // the mode's own pieces
+    studio.refresh();
+  });
 }
 // "low_01" -> "Low 01" ("med" pieces read as "Medium")
 const pieceLabel = (key) => key.replace(/^med_/, 'medium_').replace(/^(\w)/, (c) => c.toUpperCase()).replace('_', ' ');
@@ -2087,6 +2107,28 @@ async function runToStudioItems(mode) {
   return out;
 }
 
+/**
+ * Studio footprints: each tool's piece measured on its own meshes, not its drop shadow
+ * (a barrier is 20 wide, 25 with its shadow), stored as prefab.footprint for the catalog.
+ */
+async function studioFootprints() {
+  const names = studioSizePrefabs(manifest, state.theme, trainTheme(), state.gen).filter((n) => !manifest.prefabs[n].footprint && manifest.prefabs[n].glb);
+  await Promise.all(
+    names.map(async (n) => {
+      const root = await loadGlb(manifest.prefabs[n].glb);
+      root.updateMatrixWorld(true);
+      const box = new THREE.Box3();
+      root.traverse((o) => {
+        if (!o.isMesh || o.userData.particles) return;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        if (mats.every((m) => /shadow/i.test(m?.name ?? ''))) return;
+        box.expandByObject(o);
+      });
+      if (!box.isEmpty()) manifest.prefabs[n].footprint = [box.min.toArray(), box.max.toArray()];
+    }),
+  );
+}
+
 async function enterStudio() {
   generation.close();
   view.close();
@@ -2098,6 +2140,7 @@ async function enterStudio() {
     } else migrateStudioPlatforms();
     state.obstacleMode = 'studio';
   }
+  await studioFootprints();
   fly.enabled = orbit.enabled = false;
   document.body.classList.add('studio');
   rebuild().then(() => (studio.enter(), applyThemeLook(), applyBend()));

@@ -85,6 +85,21 @@ export function setAltZones(zones) {
   globals.uAltZoneCount.value = list.length;
 }
 
+/**
+ * A copy of a material drawn only outside ('outside') or inside ('inside') the given zones
+ * along the run ([z0, z1) each); `zones` is shared, so updating it moves every copy's cut.
+ */
+export function zoneClipped(material, side, zones) {
+  const copy = material.clone();
+  copy.defines = { ...material.defines, ZONE_CLIP: side === 'outside' ? 1 : 2 };
+  copy.uniforms = { ...material.uniforms, uZoneCount: zones.count, uZones: zones.list };
+  return copy;
+}
+export const makeZoneUniforms = () => ({
+  count: { value: 0 },
+  list: { value: Array.from({ length: MAX_ALT_ZONES }, () => new THREE.Vector2()) },
+});
+
 /** Sets the "no tracks" zones the track materials cut out. */
 export function setTrackCuts(zones) {
   const list = zones.slice(0, MAX_CUTS);
@@ -151,7 +166,10 @@ void main() {
   // flipped, so convert to Unity space and back or scrolling runs the wrong way.
   vec2 offset = uMainST.zw;
 #ifdef SCROLL
-  offset += uScroll * uTime / 20.0; // Unity _Time.x
+  // Unity _Time.x. A flipped tiling (-3) flips the scroll with it, so the pattern moves the
+  // way its flipped arrows point: race speed pads (boost: tiling -3, scroll +20; slow:
+  // tiling 3, scroll -20) run in opposite directions, forward and back
+  offset += uScroll * sign(uMainST.xy) * uTime / 20.0;
 #endif
   vec2 unityUv = vec2(uv.x, 1.0 - uv.y) * uMainST.xy + offset;
   vUv = vec2(unityUv.x, 1.0 - unityUv.y);
@@ -235,6 +253,19 @@ bool inCut() {
   return false;
 }
 #endif
+#ifdef ZONE_CLIP
+// A piece shown only inside (ZONE_CLIP 2) or outside (1) zones along the run: the No Floor
+// floor's activated and default states, cut exactly at the studio zone's ends
+uniform int uZoneCount;
+uniform vec2 uZones[${MAX_ALT_ZONES}];
+bool inZone() {
+  for (int i = 0; i < ${MAX_ALT_ZONES}; i++) {
+    if (i >= uZoneCount) break;
+    if (vWorld.z >= uZones[i].x && vWorld.z < uZones[i].y) return true;
+  }
+  return false;
+}
+#endif
 `;
 const CUT_MAIN = /* glsl */ `
 #include <clipping_planes_fragment>
@@ -243,6 +274,13 @@ const CUT_MAIN = /* glsl */ `
   if (inCut()) discard;
 #else
   if (!inCut()) discard;
+#endif
+#endif
+#ifdef ZONE_CLIP
+#if ZONE_CLIP == 1
+  if (inZone()) discard;
+#else
+  if (!inZone()) discard;
 #endif
 #endif
 `;

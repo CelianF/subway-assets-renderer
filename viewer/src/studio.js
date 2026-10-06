@@ -547,7 +547,8 @@ export function createStudio(ctx) {
   ctx.root.append(palette);
 
   function setTool(t) {
-    if (!['edit', 'remove', 'noTracks', ...FULL_ZONES].includes(t.type)) placeTool = t;
+    if (TRACK_TOOLS.includes(t.type)) trackTool = t;
+    else if (!['edit', 'remove'].includes(t.type)) placeTool = t;
     tool = t;
     pending = null;
     selected = -1;
@@ -557,17 +558,19 @@ export function createStudio(ctx) {
     renderPalette();
   }
 
+  // Main bar modes; each shows its own tools in the bar above
   const MODES = [
     ['place', '✏️ Place'],
     ['edit', '✋ Edit'],
+    ['track', '🛤 Track'],
     ['remove', '🗑 Remove'],
-    ['noTracks', '🚧 Remove track'],
   ];
-  const modeOf = (t) => (['edit', 'remove', 'noTracks', ...FULL_ZONES].includes(t.type) ? t.type : 'place');
-  const modesOf = (cat) => [...MODES.filter(([m]) => m !== 'noTracks' || cat.tracks !== false), ...(ctx.zoneKinds?.() ?? []).map((k) => [k.type, `${k.label} zone`])];
+  // Track: the run's zones (no tracks, challenge, activated floor) and its auto-run actions
+  const TRACK_TOOLS = ['noTracks', ...FULL_ZONES];
+  const modeOf = (t) => (TRACK_TOOLS.includes(t.type) ? 'track' : ['edit', 'remove'].includes(t.type) ? t.type : 'place');
+  let trackTool = { type: 'noTracks' }; // the Track mode's last zone tool
 
   let fixKeys = null; // "Fix …" buttons for this map (the auto run's layout, worked out once)
-  let toolsOpen = false; // the tools menu of the main bar
   function renderPalette() {
     const cat = ctx.getCatalog();
     fixKeys ??= ctx.fixables();
@@ -631,12 +634,39 @@ export function createStudio(ctx) {
       if (category === 'lights') rows.push(row('Lights', ...SIGNAL_TOOLS.map(([color, label]) => btn(label, isTool('signal', { color }), () => setTool({ type: 'signal', color })))));
     } else if (mode === 'edit' && selected >= 0) {
       rows.push(editRow(cat, btn, select));
+    } else if (mode === 'track') {
+      const zoneTools = [
+        ...(cat.tracks !== false ? [['noTracks', '🚧 Remove track']] : []),
+        ...(ctx.zoneKinds?.() ?? []).map((k) => [k.type, `${k.label} zone`]),
+      ];
+      const done = (verb, n, what) => setInfo(n ? `${verb} ${n} ${what}${n > 1 ? 's' : ''}` : `No ${what}s to place in this run`);
+      rows.push(
+        row(
+          'Track',
+          ...zoneTools.map(([type, label]) => btn(label, tool.type === type, () => setTool({ type }))),
+          el('span', { class: 'studio-sep' }),
+          // Obstacles the auto run has and the studio list may lack (pillars, platforms…)
+          ...fixKeys.map((key) =>
+            el('button', { title: FIX_TITLES[key], onclick: () => (done('Placed', ctx.fixMissing(key), LABELS[key].toLowerCase()), drawFootprints()) }, FIX_LABELS[key]),
+          ),
+          el('button', { title: 'Replace everything with the auto-generated run', onclick: async () => commit(await ctx.fromRun(), 'Copied the auto-generated run') }, '⟳ Copy auto run'),
+        ),
+      );
+    } else if (mode === 'remove') {
+      rows.push(
+        row(
+          'Remove',
+          el('span', { class: 'studio-info' }, 'Click something to remove it'),
+          el('span', { class: 'studio-sep' }),
+          btn('💥 Wipe', false, () => confirm('Remove everything placed, including zones?') && commit([], 'Wiped'), 'danger'),
+        ),
+      );
     }
     if (categoryRow) rows.push(categoryRow); // under the chosen category's assets, by the main bar
     contextBar.replaceChildren(...rows);
     contextBar.classList.toggle('hidden', !rows.length);
 
-    // Main bar (bottom): modes, status, done
+    // Main bar (bottom): modes, status, game mode, done
     const hints = {
       place: 'Pick an asset above, then click the tiles',
       edit: 'Click a train, obstacle or light to change it',
@@ -645,38 +675,17 @@ export function createStudio(ctx) {
       challenge: 'Click the start then the end of the stretch where the challenge runs',
       surge: 'Click the start then the end of the stretch where the floor is activated',
     };
-    if (!info.textContent || info.dataset.mode !== mode) {
-      info.textContent = hints[mode];
-      info.dataset.mode = mode;
+    const hintKey = mode === 'track' ? tool.type : mode;
+    if (!info.textContent || info.dataset.mode !== hintKey) {
+      info.textContent = hints[hintKey];
+      info.dataset.mode = hintKey;
     }
-    // Tools (modes) and run-wide actions behind one button: it shows the current tool
-    const current = modesOf(cat).find(([m]) => m === mode);
-    const pickTool = (m) => {
-      toolsOpen = false;
-      setTool(m === 'place' ? placeTool : { type: m });
-    };
-    const action = (fn) => () => {
-      toolsOpen = false;
-      fn();
-      renderPalette();
-    };
-    const toolsMenu = el(
-      'div',
-      { class: `studio-menu ${toolsOpen ? '' : 'hidden'}` },
-      ...modesOf(cat).map(([m, label]) => btn(label, mode === m, () => pickTool(m), m === 'remove' ? 'danger' : '')),
-      el('hr'),
-      // Obstacles the auto run has and the studio list may lack (pillars, platforms…)
-      ...fixKeys.map((key) =>
-        el('button', { title: FIX_TITLES[key], onclick: action(() => { const n = ctx.fixMissing(key); drawFootprints(); setInfo(n ? `Placed ${n} ${LABELS[key].toLowerCase()}${n > 1 ? 's' : ''}` : `No ${key === 'pillar' ? 'pillar hall' : 'station'} in this run`); }) }, FIX_LABELS[key]),
-      ),
-      el('button', { title: 'Replace everything with the auto-generated run', onclick: action(async () => commit(await ctx.fromRun(), 'Copied the auto-generated run')) }, '⟳ Copy auto run'),
-      el('button', { class: 'danger', onclick: action(() => confirm('Remove everything placed, including no-track zones?') && (setTool(tool), commit([], 'Wiped'))) }, '💥 Wipe'),
-    );
+    const pickMode = (m) => setTool(m === 'place' ? placeTool : m === 'track' ? trackTool : { type: m });
     mainBar.replaceChildren(
       el(
         'div',
         { class: 'studio-row studio-modes' },
-        el('div', { class: 'studio-tools' }, toolsMenu, el('button', { class: 'tool active', title: 'Tools and actions', onclick: () => ((toolsOpen = !toolsOpen), renderPalette()) }, `${current?.[1] ?? 'Tools'} ▾`)),
+        ...MODES.map(([m, label]) => btn(label, mode === m, () => pickMode(m), m === 'remove' ? 'danger' : '')),
         info,
         el('span', { class: 'studio-sep' }),
         // Game mode (and skin): which pieces the run uses and the palette offers
@@ -789,7 +798,7 @@ export function createStudio(ctx) {
       const valid = tool.type !== 'obstacle' || Object.values(familyOf(cat)).some((keys) => keys.includes(tool.key));
       fixKeys = null;
       // A zone tool the new mode doesn't offer (the activated floor outside No Floor)
-      if (FULL_ZONES.includes(tool.type) && !ctx.zoneKinds?.().some((k) => k.type === tool.type)) tool = placeTool;
+      if (FULL_ZONES.includes(tool.type) && !ctx.zoneKinds?.().some((k) => k.type === tool.type)) tool = trackTool = { type: 'noTracks' };
       if (category === 'mode' && modeKeys.length && !(placeTool.key in cat.modePieces)) setTool({ type: 'obstacle', key: modeKeys[0] });
       else if (!valid || (category === 'mode' && !modeKeys.length)) {
         category = 'trains';
