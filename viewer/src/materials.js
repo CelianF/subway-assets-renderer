@@ -644,8 +644,12 @@ export function texturesReady() {
   return Promise.all([...pendingTextures]);
 }
 
-function loadTexture(url) {
-  if (!textureCache.has(url)) {
+const WRAPS = { repeat: THREE.RepeatWrapping, clamp: THREE.ClampToEdgeWrapping, mirror: THREE.MirroredRepeatWrapping };
+
+/** @param opts the texture's Unity import settings (manifest): { mipmaps, filter, wrap: [u, v] } */
+function loadTexture(url, { mipmaps = true, filter = null, wrap = null } = {}) {
+  const key = `${url}|${mipmaps}|${filter}|${wrap}`;
+  if (!textureCache.has(key)) {
     let done;
     const pending = new Promise((resolve) => (done = resolve));
     pendingTextures.add(pending);
@@ -653,10 +657,17 @@ function loadTexture(url) {
     const tex = textureLoader.load(url, settle, undefined, settle);
     tex.flipY = false; // glTF UV convention
     tex.colorSpace = THREE.NoColorSpace; // gamma workflow: sample raw sRGB values
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    textureCache.set(url, tex);
+    tex.wrapS = WRAPS[wrap?.[0]] ?? THREE.RepeatWrapping;
+    tex.wrapT = WRAPS[wrap?.[1]] ?? THREE.RepeatWrapping;
+    // As the game imports it: a glow atlas without mips keeps its neighbors out of the glow
+    if (!mipmaps) {
+      tex.generateMipmaps = false;
+      tex.minFilter = filter === 'nearest' ? THREE.NearestFilter : THREE.LinearFilter;
+    }
+    if (filter === 'nearest') tex.magFilter = THREE.NearestFilter;
+    textureCache.set(key, tex);
   }
-  return textureCache.get(url);
+  return textureCache.get(key);
 }
 
 /** Unity's built-in Default-Particle: a soft disc fading out to the edges (color and alpha). */
@@ -773,7 +784,13 @@ export class MaterialLibrary {
     const t = def.textures[name];
     if (t?.builtin === 'Default-Particle') return defaultParticle();
     if (!t?.url) return null;
-    return loadTexture(t.url.startsWith('/') ? t.url : `${this.baseUrl}/${t.url}`); // merged envs use absolute paths
+    // The game imports its textures without mipmaps; kept only where it shows: blended
+    // glows on atlases (mips blend the neighbors in, a square shows around a coin). Solid
+    // surfaces keep theirs, or far rails and walls would shimmer
+    const f = def.floats ?? {};
+    const blended = !((f._SrcMode ?? 1) === 1 && (f._DstMode ?? 0) === 0) || def.renderQueue >= 2500;
+    const opts = { mipmaps: !blended || t.mipmaps !== false, filter: t.filter ?? null, wrap: t.wrap ?? null };
+    return loadTexture(t.url.startsWith('/') ? t.url : `${this.baseUrl}/${t.url}`, opts); // merged envs use absolute paths
   }
 
   /** @param cut 0: normal; 1: hidden inside "no tracks" zones (rails); 2: only inside them (fill ground) */

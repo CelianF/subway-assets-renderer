@@ -1210,6 +1210,7 @@ export function generateLayout(
   }
 
   function placeStudio() {
+    const pickups = [];
     for (const it of studio) {
       placeRng = mulberry32(hashString(JSON.stringify(it)) ^ seed);
       if (it.type === 'train') {
@@ -1238,27 +1239,62 @@ export function generateLayout(
         // Height and scale kept from the game's chunks (a barrier on a train roof, small bushes)
         else place(slot, [it.lane, y, it.z], layer, extra);
         if (base) place(base, [it.lane, y, it.z], layerOf(base), { ...extra, ...(layerOf(base) === 'train' ? { group: `studio${it.lane}@${it.z}` } : {}) });
-      } else if (it.type === 'coins') {
-        coinPositions(it).forEach((cz, coinIndex) => placePickup(it.coin ?? 'Coin', it.lane, cz, COIN_HEIGHT, false, { coinIndex }));
+      } else if (['coins', 'coinArc', 'pickup'].includes(it.type)) {
+        pickups.push(it); // once everything they can stand on is placed
+      }
+    }
+    for (const it of pickups) {
+      placeRng = mulberry32(hashString(JSON.stringify(it)) ^ seed);
+      const level = (pz) => levelAt(it.height, it.lane, pz);
+      if (it.type === 'coins') {
+        coinPositions(it).forEach((cz, coinIndex) => placePickup(it.coin ?? 'Coin', it.lane, cz, level(cz) + COIN_HEIGHT, { coinIndex }));
       } else if (it.type === 'coinArc') {
         // (the whole arc rises from its spot's height: a roof's, when it starts on a train)
-        const base = roofAt(it.lane, it.z) + ARC_HEIGHT;
-        arcPositions(it, manifest.coinPatterns?.arcs?.[0]).forEach((c, coinIndex) => placePickup(it.coin ?? 'Coin', it.lane, c.z, base + c.y, true, { coinIndex }));
-      } else if (it.type === 'pickup') {
-        placePickup(it.key, it.lane, it.z, PICKUP_HEIGHT, false, { ...(it.letter ? { letter: it.letter } : {}), ...(it.token ? { token: it.token } : {}) });
+        const base = level(it.z) + ARC_HEIGHT;
+        arcPositions(it, manifest.coinPatterns?.arcs?.[0]).forEach((c, coinIndex) => placePickup(it.coin ?? 'Coin', it.lane, c.z, base + c.y, { coinIndex }));
+      } else {
+        placePickup(it.key, it.lane, it.z, level(it.z) + PICKUP_HEIGHT, { ...(it.letter ? { letter: it.letter } : {}), ...(it.token ? { token: it.token } : {}) });
       }
     }
     placeRng = rng;
   }
 
-  /** `absolute`: height is the pickup's own (an arc's coins), not above the roof under it. */
-  function placePickup(prefab, x, pz, height, absolute = false, extra = {}) {
+  function placePickup(prefab, x, pz, y, extra = {}) {
     if (!manifest.prefabs[prefab]?.bbox && /Coin$/.test(prefab)) prefab = 'Coin'; // a coin skin this map lacks
     if (!manifest.prefabs[prefab]?.bbox) return;
-    items.push({ prefab, slot: 'pickup', layer: 'pickup', pos: [x, (absolute ? 0 : roofAt(x, pz)) + height, pz], variantSeed: Math.floor(placeRng() * 2 ** 31), ...extra });
+    items.push({ prefab, slot: 'pickup', layer: 'pickup', pos: [x, y, pz], variantSeed: Math.floor(placeRng() * 2 ** 31), ...extra });
   }
 
-  /** Height under a pickup: a parked train's roof (up its ramp), else the ground. */
+  /**
+   * What a pickup stands on (its spawn height goes on top), as the studio set it:
+   * 'floor', 'obstacle' (a barrier's top), 'roof' (a train's), or by default whatever is
+   * under it: a parked train's roof (up its ramp), a placed obstacle's top, the ground.
+   */
+  function levelAt(height, x, pz) {
+    if (height === 'floor') return 0;
+    if (height === 'roof') return TRAIN_ROOF;
+    if (height === 'obstacle') return obstacleTop();
+    return Math.max(roofAt(x, pz), obstacleTopAt(x, pz));
+  }
+  /** The top of the obstacle under a spot (pillars reach the ceiling, a roll barrier is rolled under). */
+  function obstacleTopAt(x, pz) {
+    let y = 0;
+    for (const o of items) {
+      if (o.layer !== 'obstacle' || /^obstacle_(pillar|barrier_roll)$/.test(o.slot) || Math.abs(o.pos[0] - x) > 10) continue;
+      const prefab = manifest.prefabs[o.prefab];
+      const [[, , z0], [, top, z1]] = prefab?.footprint ?? prefab?.bbox ?? [[0, 0, 0], [0, 0, 0]];
+      const scale = o.scale ?? 1;
+      if (pz >= o.pos[2] + z0 * scale && pz <= o.pos[2] + z1 * scale) y = Math.max(y, o.pos[1] + top * scale);
+    }
+    return y;
+  }
+  /** A barrier's top, for pickups set on obstacles where none stands (the theme's barrier). */
+  function obstacleTop() {
+    const tops = ['obstacle_barrier_standard', 'obstacle_barrier_jump'].flatMap((slot) => (slots[slot] ?? []).map((n) => manifest.prefabs[n]?.bbox?.[1][1]).filter(Boolean));
+    return tops.length ? Math.max(...tops) : 12;
+  }
+
+  /** A parked train's roof under a spot (up its ramp), else the ground. */
   function roofAt(x, pz) {
     let y = 0;
     for (const t of studio) {

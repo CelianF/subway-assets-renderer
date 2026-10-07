@@ -66,6 +66,14 @@ const pickupLabel = (key) => (PICKUP_LABELS[key] ?? key).replace(/^\S+ /, '');
 const COIN_SKINS = { Coin: 'Gold coins', GreenCoin: 'Green coins', RedCoin: 'Red coins', PrideCoin: 'Pride coins' };
 const LETTERS = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'];
 const isPickup = (it) => ['coins', 'coinArc', 'pickup'].includes(it.type);
+// What a pickup stands on: whatever is under it (a parked train's roof, an obstacle's top), or a set level
+const PICKUP_HEIGHTS = [['auto', '✨ Auto'], ['floor', '⬇ Floor'], ['obstacle', '🚧 Obstacle'], ['roof', '🚆 Roof']];
+const HEIGHT_TITLES = {
+  auto: 'On whatever is under it: a parked train\'s roof (up its ramp), an obstacle\'s top, else the floor',
+  floor: 'On the floor, whatever is there',
+  obstacle: 'On top of a barrier',
+  roof: 'On a train\'s roof',
+};
 const tokenLabel = (name) => (name === 'point' ? 'Season point' : name.replace(/^Hunttoken_/, '').replace(/_/g, ' '));
 /** Name of an obstacle tool: regular ones, else the game mode's piece names. */
 const labelOf = (key, cat) => LABELS[key] ?? cat?.modePieces?.[key] ?? key;
@@ -641,6 +649,7 @@ export function createStudio(ctx) {
       ...(t.spacing && t.spacing !== COIN_SPACING ? { spacing: t.spacing } : {}),
       ...(cat.letterPickups.includes(t.key) ? { letter: t.letter ?? 'A' } : {}),
       ...(t.key === 'SeasonToken' && cat.huntTokens.length ? { token: t.token ?? cat.huntTokens[0] } : {}),
+      ...(t.height && t.height !== 'auto' ? { height: t.height } : {}),
     };
   }
 
@@ -845,7 +854,7 @@ export function createStudio(ctx) {
       if (category === 'pickups') {
         // Coins: lines (regular or close) and jump arcs, of any coin the map has
         if (cat.pickups.includes('Coin')) {
-          const coinTool = (type) => ({ type, coin: tool.coin ?? 'Coin', spacing: tool.spacing ?? COIN_SPACING });
+          const coinTool = (type) => ({ type, coin: tool.coin ?? 'Coin', spacing: tool.spacing ?? COIN_SPACING, height: tool.height });
           rows.push(
             row(
               'Coins',
@@ -858,13 +867,14 @@ export function createStudio(ctx) {
         const pickupButtons = (labels) =>
           Object.entries(labels)
             .filter(([key]) => cat.pickups.includes(key))
-            .map(([key, label]) => btn(label, isTool('pickup', { key }), () => setTool({ type: 'pickup', key, letter: tool.letter, token: tool.token })));
+            .map(([key, label]) => btn(label, isTool('pickup', { key }), () => setTool({ type: 'pickup', key, letter: tool.letter, token: tool.token, height: tool.height })));
         for (const [group, labels] of PICKUP_GROUPS) {
           const buttons = pickupButtons(labels);
           // The chosen pickup's own settings next to it: a hunt letter, the season's token
           const own = tool.type === 'pickup' && tool.key in labels ? pickupSettings(cat, tool, select, (changes) => setTool({ ...tool, ...changes })) : [];
           if (buttons.length) rows.push(row(group, ...buttons, ...own));
         }
+        if (isPickup(tool)) rows.push(row('Height', ...heightButtons(tool, btn, (height) => setTool({ ...tool, height }))));
       }
     } else if (mode === 'edit' && selected >= 0) {
       rows.push(editRow(cat, btn, select));
@@ -1009,6 +1019,20 @@ export function createStudio(ctx) {
     return out;
   }
 
+  /** Auto / Floor / Obstacle / Roof for a pickup tool or item. */
+  function heightButtons(it, btn, change) {
+    return PICKUP_HEIGHTS.map(([height, label]) => {
+      const b = btn(label, (it.height ?? 'auto') === height, () => change(height));
+      b.title = HEIGHT_TITLES[height];
+      return b;
+    });
+  }
+  const withHeight = (it, height) => {
+    const next = { ...it, height };
+    if (height === 'auto') delete next.height;
+    return next;
+  };
+
   /** A pickup's own settings: a hunt letter's letter, the season token's hunt token. */
   function pickupSettings(cat, it, select, change) {
     if (cat.letterPickups.includes(it.key)) {
@@ -1045,6 +1069,8 @@ export function createStudio(ctx) {
       return row(
         ...cat.pickups.filter((key) => !(key in COIN_SKINS)).map((key) => btn(PICKUP_LABELS[key] ?? key, it.key === key, () => turn(key))),
         ...pickupSettings(cat, it, select, (changes) => replaceSelected({ ...it, ...changes })),
+        el('span', { class: 'studio-label' }, 'Height'),
+        ...heightButtons(it, btn, (height) => replaceSelected(withHeight(it, height))),
         del,
       );
     }
@@ -1055,7 +1081,13 @@ export function createStudio(ctx) {
         if (next.spacing === COIN_SPACING) delete next.spacing;
         replaceSelected(next);
       };
-      return row(el('span', { class: 'studio-info' }, describeItem(it)), ...coinOptions(cat, it, select, edit), del);
+      return row(
+        el('span', { class: 'studio-info' }, describeItem(it)),
+        ...coinOptions(cat, it, select, edit),
+        el('span', { class: 'studio-label' }, 'Height'),
+        ...heightButtons(it, btn, (height) => replaceSelected(withHeight(it, height))),
+        del,
+      );
     }
     if (it.type === 'signal') {
       return row(...SIGNAL_TOOLS.map(([color, label]) => btn(label, (it.color ?? 'green') === color, () => replaceSelected({ ...it, color }))), del);

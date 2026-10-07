@@ -2665,6 +2665,23 @@ function parseMaterial(file, guidIndex, exportRoot) {
 
 // ---------------------------------------------------------------- main
 
+/**
+ * How Unity imports a texture (its .meta), where it differs from the viewer's defaults:
+ * no mipmaps (atlases of glows: the mips blend the neighbors in, a square shows around a
+ * coin), point filtering, clamped or mirrored edges.
+ */
+function textureImport(src) {
+  const meta = existsSync(`${src}.meta`) ? read(`${src}.meta`) : '';
+  const value = (key) => meta.match(new RegExp(`\\n\\s*${key}: (-?\\d+)`))?.[1];
+  const out = {};
+  if (value('enableMipMap') === '0') out.mipmaps = false;
+  if (value('filterMode') === '0') out.filter = 'nearest';
+  const wrap = { 1: 'clamp', 2: 'mirror' };
+  const [u, v] = [value('wrapU') ?? value('wrapMode'), value('wrapV') ?? value('wrapMode')].map((w) => wrap[w]);
+  if (u || v) out.wrap = [u ?? 'repeat', v ?? 'repeat'];
+  return out;
+}
+
 function copyIfNewer(src, dst) {
   const srcStat = statSync(src);
   if (!existsSync(dst) || statSync(dst).mtimeMs < srcStat.mtimeMs) {
@@ -3115,6 +3132,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       }
       copyIfNewer(src, path.join(outTex, path.basename(src)));
       tex.url = `tex/${path.basename(src)}`;
+      Object.assign(tex, textureImport(src));
     }
   }
   for (const config of Object.values(themeConfigs)) {

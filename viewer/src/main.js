@@ -1932,6 +1932,10 @@ function renderScreenshot() {
   renderer.render(scene, shotCam);
   const pixels = new Uint8Array(width * height * 4);
   renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
+  // Glows, the sky and the skyline blend their own alpha into the target: invisible on
+  // screen, but a PNG keeps it, and viewers show those spots washed out over white (a
+  // square around a coin's halo). Only a transparent shot keeps its alpha
+  if (!screenshot.transparent) for (let i = 3; i < pixels.length; i += 4) pixels[i] = 255;
   renderer.setRenderTarget(null);
   renderer.setClearColor(0x000000, 1);
   sky.visible = true;
