@@ -49,8 +49,8 @@ const LABELS = {
   trainPlatform: 'Train platform',
 };
 const FIX_TITLES = {
-  pillar: 'Every pillar hall gets its pillars back (whatever stands in their spots is cleared)',
-  platform: 'Every station gets its platforms back (whatever stands on the outer tracks there is cleared)',
+  pillar: 'Removes every pillar, then puts each pillar hall\'s back in place (whatever stands in their spots is cleared)',
+  platform: 'Removes every platform, then puts each station\'s back in place (whatever stands on the outer tracks there is cleared)',
 };
 const KIND_LABELS = { static: 'Parked', moving: 'Moving', falling: 'Lava' };
 // The game's pickups by prefab name, in the palette's groups
@@ -768,7 +768,7 @@ export function createStudio(ctx) {
   const modeOf = (t) => (TRACK_TOOLS.includes(t.type) ? 'track' : ['edit', 'remove'].includes(t.type) ? t.type : 'place');
   let trackTool = { type: 'noTracks' }; // the Track mode's last zone tool
 
-  let fixKeys = null; // "Fix …" buttons for this map (the auto run's layout, worked out once)
+  let fixKeys = null; // "Fix …" buttons for the run on screen (worked out again when it changes)
   function renderPalette() {
     const cat = ctx.getCatalog();
     fixKeys ??= ctx.fixables();
@@ -873,7 +873,14 @@ export function createStudio(ctx) {
         ...(cat.tracks !== false ? [['noTracks', '🚧 Remove track']] : []),
         ...(ctx.zoneKinds?.() ?? []).map((k) => [k.type, `${k.label} zone`]),
       ];
-      const done = (verb, n, what) => setInfo(n ? `${verb} ${n} ${what}${n > 1 ? 's' : ''}` : `No ${what}s to place in this run`);
+      const plural = (n, what) => `${n} ${what}${n === 1 ? '' : 's'}`;
+      // What Fix did: put back, taken out (old ones, wherever they were), cleared out of the way
+      const done = ({ placed, removed, cleared }, what) =>
+        setInfo(
+          placed
+            ? [`Placed ${plural(placed, what)}`, removed ? `removed ${removed} old` : null, cleared ? `cleared ${plural(cleared, 'piece')} in the way` : null].filter(Boolean).join(' · ')
+            : `No ${what}s to place in this run${removed ? ` · removed ${removed} old` : ''}`,
+        );
       rows.push(
         row(
           'Track',
@@ -888,7 +895,7 @@ export function createStudio(ctx) {
           el('span', { class: 'studio-sep' }),
           // Obstacles the auto run has and the studio list may lack (pillars, platforms…)
           ...fixKeys.map((key) =>
-            el('button', { title: FIX_TITLES[key], onclick: () => (done('Placed', ctx.fixMissing(key), LABELS[key].toLowerCase()), drawFootprints()) }, FIX_LABELS[key]),
+            el('button', { title: FIX_TITLES[key], onclick: () => (done(ctx.fixMissing(key), LABELS[key].toLowerCase()), drawFootprints()) }, FIX_LABELS[key]),
           ),
           el('button', { title: 'Replace everything with the auto-generated run', onclick: async () => commit(await ctx.fromRun(), 'Copied the auto-generated run') }, '⟳ Copy auto run'),
         ),
@@ -1094,6 +1101,7 @@ export function createStudio(ctx) {
     palette,
     enter() {
       active = true;
+      fixKeys = null; // (the run may have changed since the studio was last open)
       overlay.visible = true;
       renderer.clippingPlanes = clip; // stations and tunnels would hide the tracks
       buildSpots();
@@ -1134,6 +1142,12 @@ export function createStudio(ctx) {
       buildSpots();
       drawFootprints();
       updateCamera();
+      // The run changed (seed, sections…): its pillar halls and stations may have too
+      const keys = ctx.fixables();
+      if (keys.join() !== fixKeys?.join()) {
+        fixKeys = keys;
+        renderPalette();
+      }
     },
   };
 }

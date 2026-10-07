@@ -1988,15 +1988,17 @@ function fixables() {
 
 /**
  * "Fix pillars" / "Fix platforms": every pillar hall gets its middle-lane pillars, every
- * station its platforms. Whatever stands where they go (trains, obstacles, older copies)
- * is cleared first. Outside the studio, pillars come back by turning pillar obstacles on.
- * Returns how many were put back.
+ * station its platforms. Every pillar (platform) already placed goes first, wherever it is
+ * (a run copied before, a hall since moved), then whatever stands where the new ones go
+ * (trains, obstacles). Outside the studio, pillars come back by turning pillar obstacles on.
+ * Returns { placed, removed (old pieces), cleared (what stood in their way) }.
  */
 function fixMissing(key) {
   if (key === 'pillar' && state.obstacleMode !== 'studio') {
     state.gen.obstacles.pillar = true;
     generation.refresh();
-    return regen();
+    regen();
+    return { placed: wallItems(currentLayout(), key).length, removed: 0, cleared: 0 };
   }
   const wanted = wallItems(currentLayout('studio'), key);
   const size = catalog().sizes?.[key];
@@ -2014,16 +2016,19 @@ function fixMissing(key) {
       ? { lanes: [0], z0: w.z + (size?.z0 ?? -22), z1: w.z + (size?.z1 ?? 24) }
       : { lanes: [-20, 20], z0: w.z, z1: w.z + 180 },
   );
+  const old = (it) => it.type === 'obstacle' && it.key === key;
   const blocked = (it) => {
     if (it.type === 'signal' || it.type === 'noTracks' || it.type === 'challenge' || it.type === 'surge') return false; // (zones stay)
-    if (it.type === 'obstacle' && it.key === key) return spots.some((sp) => overlaps(...spanOf(it), sp.z0, sp.z1));
     const lane = it.lane ?? 0;
     return spots.some((sp) => sp.lanes.includes(lane) && overlaps(...spanOf(it), sp.z0, sp.z1));
   };
-  state.studio = [...state.studio.filter((it) => !blocked(it)), ...wanted];
+  const removed = state.studio.filter(old).length;
+  const kept = state.studio.filter((it) => !old(it));
+  const rest = kept.filter((it) => !blocked(it));
+  state.studio = [...rest, ...wanted];
   saveStudio();
   rebuild({ dynamicOnly: true });
-  return wanted.length;
+  return { placed: wanted.length, removed, cleared: kept.length - rest.length };
 }
 const catalog = () => studioCatalog(manifest, state.theme, trainTheme(), state.gen);
 const modes = gameModes(manifest);
