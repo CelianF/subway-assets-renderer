@@ -110,6 +110,117 @@ export function arcPositions(it, arc = JUMP_ARC) {
   });
 }
 
+const GATE_WALLS = ['special_gate_left', 'special_gate_mid', 'special_gate_right', 'special_gate_sides'];
+
+/** Which section a Chunk mode chunk belongs to (stretches of one kind make a section). */
+export function chunkKind(e) {
+  if (e.type === 'buildings') return 'buildings';
+  if (e.type === 'gate') return 'gate';
+  return e.slot?.match(/^boundary_(station|tube|pillars|epic)/)?.[1] ?? 'other';
+}
+
+const KIND_NAMES = { buildings: 'buildings', station: 'station', tube: 'tube', pillars: 'pillar hall', epic: 'landmark', gate: 'gate' };
+const PART_NAMES = { start: 'start', mid: 'middle', end: 'end' };
+
+/**
+ * Chunk mode's cards: every piece the theme can lay, by group. Buildings are one side of a
+ * segment (the other side is the segment's own); the landmark's empty mid and end (a start
+ * that models it whole) are left out, their room is kept.
+ * [{ group, cards: [{ id, type, slot, prefab, side?, wall?, label }] }]
+ */
+export function chunkCards(manifest, themeName, gen = null) {
+  const slots = themeSlots(manifest, themeName, null, gen);
+  const has = (slot) => slots[slot]?.some((n) => manifest.prefabs[n]?.bbox);
+  const real = (slot) => (slots[slot] ?? []).filter((n) => manifest.prefabs[n]?.bbox);
+  const numbered = (names, label) => names.map((prefab, i) => ({ prefab, label: names.length > 1 ? `${label} ${i + 1}` : label }));
+  const groups = [];
+  const buildings = [];
+  for (const height of ['low', 'medium', 'high']) {
+    for (const side of ['left', 'right']) {
+      const slot = `boundary_${height}_${side}`;
+      const title = `${height[0].toUpperCase()}${height.slice(1)} ${side}`;
+      for (const c of numbered(real(slot), title)) buildings.push({ id: `${slot}|${c.prefab}`, type: side, slot, prefab: c.prefab, side, label: c.label });
+    }
+  }
+  if (buildings.length) groups.push({ group: 'Buildings', cards: buildings });
+  const ads = ['boundary_sponsored_right_front', 'boundary_sponsored_right_back'].flatMap((slot) =>
+    numbered(real(slot), `Ad ${slot.endsWith('front') ? 'front' : 'back'}`).map((c) => ({ id: `${slot}|${c.prefab}`, type: 'right', slot, prefab: c.prefab, side: 'right', label: c.label })),
+  );
+  if (ads.length) groups.push({ group: 'Ads', cards: ads });
+  const piece = (group, list) => {
+    const cards = list.flatMap(([slot, label]) => numbered(real(slot), label).map((c) => ({ id: `${slot}|${c.prefab}`, type: 'piece', slot, prefab: c.prefab, label: c.label })));
+    if (cards.length) groups.push({ group, cards });
+  };
+  piece('Station', [['boundary_station_start', 'Station start'], ['boundary_station_mid', 'Station middle'], ['boundary_station_end', 'Station end']]);
+  piece('Tube', [['boundary_tube', 'Tube']]);
+  piece('Pillar hall', [['boundary_pillars_start', 'Pillars start'], ['boundary_pillars_mid', 'Pillars middle'], ['boundary_pillars_end', 'Pillars end']]);
+  piece('Landmark', [['boundary_epic_start', 'Landmark start'], ['boundary_epic_mid', 'Landmark middle'], ['boundary_epic_end', 'Landmark end']]);
+  if (has('boundary_gate') && has('track_gates')) {
+    const walls = GATE_WALLS.filter(has);
+    const names = { special_gate_left: 'Gate, open left', special_gate_mid: 'Gate, open middle', special_gate_right: 'Gate, open right', special_gate_sides: 'Gate, open sides' };
+    const cards = (walls.length ? walls : [null]).map((wall) => ({ id: `gate|${wall}`, type: 'gate', slot: 'boundary_gate', prefab: slots.boundary_gate[0], wall, label: wall ? names[wall] : 'Gate' }));
+    groups.push({ group: 'Gate', cards });
+  }
+  return groups;
+}
+
+/** A chunk's length along the run (a building segment: 180). */
+export function chunkLength(manifest, e) {
+  if (e.type === 'buildings') return SEGMENT;
+  const slot = e.type === 'gate' ? 'track_gates' : e.slot;
+  const prefab = manifest.prefabs[e.type === 'gate' ? null : e.prefab];
+  return Math.max(slotLength(manifest, slot, prefab), e.type === 'gate' ? slotLength(manifest, 'boundary_gate', null) : 0);
+}
+
+/**
+ * What the game would never lay (its sections always come whole, with buildings between):
+ * [{ index, message }] for the chunks where it goes wrong.
+ */
+export function checkPlan(plan, manifest = null) {
+  const out = [];
+  // A landmark modeled whole in its start (its mid and end are empty placeholders) needs no more
+  const whole = (e) => {
+    const start = manifest?.prefabs[e.prefab];
+    return !!start && (start.mainDepth ?? start.bbox?.[1][2] ?? 0) > 2.5 * slotLength(manifest, 'boundary_epic_start', start);
+  };
+  const warn = (index, message) => out.push({ index, message });
+  if (plan.length && chunkKind(plan[0]) !== 'buildings') warn(0, 'The game always opens a run with buildings');
+  // Stretches of one kind
+  const stretches = [];
+  plan.forEach((e, i) => {
+    const kind = chunkKind(e);
+    const last = stretches[stretches.length - 1];
+    if (last && last.kind === kind && kind !== 'gate') last.items.push(i);
+    else stretches.push({ kind, items: [i] });
+  });
+  stretches.forEach((st, si) => {
+    const name = KIND_NAMES[st.kind] ?? st.kind;
+    // Two interiors (anything but buildings) next to each other
+    const prev = stretches[si - 1];
+    if (prev && prev.kind !== 'buildings' && st.kind !== 'buildings') {
+      warn(st.items[0], prev.kind === st.kind ? `Two ${name}s back to back: the game puts buildings between them` : `A ${name} right after a ${KIND_NAMES[prev.kind] ?? prev.kind}: the game always puts buildings between them`);
+    }
+    // Start, middles, end, in that order (a landmark: one of each)
+    if (!['station', 'pillars', 'epic'].includes(st.kind)) return;
+    const parts = st.items.map((i) => plan[i].slot.match(/_(start|mid|end)$/)?.[1]);
+    if (st.kind === 'epic' && parts.length === 1 && parts[0] === 'start' && whole(plan[st.items[0]])) return;
+    const title = `${name[0].toUpperCase()}${name.slice(1)}`;
+    parts.forEach((part, k) => {
+      const i = st.items[k];
+      const before = parts[k - 1];
+      if (part === 'start' && k > 0) warn(i, `${title} start in the middle of a ${name}`);
+      else if (part !== 'start' && k === 0) warn(i, `${title} ${PART_NAMES[part]} without a ${name} start before it`);
+      else if (part === 'mid' && before === 'end') warn(i, `${title} middle after its end`);
+      else if (part === 'end' && before === 'end') warn(i, `Two ${name} ends in a row`);
+      else if (st.kind === 'epic' && part === before) warn(i, `The landmark has one ${PART_NAMES[part]}`);
+      else if (st.kind === 'epic' && part === 'end' && before === 'start' && parts.length === 2) warn(i, 'Landmark middle missing');
+    });
+    if (st.kind !== 'epic' && parts.length && !parts.includes('mid')) warn(st.items.at(-1), `${title} without a middle`);
+    if (parts.at(-1) !== 'end') warn(st.items.at(-1), `${title} without its end`);
+  });
+  return out;
+}
+
 /** Generation filters ("advanced generation"); everything on by default. */
 export const DEFAULT_GEN = {
   sections: { buildings: true, station: true, tube: true, pillars: true, gate: true, epic: true },
@@ -607,9 +718,11 @@ export function generateLayout(
   // Boundary runs per side of the track, for the theme's transition pieces
   const runs = { left: [], right: [] };
   const addRun = (side, slot, z0, z1) => runs[side].push({ slot, z0, z1 });
+  const placed = []; // the run's chunks as laid (Chunk mode starts from them): see buildPlan
   const placeRun = (slot) => {
     const prefab = place(slot, [0, 0, z]);
     if (!prefab) return;
+    placed.push({ type: 'piece', slot, prefab });
     const z0 = z;
     z += slotLength(manifest, slot, manifest.prefabs[prefab]);
     addRun('left', slot, z0, z);
@@ -643,9 +756,9 @@ export function generateLayout(
       // active campaign they point at regular buildings)
       const sponsored = ['boundary_sponsored_right_front', 'boundary_sponsored_right_back'].filter(has);
       const right = sponsored.length && rng() < 0.15 ? pick(rng, sponsored) : `boundary_${height}_right`;
-      placeAllowed(`boundary_${height}_left`, usePieces);
-      if (right.startsWith('boundary_sponsored')) place(right, [0, 0, z]);
-      else placeAllowed(right, usePieces);
+      const leftPrefab = placeAllowed(`boundary_${height}_left`, usePieces);
+      const rightPrefab = right.startsWith('boundary_sponsored') ? place(right, [0, 0, z]) : placeAllowed(right, usePieces);
+      placed.push({ type: 'buildings', left: { slot: `boundary_${height}_left`, prefab: leftPrefab }, right: { slot: right, prefab: rightPrefab } });
       addRun('left', `boundary_${height}_left`, z, z + SEGMENT);
       addRun('right', right, z, z + SEGMENT);
       decorate(z);
@@ -779,13 +892,17 @@ export function generateLayout(
       pillarRanges.push([start, z]);
     }
   }
-  function gate() {
+  /** `wall`: which wall (a Chunk mode gate's own), else one at random. */
+  function gate(wall = null) {
     const start = z;
     place('track_gates', [0, 0, z]);
     // The wall across the lanes, open on one lane (left/mid/right) or both sides
-    const walls = ['special_gate_left', 'special_gate_mid', 'special_gate_right', 'special_gate_sides'].filter(has);
-    if (walls.length) place(choose('gate_walls', walls), [0, 0, z], 'wall');
+    const walls = GATE_WALLS.filter(has);
+    const chosen = walls.includes(wall) ? wall : walls.length ? choose('gate_walls', walls) : null;
+    if (chosen) place(chosen, [0, 0, z], 'wall');
+    const before = placed.length;
     placeRun('boundary_gate');
+    placed.splice(before, placed.length - before, { type: 'gate', wall: chosen });
     z = Math.max(z, start + slotLength(manifest, 'track_gates', manifest.prefabs[slots.track_gates[0]]));
     noTrackRanges.push([start, z]);
   }
@@ -884,7 +1001,84 @@ export function generateLayout(
       addRun('left', `boundary_super_epic_${span.kind}_left`, at, z);
       addRun('right', `boundary_super_epic_${span.kind}_right`, at, z);
     }
-  } else if (!gen.showcase) for (const section of finalPlan) section.build();
+  } else if (gen.plan?.length && !gen.showcase) buildPlan(gen.plan);
+  else if (!gen.showcase) for (const section of finalPlan) section.build();
+
+  /**
+   * Chunk mode: the run as laid by hand, piece by piece (each building segment with its two
+   * sides). What the sections add around their pieces still comes: a station's platforms
+   * and ground, a pillar hall's pillars, a gate's wall and gap in the rails.
+   */
+  function buildPlan(plan) {
+    const spans = []; // { kind, z0, z1 } per chunk
+    let wholeLandmark = false; // its start models all three slots: mid/end only keep their length
+    const exact = (slot, prefab) => (slots[slot]?.includes(prefab) ? prefab : choose(slot, slots[slot]));
+    for (const e of plan) {
+      const z0 = z;
+      const kind = chunkKind(e);
+      if (e.type === 'buildings') {
+        for (const side of ['left', 'right']) {
+          const { slot } = e[side] ?? {};
+          if (!has(slot)) continue;
+          items.push({ prefab: exact(slot, e[side].prefab), slot, layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(placeRng() * 2 ** 31) });
+          addRun(side, slot, z, z + SEGMENT);
+        }
+        decorate(z);
+        z += SEGMENT;
+      } else if (e.type === 'gate') {
+        if (has('boundary_gate') && has('track_gates')) gate(e.wall);
+      } else if (e.type === 'piece' && has(e.slot)) {
+        const prefab = exact(e.slot, e.prefab);
+        const before = items.length;
+        items.push({ prefab, slot: e.slot, layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(placeRng() * 2 ** 31) });
+        z += slotLength(manifest, e.slot, manifest.prefabs[prefab]);
+        addRun('left', e.slot, z0, z);
+        addRun('right', e.slot, z0, z);
+        if (e.slot === 'boundary_epic_start') {
+          const start = manifest.prefabs[prefab];
+          wholeLandmark = (start?.mainDepth ?? start?.bbox?.[1][2] ?? 0) > 2.5 * (z - z0);
+        } else if (wholeLandmark && kind === 'epic') items.splice(before);
+      }
+      if (kind !== 'epic') wholeLandmark = false;
+      // A whole landmark followed by something else: its mid and end still take their room
+      if (wholeLandmark && e.slot === 'boundary_epic_start' && plan[plan.indexOf(e) + 1]?.slot !== 'boundary_epic_mid') {
+        for (const slot of ['boundary_epic_mid', 'boundary_epic_end']) if (has(slot)) z += slotLength(manifest, slot, manifest.prefabs[slots[slot][0]]);
+      }
+      if (z > z0) spans.push({ kind, z0, z1: z });
+    }
+    // What a section brings around its pieces, per stretch of one kind
+    const stretches = [];
+    for (const sp of spans) {
+      const last = stretches[stretches.length - 1];
+      if (last && last.kind === sp.kind && last.z1 === sp.z0) last.z1 = sp.z1;
+      else stretches.push({ ...sp });
+    }
+    stretches.forEach((st, i) => {
+      if (st.kind === 'station') {
+        // Plain ground on the outer lanes when buildings lead in and out, like the game's
+        const ground = has('special_station_platform') && has('track_ground') && stretches[i - 1]?.kind === 'buildings' && stretches[i + 1]?.kind === 'buildings';
+        if (ground) stationGrounds.push([Math.max(stretches[i - 1].z0, st.z0 - 2 * SEGMENT), Math.min(stretches[i + 1].z1, st.z1 + 2 * SEGMENT)]);
+        if (has('special_station_platform')) stations.push([st.z0, st.z1]);
+        if (obstacleMode === 'studio') return;
+        for (let pz = st.z0; pz + SEGMENT <= st.z1; pz += SEGMENT) place('special_station_platform', [0, 0, pz]);
+        if (has('special_station_platform')) platformRanges.push([st.z0, st.z1]);
+      } else if (st.kind === 'pillars') {
+        if (has('obstacle_pillar')) pillarHalls.push([st.z0, st.z1]);
+        if (has('obstacle_pillar') && gen.obstacles.pillar && obstacleMode !== 'studio') {
+          for (let pz = st.z0 + SEGMENT / 2; pz < st.z1; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], 'obstacle');
+          pillarRanges.push([st.z0, st.z1]);
+        }
+      } else if (st.kind === 'tube') {
+        // Old games list the tube entrance/exit as event decorations instead of transitions
+        if ((manifest.boundaries?.[themeName]?.transitions ?? []).some((t) => t.slot === 'boundary_tube')) return;
+        for (const slot of eventSlots) {
+          const name = slots[slot][0];
+          if (/tube_start/i.test(name)) items.push({ prefab: name, slot, layer: 'environment', pos: [0, 0, st.z0], variantSeed: 1 });
+          if (/tube_end/i.test(name)) items.push({ prefab: name, slot, layer: 'environment', pos: [0, 0, st.z1], variantSeed: 1 });
+        }
+      }
+    });
+  }
   // A sequential route (race, mystery hurdles) runs from its start to its end: more
   // buildings until it fits
   if (pass && buildingsType) {
@@ -1224,7 +1418,7 @@ export function generateLayout(
     place('obstacle_bush', [x - 4.64, 0.34, pz + 1.93], 'obstacle', { scale: 0.54 });
   }
 
-  return { items, length, pillarHalls, stations };
+  return { items, length, pillarHalls, stations, plan: placed };
 }
 
 /** Converts generated obstacle items into an editable studio list ("start from this run"). */

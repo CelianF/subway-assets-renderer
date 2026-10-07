@@ -6,12 +6,13 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setChallengeRunners, setChallengeRunner, MAX_ALT_ZONES, setReversedDepth, texturesReady, zoneClipped, makeZoneUniforms } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs, chunkCards, chunkLength, checkPlan } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
 import { createTime, createTimeDeck } from './time.js';
 import { createCameraDeck } from './cameras.js';
+import { createChunkDeck } from './chunks.js';
 import { addCredit } from './credit.js';
 import { attachParticles, updateParticles, setWeather, setWeatherVisible, setWeatherCover } from './particles.js';
 
@@ -832,7 +833,7 @@ function applyMaterial(mesh, mat) {
 }
 
 /** Instantiates a prefab (or one of its runtime track configs) with manifest materials. */
-async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null, signalColor = null, cutMode = null, worldZ = 0, variants = null, animState = null) {
+async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed = null, signalColor = null, cutMode = null, worldZ = 0, variants = null, animState = null, { particles = true } = {}) {
   // Rails hide inside studio "no tracks" zones; fill ground only shows inside them
   const cut = layer === 'track' ? (cutMode === 'inside' ? 2 : 1) : 0;
   const prefab = manifest.prefabs[name];
@@ -892,7 +893,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   });
   if (prefab.effectPlayers) applyEffectPlayers(obj, prefab.effectPlayers, variantSeed);
   if (prefab.placeholders) await fillPlaceholders(obj, prefab.placeholders, { layer, seed: variantSeed, cutMode, signalSeed, signalColor });
-  if (prefab.particles && state.particles) {
+  if (prefab.particles && state.particles && particles) {
     const table = sanitizedTable(Object.entries(prefab.particles));
     await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
   }
@@ -1138,6 +1139,23 @@ const state = {
   },
   studio: loadStudio(),
 };
+// Chunk mode's map (chunks.js): kept per environment in this browser; `on` while it lays the run
+const savedChunks = loadChunks();
+if (savedChunks.on && Array.isArray(savedChunks.plan)) state.gen.plan = savedChunks.plan;
+function loadChunks() {
+  try {
+    return JSON.parse(localStorage.getItem(`chunks:${ENV_ID}`) ?? '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
+function saveChunks(on, plan) {
+  try {
+    localStorage.setItem(`chunks:${ENV_ID}`, JSON.stringify({ on, plan }));
+  } catch {
+    // storage full or blocked: the map still lives for this session
+  }
+}
 
 // Studio placements are kept per environment in this browser
 function loadStudio() {
@@ -2383,6 +2401,7 @@ async function enterStudio() {
   generation.close();
   view.close();
   cameraDeck.close();
+  chunkDeck.close();
   timeDeck.place();
   if (state.obstacleMode !== 'studio') {
     // Start from the run on screen when nothing was placed yet
@@ -2426,13 +2445,13 @@ function exitStudio() {
 }
 
 // The toolbar's work modes: one open at a time (Time also stacks on the studio's palette)
-const openGeneration = () => (view.close(), timeDeck.close(), cameraDeck.close(), generation.toggle());
-const openView = () => (generation.close(), timeDeck.close(), cameraDeck.close(), view.toggle());
+const openGeneration = () => (view.close(), timeDeck.close(), cameraDeck.close(), chunkDeck.close(), generation.toggle());
+const openView = () => (generation.close(), timeDeck.close(), cameraDeck.close(), chunkDeck.close(), view.toggle());
 const openStudio = () => (studio.active ? exitStudio() : enterStudio());
 const time = createTime();
 const timeDeck = createTimeDeck(document.getElementById('ui'), time, {
   host: () => (studio.active ? studio.palette : null),
-  onOpen: () => (generation.close(), view.close(), cameraDeck.close()),
+  onOpen: () => (generation.close(), view.close(), cameraDeck.close(), chunkDeck.close()),
 });
 
 // Saved camera spots (cameras.js): the fly camera's place, heading and field of view
@@ -2447,9 +2466,126 @@ const cameraDeck = createCameraDeck(document.getElementById('ui'), {
     setFov(spot.fov ?? state.fov);
     setControlMode(state.controls); // orbit re-centers in front of the new view
   },
-  onOpen: () => (generation.close(), view.close(), timeDeck.close(), studio.active && exitStudio()),
+  onOpen: () => (generation.close(), view.close(), timeDeck.close(), chunkDeck.close(), studio.active && exitStudio()),
   toast: (msg) => ui.toast(msg),
 });
+
+// ---------------------------------------------------------------- chunk mode
+
+/** The run as Chunk mode would lay it from scratch: the generated run's own chunks. */
+const generatedPlan = () => generateLayout(manifest, state.theme, { ...state, trainTheme: trainTheme(), gen: { ...state.gen, plan: null } }).plan;
+let chunkRebuild = null;
+const chunkDeck = createChunkDeck(document.getElementById('ui'), {
+  groups: () => chunkCards(manifest, state.theme, state.gen),
+  plan: () => state.gen.plan ?? null,
+  setPlan: (plan) => {
+    state.gen.plan = plan;
+    saveChunks(true, plan);
+    chunkDeck.refresh();
+    // The city rebuilds once the strip settles (a drag can set it a few times in a row)
+    clearTimeout(chunkRebuild);
+    chunkRebuild = setTimeout(() => rebuild(), 250);
+  },
+  fromRun: generatedPlan,
+  useGenerated: () => {
+    saveChunks(false, state.gen.plan);
+    state.gen.plan = null;
+    rebuild();
+  },
+  check: (plan) => checkPlan(plan, manifest),
+  lengthOf: (e) => chunkLength(manifest, e),
+  thumbnail: (card) => chunkThumbnail(card),
+  goTo: (z) => {
+    // Behind the chunk, a little above the tracks, looking down the run
+    camera.position.set(0, 32, z - 70);
+    camera.lookAt(0, 10, z + 120);
+    fly.velocity.set(0, 0, 0);
+    setControlMode(state.controls);
+  },
+  onOpen: () => (generation.close(), view.close(), timeDeck.close(), cameraDeck.close(), studio.active && exitStudio()),
+});
+
+/**
+ * A chunk card's picture: the piece on its own with its rails (a station's platforms, a
+ * gate's wall), from a camera low over the track like the game's, no fog nor bend.
+ * Rendered one at a time, kept for the session.
+ */
+const CARD_SIZE = 192;
+const chunkThumbs = new Map();
+let chunkThumbQueue = Promise.resolve();
+function chunkThumbnail(card) {
+  if (!chunkThumbs.has(card.id)) {
+    const next = chunkThumbQueue.then(() => renderChunkThumbnail(card)).catch((e) => (console.warn('Chunk card', card.id, e), null));
+    chunkThumbQueue = next;
+    chunkThumbs.set(card.id, next);
+  }
+  return chunkThumbs.get(card.id);
+}
+async function renderChunkThumbnail(card) {
+  const slots = Object.assign({}, ...Object.values(manifest.themes[state.theme]));
+  const length = chunkLength(manifest, card.type === 'gate' ? { type: 'gate' } : card.type === 'piece' ? card : { type: 'buildings' });
+  const parts = []; // [prefab, trackType, [x, y, z]]
+  if (card.type === 'gate') {
+    if (slots.track_gates?.[0]) parts.push([slots.track_gates[0], null, [0, 0, 0]]);
+    if (card.wall && slots[card.wall]?.[0]) parts.push([slots[card.wall][0], null, [0, 0, 0]]);
+    parts.push([card.prefab, null, [0, 0, 0]]);
+  } else {
+    parts.push([card.prefab, null, [0, 0, 0]]);
+    const info = manifest.boundaries?.[state.theme]?.trackInfos?.[card.slot];
+    const track = slots.track_track?.[0];
+    if (track && info?.SpawnTracks !== false) {
+      for (let tz = 0; tz < length; tz += 180) for (const x of [-20, 0, 20]) parts.push([track, info?.ShowShadows ? 'TrackShadow' : 'TrackNormal', [x, 0, tz]]);
+    }
+    if (/^boundary_station_(start|mid|end)$/.test(card.slot) && slots.special_station_platform?.[0]) {
+      for (let pz = 0; pz + 180 <= length; pz += 180) parts.push([slots.special_station_platform[0], null, [0, 0, pz]]);
+    }
+  }
+  const group = new THREE.Scene();
+  const objs = await Promise.all(parts.map(([name, trackType]) => instantiate(name, trackType, 'environment', 1, null, null, null, 0, null, null, { particles: false })));
+  objs.forEach((obj, i) => {
+    if (!obj) return;
+    obj.position.set(...parts[i][2]);
+    group.add(obj);
+  });
+  await texturesReady();
+  // Behind the piece, over the middle track (a building: toward its side), looking along it
+  const cam = new THREE.PerspectiveCamera(58, 1, 1, 3000);
+  const reach = Math.min(length, 360);
+  const sideX = card.side === 'left' ? 1 : card.side === 'right' ? -1 : 0; // (the game's left is +X)
+  // (a landmark is far bigger than a segment: from higher and further back)
+  const landmark = /^boundary_epic_/.test(card.slot ?? '');
+  cam.position.set(10 * sideX, landmark ? 110 : 50, landmark ? -90 : -24);
+  cam.lookAt(30 * sideX, landmark ? 30 : 6, landmark ? reach * 0.8 : reach * 0.5);
+  const target = floatDepthTarget(CARD_SIZE, CARD_SIZE);
+  const fogOn = globals.uFogOn.value;
+  const res = globals.uResolution.value.clone();
+  const clip = renderer.clippingPlanes;
+  globals.uFogOn.value = 0;
+  globals.uResolution.value.set(CARD_SIZE, CARD_SIZE);
+  setBendDegrees(0, 0);
+  renderer.clippingPlanes = [];
+  renderer.setRenderTarget(target);
+  renderer.setClearColor(globals.uFogColor.value, 1); // the city's own haze behind
+  renderer.clear();
+  renderer.render(group, cam);
+  const pixels = new Uint8Array(CARD_SIZE * CARD_SIZE * 4);
+  renderer.readRenderTargetPixels(target, 0, 0, CARD_SIZE, CARD_SIZE, pixels);
+  renderer.setRenderTarget(null);
+  renderer.setClearColor(0x000000, 1);
+  renderer.clippingPlanes = clip;
+  globals.uFogOn.value = fogOn;
+  globals.uResolution.value.copy(res);
+  applyBend();
+  target.dispose();
+  const out = document.createElement('canvas');
+  out.width = out.height = CARD_SIZE;
+  const ctx2d = out.getContext('2d');
+  const img = ctx2d.createImageData(CARD_SIZE, CARD_SIZE);
+  const row = CARD_SIZE * 4;
+  for (let y = 0; y < CARD_SIZE; y++) img.data.set(pixels.subarray((CARD_SIZE - 1 - y) * row, (CARD_SIZE - y) * row), y * row);
+  ctx2d.putImageData(img, 0, 0);
+  return out.toDataURL('image/jpeg', 0.85);
+}
 
 const ui = createUI(manifest, {
   getState: () => state,
@@ -2468,8 +2604,10 @@ const ui = createUI(manifest, {
   openStudio,
   timeButton: timeDeck.button,
   camerasButton: cameraDeck.button,
+  // (≤ 1.43 maps are hand-built chunks of their own: no pieces to lay)
+  chunksButton: chunkCards(manifest, state.theme, state.gen).length ? chunkDeck.button : null,
   // The header's Back button while a bar or the studio is open
-  closePanels: () => (generation.close(), view.close(), timeDeck.close(), cameraDeck.close(), studio.active && exitStudio()),
+  closePanels: () => (generation.close(), view.close(), timeDeck.close(), cameraDeck.close(), chunkDeck.close(), studio.active && exitStudio()),
   shotOptions,
   thumbnail: themeThumbnail,
   saveThumbnail: async (dataUrl) => {

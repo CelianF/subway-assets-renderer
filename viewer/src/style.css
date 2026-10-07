@@ -718,3 +718,187 @@ body.studio #view {
   padding: 5px 8px;
   color: var(--muted);
 }
+
+/* ---------------------------------------------------------------- Chunk mode (chunks.js) */
+/* Your map: a strip along the top, under the header; the cards in the bottom bar */
+.chunk-strip {
+  position: fixed;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(1200px, calc(100vw - 24px));
+  padding: 8px 12px 10px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  backdrop-filter: blur(12px);
+  box-sizing: border-box;
+}
+.chunk-strip-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.chunk-summary {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.chunk-scroller {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
+}
+.chunk-items {
+  display: flex;
+  gap: 3px;
+  min-height: 92px;
+  align-items: stretch;
+}
+.chunk-item {
+  position: relative;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+  cursor: grab;
+}
+.chunk-item:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.chunk-item.warn {
+  border-color: #ff9a3c;
+  box-shadow: inset 0 0 0 1px #ff9a3c;
+}
+.chunk-item > .chunk-thumb {
+  width: 100%;
+  height: 64px;
+}
+.chunk-buildings {
+  flex-direction: row;
+}
+/* A building segment: its left and right sides, each droppable (the game's left is on the left) */
+.chunk-half {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chunk-half + .chunk-half {
+  border-left: 1px solid var(--panel-border);
+}
+.chunk-half .chunk-thumb {
+  width: 100%;
+  height: 64px;
+}
+.chunk-half.target {
+  background: rgba(255, 204, 51, 0.25);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.chunk-thumb {
+  display: block;
+  object-fit: cover;
+  background: #1b2230;
+}
+.chunk-name {
+  display: block;
+  padding: 2px 4px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chunk-badge {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  color: #ff9a3c;
+  font-size: 13px;
+  text-shadow: 0 1px 2px #000;
+}
+.chunk-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  padding: 0 5px;
+  line-height: 16px;
+  font-size: 13px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+}
+.chunk-item:hover .chunk-remove {
+  opacity: 1;
+}
+.chunk-marker {
+  position: absolute;
+  top: 0;
+  bottom: 4px;
+  width: 3px;
+  margin-left: -1px;
+  background: var(--accent);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.chunk-marker.hidden {
+  display: none;
+}
+.chunk-empty {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  color: var(--muted);
+}
+.chunk-warnings:empty {
+  display: none;
+}
+.chunk-warnings {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+.chunk-warning {
+  color: #ffb36b;
+}
+.chunk-palette {
+  width: min(1200px, calc(100vw - 24px));
+}
+.chunk-cards {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.chunk-card {
+  flex: none;
+  width: 112px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 9px;
+  text-align: left;
+  cursor: grab;
+}
+.chunk-card .chunk-thumb {
+  width: 112px;
+  height: 112px;
+}
+.chunk-card .chunk-name {
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.chunk-strip.hidden,
+.chunk-palette.hidden {
+  display: none;
+}
+.chunk-half .chunk-name {
+  font-size: 10px;
+  text-align: center;
+}

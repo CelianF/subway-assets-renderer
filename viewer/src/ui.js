@@ -36,6 +36,7 @@ export const prettyTheme = (t) => t.replace(/^\d+\.\d+_/, '').replace(/([a-z])([
  *                   thumbnail() -> dataURL, saveThumbnail(dataURL), openGeneration, openView, openStudio,
  *                   timeButton: toolbar button of the time deck (time.js),
  *                   camerasButton: toolbar button of the saved camera spots (cameras.js),
+ *                   chunksButton: toolbar button of Chunk mode (chunks.js), or null,
  *                   shotOptions: settings.js controls }
  */
 export function createUI(manifest, actions) {
@@ -196,6 +197,7 @@ export function createUI(manifest, actions) {
           ['. (Shift)', 'Next frame (10 frames)'],
           ['[ / ]', 'Slower / faster'],
           ['5 / C', 'Cameras: save spots, jump back'],
+          ['6', 'Chunks: lay your own map'],
           ['Tab', 'Hide / show the interface'],
           ['P', 'Screenshot'],
           ...(DEBUG ? [['B', 'Piece browser']] : []),
@@ -248,6 +250,7 @@ export function createUI(manifest, actions) {
       el('button', { title: 'Seed, game mode, map sections and building pieces (1)', onclick: () => actions.openGeneration() }, '🗺 Generation'),
       el('button', { title: 'Camera, fog, skyline, glass and bend (2)', onclick: () => actions.openView() }, '🎨 View'),
       el('button', { title: 'Place trains and obstacles yourself (3)', onclick: () => actions.openStudio() }, '✏️ Studio'),
+      actions.chunksButton ?? null,
       actions.timeButton ?? null,
       actions.camerasButton ?? null,
       // Piece browser: a debug tool, only with ?debug=true
