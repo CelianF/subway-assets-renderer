@@ -902,3 +902,48 @@ body.studio #view {
   font-size: 10px;
   text-align: center;
 }
+/* A section's length: − n + under its name */
+.chunk-length {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px 4px;
+}
+.chunk-length button {
+  padding: 0 7px;
+  line-height: 18px;
+  font-size: 13px;
+}
+.chunk-length button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.chunk-count {
+  min-width: 16px;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+/* Buildings in two steps: the bar's step, the segment waiting for its right side */
+.chunk-step {
+  color: var(--accent);
+  font-weight: 600;
+}
+.chunk-pick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 64px;
+  font-size: 22px;
+  color: var(--accent);
+}
+.chunk-half.awaiting {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  animation: chunk-await 1.2s ease-in-out infinite;
+}
+@keyframes chunk-await {
+  50% {
+    background: rgba(255, 204, 51, 0.18);
+  }
+}

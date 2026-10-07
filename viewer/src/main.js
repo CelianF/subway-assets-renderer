@@ -6,7 +6,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, setBendDegrees, globals, setFog, createSky, setTrackCuts, setChallengeRunners, setChallengeRunner, MAX_ALT_ZONES, setReversedDepth, texturesReady, zoneClipped, makeZoneUniforms } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs, chunkCards, chunkLength, checkPlan } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs, chunkCards, chunkLength, checkPlan, normalizePlan, sectionPiecesOf, MAX_SECTION_LENGTH } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
@@ -1141,7 +1141,8 @@ const state = {
 };
 // Chunk mode's map (chunks.js): kept per environment in this browser; `on` while it lays the run
 const savedChunks = loadChunks();
-if (savedChunks.on && Array.isArray(savedChunks.plan)) state.gen.plan = savedChunks.plan;
+// (maps laid before sections came: their station, tube… pieces become whole sections)
+if (savedChunks.on && Array.isArray(savedChunks.plan)) state.gen.plan = normalizePlan(savedChunks.plan);
 function loadChunks() {
   try {
     return JSON.parse(localStorage.getItem(`chunks:${ENV_ID}`) ?? '{}') ?? {};
@@ -2477,7 +2478,7 @@ const cameraDeck = createCameraDeck(document.getElementById('ui'), {
 // ---------------------------------------------------------------- chunk mode
 
 /** The run as Chunk mode would lay it from scratch: the generated run's own chunks. */
-const generatedPlan = () => generateLayout(manifest, state.theme, { ...state, trainTheme: trainTheme(), gen: { ...state.gen, plan: null } }).plan;
+const generatedPlan = () => normalizePlan(generateLayout(manifest, state.theme, { ...state, trainTheme: trainTheme(), gen: { ...state.gen, plan: null } }).plan);
 let chunkRebuild = null;
 const chunkDeck = createChunkDeck(document.getElementById('ui'), {
   groups: () => chunkCards(manifest, state.theme, state.gen),
@@ -2496,8 +2497,9 @@ const chunkDeck = createChunkDeck(document.getElementById('ui'), {
     state.gen.plan = null;
     rebuild();
   },
-  check: (plan) => checkPlan(plan, manifest),
+  check: (plan) => checkPlan(plan),
   lengthOf: (e) => chunkLength(manifest, e),
+  maxLength: MAX_SECTION_LENGTH,
   thumbnail: (card) => chunkThumbnail(card),
   goTo: (z) => {
     // Behind the chunk, a little above the tracks, looking down the run
@@ -2527,9 +2529,25 @@ function chunkThumbnail(card) {
 }
 async function renderChunkThumbnail(card) {
   const slots = Object.assign({}, ...Object.values(manifest.themes[state.theme]));
-  const length = chunkLength(manifest, card.type === 'gate' ? { type: 'gate' } : card.type === 'piece' ? card : { type: 'buildings' });
   const parts = []; // [prefab, trackType, [x, y, z]]
-  if (card.type === 'gate') {
+  // A section: its start, one middle and its end, one after the other
+  const pieces = card.type === 'section' ? sectionPiecesOf(manifest, state.theme, { kind: card.kind, length: 1 }, state.gen) : null;
+  const length = pieces ? chunkLength(manifest, { type: 'section', kind: card.kind, length: 1 }) : chunkLength(manifest, card.type === 'gate' ? { type: 'gate' } : card.type === 'piece' ? card : { type: 'buildings' });
+  if (pieces) {
+    let pz = 0;
+    for (const p of pieces) {
+      parts.push([p.prefab, null, [0, 0, pz]]);
+      const info = manifest.boundaries?.[state.theme]?.trackInfos?.[p.slot];
+      const pieceLength = chunkLength(manifest, p);
+      if (slots.track_track?.[0] && info?.SpawnTracks !== false) {
+        for (let tz = pz; tz < pz + pieceLength; tz += 180) for (const x of [-20, 0, 20]) parts.push([slots.track_track[0], info?.ShowShadows ? 'TrackShadow' : 'TrackNormal', [x, 0, tz]]);
+      }
+      if (card.kind === 'station' && slots.special_station_platform?.[0]) for (let tz = pz; tz + 180 <= pz + pieceLength; tz += 180) parts.push([slots.special_station_platform[0], null, [0, 0, tz]]);
+      pz += pieceLength;
+    }
+    // A tube's entrance (a transition of the theme, not a piece of its own)
+    for (const t of manifest.boundaries?.[state.theme]?.transitions ?? []) if (t.slot === pieces[0]?.slot && t.at === 'start') parts.push([t.prefab, null, [0, 0, 0]]);
+  } else if (card.type === 'gate') {
     if (slots.track_gates?.[0]) parts.push([slots.track_gates[0], null, [0, 0, 0]]);
     if (card.wall && slots[card.wall]?.[0]) parts.push([slots[card.wall][0], null, [0, 0, 0]]);
     parts.push([card.prefab, null, [0, 0, 0]]);
@@ -2557,7 +2575,7 @@ async function renderChunkThumbnail(card) {
   const reach = Math.min(length, 360);
   const sideX = card.side === 'left' ? 1 : card.side === 'right' ? -1 : 0; // (the game's left is +X)
   // (a landmark is far bigger than a segment: from higher and further back)
-  const landmark = /^boundary_epic_/.test(card.slot ?? '');
+  const landmark = card.kind === 'epic' || /^boundary_epic_/.test(card.slot ?? '');
   cam.position.set(10 * sideX, landmark ? 110 : 50, landmark ? -90 : -24);
   cam.lookAt(30 * sideX, landmark ? 30 : 6, landmark ? reach * 0.8 : reach * 0.5);
   const target = floatDepthTarget(CARD_SIZE, CARD_SIZE);

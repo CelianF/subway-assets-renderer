@@ -116,11 +116,74 @@ const GATE_WALLS = ['special_gate_left', 'special_gate_mid', 'special_gate_right
 export function chunkKind(e) {
   if (e.type === 'buildings') return 'buildings';
   if (e.type === 'gate') return 'gate';
+  if (e.type === 'section') return e.kind;
   return e.slot?.match(/^boundary_(station|tube|pillars|epic)/)?.[1] ?? 'other';
 }
 
+/**
+ * Sections Chunk mode lays whole: a start, `length` middles and an end (a tube: `length`
+ * tube pieces, its entrance and exit come with it). Default lengths in the game's ranges.
+ */
+export const SECTIONS = {
+  station: { label: 'Station', parts: ['boundary_station_start', 'boundary_station_mid', 'boundary_station_end'], length: 2 },
+  tube: { label: 'Tube', parts: [null, 'boundary_tube', null], length: 3 },
+  pillars: { label: 'Pillar hall', parts: ['boundary_pillars_start', 'boundary_pillars_mid', 'boundary_pillars_end'], length: 2 },
+  epic: { label: 'Landmark', parts: ['boundary_epic_start', 'boundary_epic_mid', 'boundary_epic_end'], length: 1 },
+};
+export const MAX_SECTION_LENGTH = 10;
+const PARTS = ['start', 'mid', 'end'];
+
+/** A section chunk's pieces in order, each its own prefab if the chunk kept one, else the theme's first. */
+function sectionPieces(slots, e) {
+  const def = SECTIONS[e.kind];
+  if (!def) return [];
+  const piece = (i) => {
+    const slot = def.parts[i];
+    const own = e.prefabs?.[PARTS[i]];
+    const prefab = slots[slot]?.includes(own) ? own : slots[slot]?.[0];
+    return slot && prefab ? [{ type: 'piece', slot, prefab }] : [];
+  };
+  const n = Math.max(1, Math.min(MAX_SECTION_LENGTH, Math.round(e.length ?? def.length)));
+  return [...piece(0), ...Array.from({ length: n }, () => piece(1)).flat(), ...piece(2)];
+}
+
+/** sectionPieces for a theme (chunk cards' pictures). */
+export function sectionPiecesOf(manifest, themeName, e, gen = null) {
+  return sectionPieces(themeSlots(manifest, themeName, null, gen), e);
+}
+
+/**
+ * A chunk list with its station, tube, pillar hall and landmark pieces merged into whole
+ * sections (the generated run's, maps laid before sections came): one per start, its
+ * middles counted as its length.
+ */
+export function normalizePlan(plan) {
+  const out = [];
+  for (const e of plan ?? []) {
+    const kind = e.type === 'piece' ? chunkKind(e) : null;
+    if (!SECTIONS[kind]) {
+      out.push(e);
+      continue;
+    }
+    const part = kind === 'tube' ? 'mid' : e.slot.match(/_(start|mid|end)$/)?.[1];
+    const last = out[out.length - 1];
+    // A new section on a start, or where the previous one of its kind is done (its end)
+    const open = last?.type === 'section' && last.kind === kind && !last.done && part !== 'start';
+    const section = open ? last : { type: 'section', kind, length: 0, prefabs: {} };
+    if (!open) out.push(section);
+    if (part === 'mid') section.length++;
+    section.prefabs[part] ??= e.prefab;
+    if (part === 'end') section.done = true;
+  }
+  for (const e of out) {
+    if (e.type !== 'section') continue;
+    e.length = Math.max(1, Math.min(MAX_SECTION_LENGTH, e.length || SECTIONS[e.kind].length));
+    delete e.done;
+  }
+  return out;
+}
+
 const KIND_NAMES = { buildings: 'buildings', station: 'station', tube: 'tube', pillars: 'pillar hall', epic: 'landmark', gate: 'gate' };
-const PART_NAMES = { start: 'start', mid: 'middle', end: 'end' };
 
 /**
  * Chunk mode's cards: every piece the theme can lay, by group. Buildings are one side of a
@@ -147,14 +210,17 @@ export function chunkCards(manifest, themeName, gen = null) {
     numbered(real(slot), `Ad ${slot.endsWith('front') ? 'front' : 'back'}`).map((c) => ({ id: `${slot}|${c.prefab}`, type: 'right', slot, prefab: c.prefab, side: 'right', label: c.label })),
   );
   if (ads.length) groups.push({ group: 'Ads', cards: ads });
-  const piece = (group, list) => {
-    const cards = list.flatMap(([slot, label]) => numbered(real(slot), label).map((c) => ({ id: `${slot}|${c.prefab}`, type: 'piece', slot, prefab: c.prefab, label: c.label })));
-    if (cards.length) groups.push({ group, cards });
-  };
-  piece('Station', [['boundary_station_start', 'Station start'], ['boundary_station_mid', 'Station middle'], ['boundary_station_end', 'Station end']]);
-  piece('Tube', [['boundary_tube', 'Tube']]);
-  piece('Pillar hall', [['boundary_pillars_start', 'Pillars start'], ['boundary_pillars_mid', 'Pillars middle'], ['boundary_pillars_end', 'Pillars end']]);
-  piece('Landmark', [['boundary_epic_start', 'Landmark start'], ['boundary_epic_mid', 'Landmark middle'], ['boundary_epic_end', 'Landmark end']]);
+  // Sections, laid whole (start, middles, end): their length is set on the strip
+  const sections = Object.entries(SECTIONS)
+    .filter(([, def]) => def.parts.every((slot) => !slot || has(slot) || (slot === 'boundary_epic_mid' || slot === 'boundary_epic_end')))
+    .map(([kind, def]) => {
+      const main = def.parts[0] ?? def.parts[1];
+      const start = manifest.prefabs[real(main)[0]];
+      // A landmark modeled whole in its start (empty mid and end): its length is its own
+      const whole = kind === 'epic' && (start?.mainDepth ?? start?.bbox?.[1][2] ?? 0) > 2.5 * slotLength(manifest, main, start);
+      return { id: `section|${kind}`, type: 'section', kind, length: def.length, adjustable: !whole, prefab: real(main)[0], label: def.label };
+    });
+  if (sections.length) groups.push({ group: 'Sections', cards: sections });
   if (has('boundary_gate') && has('track_gates')) {
     const walls = GATE_WALLS.filter(has);
     const names = { special_gate_left: 'Gate, open left', special_gate_mid: 'Gate, open middle', special_gate_right: 'Gate, open right', special_gate_sides: 'Gate, open sides' };
@@ -167,56 +233,32 @@ export function chunkCards(manifest, themeName, gen = null) {
 /** A chunk's length along the run (a building segment: 180). */
 export function chunkLength(manifest, e) {
   if (e.type === 'buildings') return SEGMENT;
+  if (e.type === 'section') {
+    const def = SECTIONS[e.kind];
+    const n = Math.max(1, Math.min(MAX_SECTION_LENGTH, Math.round(e.length ?? def.length)));
+    const of = (i) => (def.parts[i] ? slotLength(manifest, def.parts[i], manifest.prefabs[e.prefabs?.[PARTS[i]]]) : 0);
+    return of(0) + n * of(1) + of(2);
+  }
   const slot = e.type === 'gate' ? 'track_gates' : e.slot;
   const prefab = manifest.prefabs[e.type === 'gate' ? null : e.prefab];
   return Math.max(slotLength(manifest, slot, prefab), e.type === 'gate' ? slotLength(manifest, 'boundary_gate', null) : 0);
 }
 
 /**
- * What the game would never lay (its sections always come whole, with buildings between):
+ * What the game would never lay: a run that doesn't open with buildings, two interiors
+ * (stations, tubes, pillar halls, landmarks, gates) with no buildings between them.
  * [{ index, message }] for the chunks where it goes wrong.
  */
-export function checkPlan(plan, manifest = null) {
+export function checkPlan(plan) {
   const out = [];
-  // A landmark modeled whole in its start (its mid and end are empty placeholders) needs no more
-  const whole = (e) => {
-    const start = manifest?.prefabs[e.prefab];
-    return !!start && (start.mainDepth ?? start.bbox?.[1][2] ?? 0) > 2.5 * slotLength(manifest, 'boundary_epic_start', start);
-  };
   const warn = (index, message) => out.push({ index, message });
   if (plan.length && chunkKind(plan[0]) !== 'buildings') warn(0, 'The game always opens a run with buildings');
-  // Stretches of one kind
-  const stretches = [];
   plan.forEach((e, i) => {
-    const kind = chunkKind(e);
-    const last = stretches[stretches.length - 1];
-    if (last && last.kind === kind && kind !== 'gate') last.items.push(i);
-    else stretches.push({ kind, items: [i] });
-  });
-  stretches.forEach((st, si) => {
-    const name = KIND_NAMES[st.kind] ?? st.kind;
-    // Two interiors (anything but buildings) next to each other
-    const prev = stretches[si - 1];
-    if (prev && prev.kind !== 'buildings' && st.kind !== 'buildings') {
-      warn(st.items[0], prev.kind === st.kind ? `Two ${name}s back to back: the game puts buildings between them` : `A ${name} right after a ${KIND_NAMES[prev.kind] ?? prev.kind}: the game always puts buildings between them`);
-    }
-    // Start, middles, end, in that order (a landmark: one of each)
-    if (!['station', 'pillars', 'epic'].includes(st.kind)) return;
-    const parts = st.items.map((i) => plan[i].slot.match(/_(start|mid|end)$/)?.[1]);
-    if (st.kind === 'epic' && parts.length === 1 && parts[0] === 'start' && whole(plan[st.items[0]])) return;
-    const title = `${name[0].toUpperCase()}${name.slice(1)}`;
-    parts.forEach((part, k) => {
-      const i = st.items[k];
-      const before = parts[k - 1];
-      if (part === 'start' && k > 0) warn(i, `${title} start in the middle of a ${name}`);
-      else if (part !== 'start' && k === 0) warn(i, `${title} ${PART_NAMES[part]} without a ${name} start before it`);
-      else if (part === 'mid' && before === 'end') warn(i, `${title} middle after its end`);
-      else if (part === 'end' && before === 'end') warn(i, `Two ${name} ends in a row`);
-      else if (st.kind === 'epic' && part === before) warn(i, `The landmark has one ${PART_NAMES[part]}`);
-      else if (st.kind === 'epic' && part === 'end' && before === 'start' && parts.length === 2) warn(i, 'Landmark middle missing');
-    });
-    if (st.kind !== 'epic' && parts.length && !parts.includes('mid')) warn(st.items.at(-1), `${title} without a middle`);
-    if (parts.at(-1) !== 'end') warn(st.items.at(-1), `${title} without its end`);
+    if (i === 0) return;
+    const [kind, prev] = [chunkKind(e), chunkKind(plan[i - 1])];
+    if (kind === 'buildings' || prev === 'buildings') return;
+    const [name, prevName] = [KIND_NAMES[kind] ?? kind, KIND_NAMES[prev] ?? prev];
+    warn(i, kind === prev ? `Two ${name}s back to back: the game puts buildings between them` : `A ${name} right after a ${prevName}: the game always puts buildings between them`);
   });
   return out;
 }
@@ -1009,7 +1051,9 @@ export function generateLayout(
    * sides). What the sections add around their pieces still comes: a station's platforms
    * and ground, a pillar hall's pillars, a gate's wall and gap in the rails.
    */
-  function buildPlan(plan) {
+  function buildPlan(sections) {
+    // Whole sections laid out as their pieces
+    const plan = sections.flatMap((e) => (e.type === 'section' ? sectionPieces(slots, e) : [e]));
     const spans = []; // { kind, z0, z1 } per chunk
     let wholeLandmark = false; // its start models all three slots: mid/end only keep their length
     const exact = (slot, prefab) => (slots[slot]?.includes(prefab) ? prefab : choose(slot, slots[slot]));

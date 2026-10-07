@@ -1,7 +1,8 @@
 // Chunk mode: lay your own map, piece by piece. The bottom bar holds every piece the city
 // can lay (a 3D card each); the strip at the top is the run, start to end. Drag cards onto
 // the strip (or click them to add at the end), drag in the strip to reorder, click a chunk
-// to fly there. The map rebuilds as the strip changes; what the game would never lay (two
+// to fly there. Stations, tubes, pillar halls and landmarks come whole (start, middles,
+// end), their length set on the strip. The map rebuilds as the strip changes; what the game would never lay (two
 // interiors back to back, a station without its start) is flagged.
 
 const PX_PER_UNIT = 72 / 180; // a 180-long segment is 72px wide in the strip
@@ -32,7 +33,10 @@ export function createChunkDeck(root, ctx) {
   let drag = null; // { card } from the bar, or { index } from the strip
 
   const cardsById = () => new Map(ctx.groups().flatMap((g) => g.cards).map((c) => [c.id, c]));
-  const cardIds = (e) => (e.type === 'buildings' ? ['left', 'right'].map((side) => e[side] && `${e[side].slot}|${e[side].prefab}`) : [e.type === 'gate' ? `gate|${e.wall}` : `${e.slot}|${e.prefab}`]);
+  const cardIds = (e) =>
+    e.type === 'buildings' ? ['left', 'right'].map((side) => e[side] && `${e[side].slot}|${e[side].prefab}`)
+    : e.type === 'section' ? [`section|${e.kind}`]
+    : [e.type === 'gate' ? `gate|${e.wall}` : `${e.slot}|${e.prefab}`];
 
   /** A thumbnail <img>, filled in when its card is rendered. */
   function thumb(card) {
@@ -48,14 +52,45 @@ export function createChunkDeck(root, ctx) {
     return `${card.slot.match(/_(low|medium|high)_/)?.[1]?.[0].toUpperCase() ?? ''}${card.label.match(/\d+$/)?.[0] ?? ''}`;
   }
 
-  /** The chunk a card lays on its own: a building side gets a segment, its other side the same height's first. */
+  /** A building side's partner of the same height (the first one; an ad's: a low building). */
+  function partnerOf(slot, side) {
+    const height = slot.match(/_(low|medium|high)_/)?.[1] ?? 'low';
+    const card = [...cardsById().values()].find((c) => c.slot === `boundary_${height}_${side}`);
+    return card ? { slot: card.slot, prefab: card.prefab } : null;
+  }
+
+  /**
+   * The chunk a card lays on its own. A left building starts a segment that waits for its
+   * right side (the bar then shows the rights); a right one (onto a gap) takes the same
+   * height's left.
+   */
   function chunkOf(card) {
     if (card.type === 'gate') return { type: 'gate', wall: card.wall };
+    if (card.type === 'section') return { type: 'section', kind: card.kind, length: card.length };
     if (card.type === 'piece') return { type: 'piece', slot: card.slot, prefab: card.prefab };
-    const other = card.side === 'left' ? 'right' : 'left';
-    const height = card.slot.match(/_(low|medium|high)_/)?.[1] ?? 'low';
-    const partner = [...cardsById().values()].find((c) => c.slot === `boundary_${height}_${other}`);
-    return { type: 'buildings', [card.side]: { slot: card.slot, prefab: card.prefab }, ...(partner ? { [other]: { slot: partner.slot, prefab: partner.prefab } } : {}) };
+    const side = { slot: card.slot, prefab: card.prefab };
+    if (card.side === 'left') return { type: 'buildings', left: side, awaiting: true };
+    const left = partnerOf(card.slot, 'left');
+    return { type: 'buildings', ...(left ? { left } : {}), right: side };
+  }
+
+  // ---- the segment waiting for its right side (one at a time)
+  const awaitingIndex = (plan = ctx.plan() ?? []) => plan.findIndex((e) => e.awaiting);
+  /** Gives the waiting segment its right side: `right` (a card's), else the same height's. */
+  function fillAwaiting(plan, right = null) {
+    const i = awaitingIndex(plan);
+    if (i < 0) return plan;
+    const { awaiting, ...e } = plan[i];
+    const side = right ? { slot: right.slot, prefab: right.prefab } : partnerOf(e.left.slot, 'right');
+    return plan.map((c, k) => (k === i ? { ...e, ...(side ? { right: side } : {}) } : c));
+  }
+  /** Places a card: a left building waits for its right, a right one fills the waiting segment. */
+  function placeCard(card, at = null) {
+    let plan = [...(ctx.plan() ?? [])];
+    if (card.side === 'right' && awaitingIndex(plan) >= 0) return ctx.setPlan(fillAwaiting(plan, card));
+    if (card.side === 'left') plan = fillAwaiting(plan); // (a previous one gets its same-height right)
+    plan.splice(at ?? plan.length, 0, chunkOf(card));
+    ctx.setPlan(plan);
   }
 
   // ------------------------------------------------------------ the strip (top)
@@ -73,7 +108,7 @@ export function createChunkDeck(root, ctx) {
       el('strong', { class: 'workbar-title' }, 'Your map'),
       summary,
       el('span', { class: 'studio-sep' }),
-      el('span', { class: 'studio-hint' }, 'Drag to reorder · click to fly there · × removes'),
+      el('span', { class: 'studio-hint' }, 'Drag to reorder · − / + sets a section\'s length · click to fly there · × removes'),
     ),
     scroller,
     warnings,
@@ -96,9 +131,10 @@ export function createChunkDeck(root, ctx) {
           e.type === 'buildings'
             ? ['left', 'right'].map((side) => {
                 const card = e[side] && cards.get(`${e[side].slot}|${e[side].prefab}`);
+                if (side === 'right' && e.awaiting) return el('div', { class: 'chunk-half chunk-right awaiting', 'data-side': side, title: 'Pick its right side in the bar below' }, el('div', { class: 'chunk-thumb chunk-pick' }, '?'), el('span', { class: 'chunk-name' }, 'R?'));
                 return el('div', { class: `chunk-half chunk-${side}`, 'data-side': side, title: card?.label ?? '' }, thumb(card), el('span', { class: 'chunk-name' }, shortName(card, e[side])));
               })
-            : [thumb(cards.get(cardIds(e)[0])), el('span', { class: 'chunk-name' }, cards.get(cardIds(e)[0])?.label ?? e.slot ?? 'Gate')];
+            : [thumb(cards.get(cardIds(e)[0])), el('span', { class: 'chunk-name' }, cards.get(cardIds(e)[0])?.label ?? e.slot ?? 'Gate'), ...(e.type === 'section' ? [lengthControl(e, i, plan, cards.get(cardIds(e)[0]))] : [])];
         const item = el(
           'div',
           {
@@ -126,6 +162,25 @@ export function createChunkDeck(root, ctx) {
     warnings.replaceChildren(
       ...issues.slice(0, 3).map((w) => el('div', { class: 'chunk-warning' }, `⚠ Chunk ${w.index + 1}: ${w.message}`)),
       ...(issues.length > 3 ? [el('div', { class: 'chunk-warning' }, `… and ${issues.length - 3} more (hover the chunks)`)] : []),
+    );
+  }
+
+  /** A section's − n + (its middles, 1 to 10; a tube: its pieces). A landmark modeled whole has none. */
+  function lengthControl(e, i, plan, card) {
+    if (card && !card.adjustable) return el('span', { class: 'chunk-length' }, el('span', { class: 'chunk-count', title: 'Modeled whole: its own length' }, 'whole'));
+    const set = (n) => (ev) => {
+      ev.stopPropagation();
+      if (n < 1 || n > ctx.maxLength) return;
+      ctx.setPlan(plan.map((c, k) => (k === i ? { ...c, length: n } : c)));
+    };
+    const n = e.length ?? 1;
+    const what = e.kind === 'tube' ? 'tube pieces' : 'middles';
+    return el(
+      'span',
+      { class: 'chunk-length', title: `${n} ${what} (1 to ${ctx.maxLength})`, onclick: (ev) => ev.stopPropagation(), ondragstart: (ev) => ev.preventDefault() },
+      el('button', { title: 'Shorter', disabled: n <= 1, onclick: set(n - 1) }, '−'),
+      el('span', { class: 'chunk-count' }, String(n)),
+      el('button', { title: 'Longer', disabled: n >= ctx.maxLength, onclick: set(n + 1) }, '+'),
     );
   }
 
@@ -182,10 +237,13 @@ export function createChunkDeck(root, ctx) {
     const target = dropTarget(ev);
     const plan = [...(ctx.plan() ?? [])];
     if (drag.card && target.replace != null) {
-      // A building side onto a segment: that side changes
-      plan[target.replace] = { ...plan[target.replace], [target.side]: { slot: drag.card.slot, prefab: drag.card.prefab } };
+      // A building side onto a segment: that side changes (a waiting one gets its right)
+      const { awaiting, ...e } = plan[target.replace];
+      plan[target.replace] = { ...e, [target.side]: { slot: drag.card.slot, prefab: drag.card.prefab }, ...(awaiting && target.side === 'left' ? { awaiting } : {}) };
     } else if (drag.card) {
-      plan.splice(target.insert, 0, chunkOf(drag.card));
+      const card = drag.card;
+      endDrag();
+      return placeCard(card, target.insert);
     } else {
       const [moved] = plan.splice(drag.index, 1);
       plan.splice(target.insert > drag.index ? target.insert - 1 : target.insert, 0, moved);
@@ -217,13 +275,31 @@ export function createChunkDeck(root, ctx) {
   root.append(strip, palette);
 
   function renderBar() {
-    const groups = ctx.groups();
+    // Ads are right-hand buildings: they come with the rights
+    const all = ctx.groups();
+    const ads = all.find((g) => g.group === 'Ads')?.cards ?? [];
+    const groups = all.filter((g) => g.group !== 'Ads');
     if (!groups.some((g) => g.group === group)) group = groups[0]?.group ?? null;
+    // Buildings in two steps: a left side, then the right side to go with it
+    const awaiting = awaitingIndex() >= 0;
+    const steps =
+      group === 'Buildings'
+        ? awaiting
+          ? [
+              el('span', { class: 'chunk-step' }, '② Now its right side'),
+              el('button', { title: 'The right side of the same height', onclick: () => ctx.setPlan(fillAwaiting(ctx.plan() ?? [])) }, 'Same height'),
+              el('button', { title: 'Remove the segment waiting for its right side', onclick: () => ctx.setPlan((ctx.plan() ?? []).filter((e) => !e.awaiting)) }, 'Cancel'),
+            ]
+          : [el('span', { class: 'chunk-step' }, '① Pick a left side')]
+        : [];
     tabs.replaceChildren(
       el('strong', { class: 'workbar-title' }, 'Chunks'),
       ...groups.map((g) => el('button', { class: `tool ${g.group === group ? 'active' : ''}`, onclick: () => ((group = g.group), renderBar()) }, g.group)),
+      el('span', { class: 'studio-sep' }),
+      ...steps,
     );
-    const cards = groups.find((g) => g.group === group)?.cards ?? [];
+    let cards = groups.find((g) => g.group === group)?.cards ?? [];
+    if (group === 'Buildings') cards = awaiting ? [...cards.filter((c) => c.side === 'right'), ...ads] : cards.filter((c) => c.side === 'left');
     cardsRow.replaceChildren(
       ...cards.map((card) =>
         el(
@@ -233,8 +309,9 @@ export function createChunkDeck(root, ctx) {
             draggable: 'true',
             title: `${card.label} (${card.prefab})`,
             onclick: () => {
-              ctx.setPlan([...(ctx.plan() ?? []), chunkOf(card)]);
-              requestAnimationFrame(() => (scroller.scrollLeft = scroller.scrollWidth));
+              const end = card.side !== 'right' || awaitingIndex() < 0;
+              placeCard(card);
+              if (end) requestAnimationFrame(() => (scroller.scrollLeft = scroller.scrollWidth));
             },
             ondragstart: (ev) => {
               drag = { card };
@@ -266,6 +343,8 @@ export function createChunkDeck(root, ctx) {
   function close() {
     if (!shown) return;
     shown = false;
+    // A segment still waiting for its right side gets the same height's
+    if (awaitingIndex() >= 0) ctx.setPlan(fillAwaiting(ctx.plan() ?? []));
     strip.classList.add('hidden');
     palette.classList.add('hidden');
     document.body.classList.remove('workbar-open', 'chunk-mode');
