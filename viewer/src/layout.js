@@ -66,6 +66,23 @@ function slotLength(manifest, slot, prefab) {
   return Math.max(SEGMENT / 2, Math.floor((maxZ + OVERHANG) / (SEGMENT / 2)) * (SEGMENT / 2));
 }
 
+/**
+ * Whether a landmark's epic_start models all three slots, so mid/end only keep their length:
+ * its main mesh runs past 2.5 slots and reaches about where epic_end's own geometry ends.
+ * 3.62 Aloha Hawaii's does (its mid/end hold blockout letters); 1.98 Atlanta's stadium
+ * start is 910 deep but overlaps a mid and end that finish it (~1080).
+ */
+function landmarkWhole(manifest, slots, startPrefab, startLength) {
+  const start = manifest.prefabs[startPrefab];
+  const depth = start?.mainDepth ?? start?.bbox?.[1][2] ?? 0;
+  if (depth <= 2.5 * startLength) return false;
+  const mid = slots.boundary_epic_mid?.[0];
+  const end = manifest.prefabs[slots.boundary_epic_end?.[0]];
+  if (!end?.bbox) return true;
+  const endFar = startLength + slotLength(manifest, 'boundary_epic_mid', manifest.prefabs[mid]) + end.bbox[1][2];
+  return depth >= 0.95 * endFar;
+}
+
 export const TRAIN_KINDS = ['static', 'moving', 'falling'];
 /** Length of a train of `cars` wagons: 70 for the first, 60 per extra wagon. */
 export const trainLength = (cars) => 70 + 60 * (cars - 1);
@@ -975,8 +992,7 @@ export function generateLayout(
         // Showcase: the landmark's random groups set to one variant each time
         if (variants) items[before].variants = variants;
         // (by its main mesh: a prop parked further along doesn't make it whole)
-        const start = manifest.prefabs[items[before].prefab];
-        whole = (start?.mainDepth ?? start?.bbox?.[1][2] ?? 0) > 2.5 * (z - z0);
+        whole = landmarkWhole(manifest, slots, items[before].prefab, z - z0);
       } else if (whole) items.splice(before);
     }
   }
@@ -1091,8 +1107,7 @@ export function generateLayout(
         addRun('left', e.slot, z0, z);
         addRun('right', e.slot, z0, z);
         if (e.slot === 'boundary_epic_start') {
-          const start = manifest.prefabs[prefab];
-          wholeLandmark = (start?.mainDepth ?? start?.bbox?.[1][2] ?? 0) > 2.5 * (z - z0);
+          wholeLandmark = landmarkWhole(manifest, slots, prefab, z - z0);
         } else if (wholeLandmark && kind === 'epic') items.splice(before);
       }
       if (kind !== 'epic') wholeLandmark = false;

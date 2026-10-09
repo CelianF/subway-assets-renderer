@@ -1173,7 +1173,13 @@ async function fillPlaceholders(obj, placeholders, { layer, seed, cutMode, signa
     }
     for (const pick of picks) {
       jobs.push(
-        instantiate(pick.name, null, layer, Math.floor(rng() * 2 ** 31), null, null, cutMode).then((child) => child && node.add(child)),
+        instantiate(pick.name, null, layer, Math.floor(rng() * 2 ** 31), null, null, cutMode).then((child) => {
+          if (!child) return;
+          // The game keeps the spawned prefab's own scale (1.98 Atlanta's fountain jet)
+          const s = manifest.prefabs[pick.name]?.rootScale;
+          if (s) child.scale.multiply(new THREE.Vector3(...s));
+          node.add(child);
+        }),
       );
     }
   });
@@ -1789,13 +1795,15 @@ function themeWeather() {
   let best = null;
   let volume = 0;
   let leaves = null;
-  for (const p of Object.values(manifest.prefabs)) {
+  // (not a prop's own leaves, which fall where the prop stands: 1.98 Atlanta's trees)
+  const propFx = new Set(Object.values(manifest.prefabs).flatMap((p) => Object.values(p.placeholders ?? {}).flatMap((e) => e.prefabs.map((x) => x.name))));
+  for (const [prefab, p] of Object.entries(manifest.prefabs)) {
     for (const [name, def] of Object.entries(p.particles ?? {})) {
       if (!def.loop) continue;
       if (/snow/i.test(name) && def.shape?.type === 5) {
         const v = def.shape.box.reduce((a, b) => a * b, 1);
         if (v > volume) [best, volume] = [def, v];
-      } else if (/lea(f|ves)|petal|blossom/i.test(name)) leaves ??= def;
+      } else if (/lea(f|ves)|petal|blossom/i.test(name) && !propFx.has(prefab)) leaves ??= def;
     }
   }
   if (best || !leaves) return best;
@@ -2891,7 +2899,7 @@ if (params.get('z')) {
   camera.lookAt(orbit.target);
 }
 setControlMode(state.controls);
-window.__viewer = { time, motions, fly, renderScreenshot, screenshot, state, camera, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild };
+window.__viewer = { time, motions, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild };
 if (state.obstacleMode === 'studio' && state.studio.some((it) => ['coins', 'coinArc', 'pickup'].includes(it.type))) await ensurePickups();
 await rebuild();
 

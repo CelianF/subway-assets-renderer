@@ -1797,6 +1797,18 @@ function parsePlaceholders(file, guidIndex) {
   return out;
 }
 
+/** The prefab root's own scale when it isn't 1: 1.x placeholders keep it on the spawned copy
+ * (Placeholder.InitializeSpawnedInstance resets position and rotation only). [x, y, z] or null. */
+function parseRootScale(file) {
+  for (const { doc, kind } of yamlDocs(read(file))) {
+    if (kind !== '4' || !/\n {2}m_Father: \{fileID: 0\}/.test(doc)) continue;
+    const m = doc.match(/m_LocalScale: \{x: ([-\d.e]+), y: ([-\d.e]+), z: ([-\d.e]+)\}/);
+    const scale = m ? [1, 2, 3].map((i) => num(m[i])) : [1, 1, 1];
+    return scale.every((v) => Math.abs(v - 1) < 1e-4) ? null : scale;
+  }
+  return null;
+}
+
 /** 1.x EffectPlayer: shows its effect children one after the other (water ripples, wings).
  *
  * GameObject name -> { children: [names in order], duration, loop, randomStart }. */
@@ -3232,6 +3244,10 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     }
     const filled = Object.entries(placeholders).filter(([, e]) => e.prefabs.length);
     if (filled.length) info.placeholders = Object.fromEntries(filled);
+    const rootScale = parseRootScale(prefabPath);
+    // (a particle system in Shape scaling mode: the scale only stretches its emitter, see below)
+    const shapeScaled = rootScale && !info.bbox && /\n {2}scalingMode: 2/.test(read(prefabPath));
+    if (rootScale && !shapeScaled) info.rootScale = rootScale;
     const effects = parseEffectPlayers(prefabPath);
     if (Object.keys(effects).length) info.effectPlayers = effects;
     const particles = parseParticles(prefabPath, guidIndex);
@@ -3256,6 +3272,9 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       if (p.render.material) info.materials = sortedStrings(new Set([...(info.materials ?? []), p.render.material]));
     }
     if (Object.keys(particles).length) info.particles = particles;
+    // Shape scaling: the spawned copy keeps its root scale, which stretches the shape and its
+    // directions, not the particles (1.98 Atlanta's barbecue smoke rises as a column)
+    if (shapeScaled && particles[name]) particles[name].shape.scale = rootScale;
   }
 
   // No Floor effects' activated mesh (Plant Invasion's spiked vines)

@@ -71,6 +71,7 @@ const tmpA = new THREE.Vector4();
 const tmpB = new THREE.Vector4();
 const tmpCenter = new THREE.Vector3();
 const tmpRel = new THREE.Vector3();
+const forceTmp = new THREE.Vector3();
 const tmpEuler = new THREE.Euler();
 /** MinMaxGradient at normalized time t with random r. */
 function sampleColor(c, t, r, out) {
@@ -165,13 +166,22 @@ function shapeSpawn(shape, pos, dir) {
       if (shape.hasMesh === false) dir.set(0, 0, 1);
       else randomUnit(dir);
   }
-  if (shape.randomDirection) dir.lerp(randomUnit(new THREE.Vector3()), shape.randomDirection).normalize();
+  // (not on the Shape-scaled 1.98 Atlanta smoke: in game it rises in its 14° cone, one way)
+  if (shape.randomDirection && !shape.scale) {
+    const r = randomUnit(new THREE.Vector3());
+    // A cone's random directions stay on its open side (1.98 Atlanta's barbecue smoke and
+    // smoke bombs rise one way only, never back under the grill)
+    if ([4, 7, 8, 9].includes(shape.type) && r.dot(dir) < 0) r.negate();
+    dir.lerp(r, shape.randomDirection).normalize();
+  }
   if (shape.rotation?.some((v) => v)) {
     const e = new THREE.Euler(shape.rotation[0] * DEG, shape.rotation[1] * DEG, shape.rotation[2] * DEG, 'ZXY');
     pos.applyEuler(e);
     dir.applyEuler(e);
   }
   if (shape.position) pos.add(new THREE.Vector3(...shape.position));
+  // Shape scaling mode: the emitter's own scale moves the start positions only
+  if (shape.scale) pos.multiply(new THREE.Vector3(...shape.scale));
   return dir;
 }
 
@@ -561,12 +571,14 @@ class Emitter {
     if (!this.gravityLocal) {
       // World down and the emitter's scale, in its local frame (pieces never move)
       this.node.updateWorldMatrix(true, false);
-      const inv = new THREE.Matrix4().copy(this.node.matrixWorld).invert();
-      this.gravityLocal = new THREE.Vector3(0, -9.81, 0).transformDirection(inv).multiplyScalar(9.81);
+      // (world vectors through the inverse frame, scale included: 1.98 Atlanta's fountain is
+      // turned 90° on X and stretched 2.3 x 2.4 x 4.5, its world-down force must stay down)
+      const inv = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().copy(this.node.matrixWorld).invert());
+      this.toLocal = inv;
+      this.gravityLocal = new THREE.Vector3(0, -9.81, 0).applyMatrix3(inv); // per unit of gravity modifier
       const s = new THREE.Vector3().setFromMatrixScale(this.node.matrixWorld);
       this.scale = (Math.abs(s.x) + Math.abs(s.y) + Math.abs(s.z)) / 3;
       if (this.material.uniforms.uScale) this.material.uniforms.uScale.value = this.scale;
-      this.downScale = 1 / Math.max(this.scale, 1e-4); // gravity in world units per second²
     }
     this.time += dt;
     const local = this.time - this.delay;
@@ -595,7 +607,7 @@ class Emitter {
         if (this.burstDone.size > 256) this.burstDone.clear();
       }
     }
-    const g = sample(d.gravity, 0) * this.downScale;
+    const g = sample(d.gravity, 0);
     const vel = d.velocity;
     const force = d.force;
     for (let i = this.count - 1; i >= 0; i--) {
@@ -614,9 +626,19 @@ class Emitter {
       }
       const lt = this.age[i] / this.life[i];
       if (force) {
-        v[p] -= sample(force.x, lt, this.rand[i * 2]) * dt;
-        v[p + 1] += sample(force.y, lt, this.rand[i * 2]) * dt;
-        v[p + 2] += sample(force.z, lt, this.rand[i * 2]) * dt;
+        const fx = -sample(force.x, lt, this.rand[i * 2]) * dt;
+        const fy = sample(force.y, lt, this.rand[i * 2]) * dt;
+        const fz = sample(force.z, lt, this.rand[i * 2]) * dt;
+        if (force.world) {
+          const f = forceTmp.set(fx, fy, fz).applyMatrix3(this.toLocal);
+          v[p] += f.x;
+          v[p + 1] += f.y;
+          v[p + 2] += f.z;
+        } else {
+          v[p] += fx;
+          v[p + 1] += fy;
+          v[p + 2] += fz;
+        }
       }
       let ex = 0;
       let ey = 0;
@@ -726,7 +748,9 @@ class Emitter {
     }
     for (let i = 0; i < this.count; i++) {
       const lt = this.age[i] / this.life[i];
-      const size = this.size0[i] * (d.sizeOverLife ? sample(d.sizeOverLife, lt, this.rand[i * 2]) : 1);
+      // (Shape-scaled smoke, 1.98 Atlanta: its old puffs up to 30% bigger, matched to the game by eye)
+      const grow = d.shape?.scale ? 1 + 0.3 * lt : 1;
+      const size = grow * this.size0[i] * (d.sizeOverLife ? sample(d.sizeOverLife, lt, this.rand[i * 2]) : 1);
       const frame = this.frameOf(i, lt);
       this.posAttr.setXYZ(i, this.local.pos[i * 3], this.local.pos[i * 3 + 1], this.local.pos[i * 3 + 2]);
       this.velAttr.setXYZ(i, this.local.vel[i * 3], this.local.vel[i * 3 + 1], this.local.vel[i * 3 + 2]);
