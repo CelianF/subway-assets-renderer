@@ -165,7 +165,9 @@ function borrowPrefabs(envId, other, names, materialNames = []) {
   const abs = (url) => (url && !url.startsWith('/') ? `${base}/${url}` : url);
   const mats = new Set(materialNames);
   for (const name of names) {
-    if (manifest.prefabs[name] || !other.prefabs[name]) continue;
+    // (an entry this map's export couldn't build, without a glb, is replaced)
+    const own = manifest.prefabs[name];
+    if ((own && (own.glb || own.parts || own.node)) || !other.prefabs[name]) continue;
     const copy = structuredClone(other.prefabs[name]);
     copy.glb = abs(copy.glb);
     for (const cfg of Object.values(copy.trackConfigs ?? {})) cfg.glb = abs(cfg.glb);
@@ -196,17 +198,32 @@ function borrowPrefabs(envId, other, names, materialNames = []) {
 let pickupsReady = null;
 function ensurePickups() {
   pickupsReady ??= (async () => {
-    if (manifest.pickups?.length) return;
+    // Cities downloaded with "Import map" have most pickups but not all (the shared kit
+    // misses the hunt tokens and Trick or Treat's): those borrow what they lack too
+    if (manifest.pickups?.length && manifest.huntTokens?.length) return;
     const version = (e) => (/^\d/.test(e.gameVersion ?? '') ? e.gameVersion : '0');
-    const donor = envList
+    const donors = envList
       .filter((e) => e.pickups && e.id !== ENV_ID)
-      .sort((a, b) => (b.gameVersion === envInfo.gameVersion) - (a.gameVersion === envInfo.gameVersion) || version(b).localeCompare(version(a), undefined, { numeric: true }))[0];
+      .sort((a, b) => (b.gameVersion === envInfo.gameVersion) - (a.gameVersion === envInfo.gameVersion) || version(b).localeCompare(version(a), undefined, { numeric: true }));
+    // The first that has its hunt tokens (maps from an APK), else the first at all
+    let donor = null;
+    for (const env of donors.slice(0, 6)) {
+      const other = await fetchManifest(env.id).catch(() => null);
+      if (!other?.pickups?.length) continue;
+      donor ??= { env, other };
+      if (other.huntTokens?.length) {
+        donor = { env, other };
+        break;
+      }
+    }
     if (!donor) return;
-    const other = await fetchManifest(donor.id);
-    borrowPrefabs(donor.id, other, [...(other.pickups ?? []), ...(other.huntTokens ?? [])]);
-    manifest.pickups = (other.pickups ?? []).filter((n) => manifest.prefabs[n]);
-    manifest.huntTokens = (other.huntTokens ?? []).filter((n) => manifest.prefabs[n]);
-    manifest.coinPatterns = other.coinPatterns ?? null;
+    const { env, other } = donor;
+    const usable = (n) => !!manifest.prefabs[n]?.bbox;
+    borrowPrefabs(env.id, other, [...(other.pickups ?? []), ...(other.huntTokens ?? [])].filter((n) => !usable(n)));
+    // The donor's order (the palette's), then any this map has that it lacks
+    manifest.pickups = [...new Set([...(other.pickups ?? []), ...(manifest.pickups ?? [])])].filter(usable);
+    if (!manifest.huntTokens?.length) manifest.huntTokens = (other.huntTokens ?? []).filter(usable);
+    manifest.coinPatterns ??= other.coinPatterns ?? null;
   })().catch((e) => console.warn('No pickups to borrow', e));
   return pickupsReady;
 }

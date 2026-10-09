@@ -14,8 +14,9 @@ import { readZip } from './zip.js';
 
 const CATALOG = 'assets/aa/catalog.json';
 // Shared bundles the kit keeps besides the remote cities' own dependencies: game modes,
-// common props (signal lights) and the scripts/shaders every bundle refers to
-const KIT_EXTRA = /^(gamemodes|common)-builtin_assets_|_monoscripts_|_unitybuiltinshaders_/;
+// common props (signal lights, pickups), the season hunt tokens (3.70's bat) and the
+// scripts/shaders every bundle refers to
+const KIT_EXTRA = /^(gamemodes|common|hunttokens)-builtin_assets_|_monoscripts_|_unitybuiltinshaders_/;
 
 /**
  * Where a catalog's sybo://<game>/<project>/<version>/<file> address is served: SYBO's asset

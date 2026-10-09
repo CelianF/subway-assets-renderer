@@ -5,7 +5,10 @@
 // end), their length set on the strip. The map rebuilds as the strip changes; what the game would never lay (two
 // interiors back to back, a station without its start) is flagged.
 
-const PX_PER_UNIT = 72 / 180; // a 180-long segment is 72px wide in the strip
+// Strip widths: a building segment, and everything else (a section of any length, a gate:
+// its length is the number on it, not its width)
+const BUILDING_WIDTH = 72;
+const CHUNK_WIDTH = 128;
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -109,6 +112,7 @@ export function createChunkDeck(root, ctx) {
       summary,
       el('span', { class: 'studio-sep' }),
       el('span', { class: 'studio-hint' }, 'Drag to reorder · − / + sets a section\'s length · click to fly there · × removes'),
+      el('button', { class: 'danger', title: 'Remove every chunk of your map', onclick: () => (ctx.plan() ?? []).length && confirm('Remove every chunk of your map?') && ctx.setPlan([]) }, '🗑 Remove all'),
     ),
     scroller,
     warnings,
@@ -134,13 +138,13 @@ export function createChunkDeck(root, ctx) {
                 if (side === 'right' && e.awaiting) return el('div', { class: 'chunk-half chunk-right awaiting', 'data-side': side, title: 'Pick its right side in the bar below' }, el('div', { class: 'chunk-thumb chunk-pick' }, '?'), el('span', { class: 'chunk-name' }, 'R?'));
                 return el('div', { class: `chunk-half chunk-${side}`, 'data-side': side, title: card?.label ?? '' }, thumb(card), el('span', { class: 'chunk-name' }, shortName(card, e[side])));
               })
-            : [thumb(cards.get(cardIds(e)[0])), el('span', { class: 'chunk-name' }, cards.get(cardIds(e)[0])?.label ?? e.slot ?? 'Gate'), ...(e.type === 'section' ? [lengthControl(e, i, plan, cards.get(cardIds(e)[0]))] : [])];
+            : [thumb(cards.get(cardIds(e)[0])), el('span', { class: 'chunk-name' }, cards.get(cardIds(e)[0])?.label ?? e.slot ?? 'Gate'), ...(e.type === 'section' ? [lengthControl(e, i, plan, cards.get(cardIds(e)[0]))].filter(Boolean) : [])];
         const item = el(
           'div',
           {
             class: `chunk-item ${e.type === 'buildings' ? 'chunk-buildings' : ''} ${own.length ? 'warn' : ''}`,
             draggable: 'true',
-            style: `width: ${Math.max(56, Math.round(length * PX_PER_UNIT))}px`,
+            style: `width: ${e.type === 'buildings' ? BUILDING_WIDTH : CHUNK_WIDTH}px`,
             title: [...own.map((m) => `⚠ ${m}`), `At ${Math.round(at)} · ${Math.round(length)} long`].join('\n'),
             onclick: () => ctx.goTo(at),
             ondragstart: (ev) => {
@@ -165,9 +169,9 @@ export function createChunkDeck(root, ctx) {
     );
   }
 
-  /** A section's − n + (its middles, 1 to 10; a tube: its pieces). A landmark modeled whole has none. */
+  /** A section's − n + (its middles, 1 to 10; a tube: its pieces); none for a fixed one. */
   function lengthControl(e, i, plan, card) {
-    if (card && !card.adjustable) return el('span', { class: 'chunk-length' }, el('span', { class: 'chunk-count', title: 'Modeled whole: its own length' }, 'whole'));
+    if (card && !card.adjustable) return null;
     const set = (n) => (ev) => {
       ev.stopPropagation();
       if (n < 1 || n > ctx.maxLength) return;
@@ -266,7 +270,6 @@ export function createChunkDeck(root, ctx) {
       el('span', { class: 'studio-hint' }, 'Drag onto your map, or click to add at the end'),
       el('span', { class: 'studio-sep' }),
       el('button', { title: 'Replace your map with the generated run (seed, sections)', onclick: () => ctx.setPlan(ctx.fromRun()) }, '⟳ From generated run'),
-      el('button', { class: 'danger', title: 'Remove every chunk', onclick: () => confirm('Remove every chunk of your map?') && ctx.setPlan([]) }, '🗑 Clear'),
       el('button', { title: 'Back to the generated run (your map is kept for later)', onclick: () => (ctx.useGenerated(), close()) }, 'Use generated run'),
       el('button', { class: 'primary', title: 'Close (6)', onclick: () => close() }, 'Done'),
     ),

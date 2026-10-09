@@ -122,7 +122,8 @@ export function chunkKind(e) {
 
 /**
  * Sections Chunk mode lays whole: a start, `length` middles and an end (a tube: `length`
- * tube pieces, its entrance and exit come with it). Default lengths in the game's ranges.
+ * tube pieces, its entrance and exit come with it). Default lengths in the game's ranges
+ * (a landmark: the game's one middle). `fixed`: a section whose length can't be set.
  */
 export const SECTIONS = {
   station: { label: 'Station', parts: ['boundary_station_start', 'boundary_station_mid', 'boundary_station_end'], length: 2 },
@@ -143,8 +144,13 @@ function sectionPieces(slots, e) {
     const prefab = slots[slot]?.includes(own) ? own : slots[slot]?.[0];
     return slot && prefab ? [{ type: 'piece', slot, prefab }] : [];
   };
-  const n = Math.max(1, Math.min(MAX_SECTION_LENGTH, Math.round(e.length ?? def.length)));
-  return [...piece(0), ...Array.from({ length: n }, () => piece(1)).flat(), ...piece(2)];
+  return [...piece(0), ...Array.from({ length: sectionLength(e) }, () => piece(1)).flat(), ...piece(2)];
+}
+
+/** A section's middles (a tube: its pieces), 1 to 10; a fixed one's own. */
+function sectionLength(e) {
+  const def = SECTIONS[e.kind];
+  return def.fixed ? def.length : Math.max(1, Math.min(MAX_SECTION_LENGTH, Math.round(e.length ?? def.length)));
 }
 
 /** sectionPieces for a theme (chunk cards' pictures). */
@@ -177,7 +183,7 @@ export function normalizePlan(plan) {
   }
   for (const e of out) {
     if (e.type !== 'section') continue;
-    e.length = Math.max(1, Math.min(MAX_SECTION_LENGTH, e.length || SECTIONS[e.kind].length));
+    e.length = sectionLength({ ...e, length: e.length || SECTIONS[e.kind].length });
     delete e.done;
   }
   return out;
@@ -216,9 +222,7 @@ export function chunkCards(manifest, themeName, gen = null) {
     .map(([kind, def]) => {
       const main = def.parts[0] ?? def.parts[1];
       const start = manifest.prefabs[real(main)[0]];
-      // A landmark modeled whole in its start (empty mid and end): its length is its own
-      const whole = kind === 'epic' && (start?.mainDepth ?? start?.bbox?.[1][2] ?? 0) > 2.5 * slotLength(manifest, main, start);
-      return { id: `section|${kind}`, type: 'section', kind, length: def.length, adjustable: !whole, prefab: real(main)[0], label: def.label };
+      return { id: `section|${kind}`, type: 'section', kind, length: def.length, adjustable: !def.fixed, prefab: real(main)[0], label: def.label };
     });
   if (sections.length) groups.push({ group: 'Sections', cards: sections });
   if (has('boundary_gate') && has('track_gates')) {
@@ -235,9 +239,8 @@ export function chunkLength(manifest, e) {
   if (e.type === 'buildings') return SEGMENT;
   if (e.type === 'section') {
     const def = SECTIONS[e.kind];
-    const n = Math.max(1, Math.min(MAX_SECTION_LENGTH, Math.round(e.length ?? def.length)));
     const of = (i) => (def.parts[i] ? slotLength(manifest, def.parts[i], manifest.prefabs[e.prefabs?.[PARTS[i]]]) : 0);
-    return of(0) + n * of(1) + of(2);
+    return of(0) + sectionLength(e) * of(1) + of(2);
   }
   const slot = e.type === 'gate' ? 'track_gates' : e.slot;
   const prefab = manifest.prefabs[e.type === 'gate' ? null : e.prefab];
