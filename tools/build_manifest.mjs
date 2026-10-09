@@ -3132,7 +3132,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       if (name in prefabs || composites.has(name) || classicNames.has(name)) continue;
       const src = prefabGlbs.get(`${name}.glb`);
       if (!src) {
-        missing.push(name);
+        // (the 3.x signal lamps are looked for in every game: older ones have their own)
+        if (!EXTRA_PREFABS.includes(name)) missing.push(name);
         prefabs[name] = { glb: null };
         continue;
       }

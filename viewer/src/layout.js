@@ -528,7 +528,17 @@ function classicLayout(manifest, names, seed, sections, showcase = false) {
     // Start chunks (picked only at 0) are built to follow the intro, whose scenery covers
     // their first half (1.38 Arabia: the road from 180 on is theirs): each one after the
     // first gets its own intro, its back edge where the last chunk ended
-    const introBack = intro ? Math.max(0, -(manifest.prefabs[intro.name]?.bbox?.[0][2] ?? 0)) : 0;
+    // The intro's road ends where the start chunk's own begins, both overhanging their front
+    // by the same margin, and runs a chunk length back from there: by its bounds' back edge
+    // instead, props behind the road left a 6-unit gap (1.28 Beijing)
+    const introBox = intro ? manifest.prefabs[intro.name]?.bbox : null;
+    const start = usable.find((c) => c.zMin === 0 && c.zMax != null && c.zMax <= 1);
+    const startBox = start ? manifest.prefabs[start.name]?.bbox : null;
+    const introBack = !introBox
+      ? 0
+      : startBox
+        ? Math.max(0, start.zSize - (introBox[1][2] - (startBox[1][2] - start.zSize)))
+        : Math.max(0, -introBox[0][2]);
     let starts = 0;
     for (const chunk of usable.sort((a, b) => a.zMin - b.zMin || a.name.localeCompare(b.name))) {
       if (intro && chunk.zMin === 0 && chunk.zMax != null && chunk.zMax <= 1 && starts++ > 0) {
