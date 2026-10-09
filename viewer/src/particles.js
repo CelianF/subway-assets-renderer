@@ -103,6 +103,9 @@ const randomUnit = (v) => {
 };
 
 /** Spawn position and direction in Unity shape space. */
+/** A cone in Shape scaling mode (older manifests: one whose root scale stretches it). */
+const shapeCone = (shape) => [4, 7, 8, 9].includes(shape.type) && (shape.scaling === 2 || !!shape.scale);
+
 function shapeSpawn(shape, pos, dir) {
   if (!shape) {
     pos.set(0, 0, 0);
@@ -166,8 +169,9 @@ function shapeSpawn(shape, pos, dir) {
       if (shape.hasMesh === false) dir.set(0, 0, 1);
       else randomUnit(dir);
   }
-  // (not on the Shape-scaled 1.98 Atlanta smoke: in game it rises in its 14° cone, one way)
-  if (shape.randomDirection && !shape.scale) {
+  // (not on Shape-scaling cones, the 1.x smoke and steam: in game they rise in their cone,
+  // one way; 1.98 Atlanta, 1.92 Berlin. Matched by eye)
+  if (shape.randomDirection && !shapeCone(shape)) {
     const r = randomUnit(new THREE.Vector3());
     // A cone's random directions stay on its open side (1.98 Atlanta's barbecue smoke and
     // smoke bombs rise one way only, never back under the grill)
@@ -748,8 +752,8 @@ class Emitter {
     }
     for (let i = 0; i < this.count; i++) {
       const lt = this.age[i] / this.life[i];
-      // (Shape-scaled smoke, 1.98 Atlanta: its old puffs up to 30% bigger, matched to the game by eye)
-      const grow = d.shape?.scale ? 1 + 0.3 * lt : 1;
+      // (Shape-scaling cones, the 1.x smoke: old puffs up to 30% bigger, matched to the game by eye)
+      const grow = d.shape && shapeCone(d.shape) ? 1 + 0.3 * lt : 1;
       const size = grow * this.size0[i] * (d.sizeOverLife ? sample(d.sizeOverLife, lt, this.rand[i * 2]) : 1);
       const frame = this.frameOf(i, lt);
       this.posAttr.setXYZ(i, this.local.pos[i * 3], this.local.pos[i * 3 + 1], this.local.pos[i * 3 + 2]);

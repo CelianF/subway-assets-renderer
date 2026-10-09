@@ -1826,6 +1826,24 @@ function parseAdSpots(file, guidIndex) {
   return sortedStrings(spots);
 }
 
+/** 2.x+ MovingTrainBlinkerConfig (_Common_TrainBlinker): a moving train's lights blink as the
+ * runner comes within its trigger, 200 before the train's meeting point (MovingTrainBlinker,
+ * Train_Blinker box): its color × the curve, played `loops` times over `duration` each. */
+function parseTrainBlinker(guidIndex) {
+  const script = [...guidIndex].find(([, p]) => stem(p) === 'MovingTrainBlinkerConfig' && p.endsWith('.cs'))?.[0];
+  if (!script) return null;
+  for (const p of guidIndex.values()) {
+    if (!p.endsWith('.asset') || !/Blinker/i.test(stem(p))) continue;
+    const text = read(p);
+    if (!text.includes(`guid: ${script}`)) continue;
+    const keys = [...text.matchAll(/\n\s+time: ([-\d.e]+)\n\s+value: ([-\d.e]+)/g)].map(([, t, v]) => [num(t), num(v)]);
+    const duration = num(text.match(/\n {2}Duration: ([\d.e-]+)/)?.[1] ?? '0');
+    const loops = num(text.match(/\n {2}Loops: (-?\d+)/)?.[1] ?? '1');
+    if (keys.length && duration > 0) return { curve: keys, duration, loops, trigger: 200 };
+  }
+  return null;
+}
+
 /** The prefab root's own scale when it isn't 1: 1.x placeholders keep it on the spawned copy
  * (Placeholder.InitializeSpawnedInstance resets position and rotation only). [x, y, z] or null. */
 function parseRootScale(file) {
@@ -2587,6 +2605,7 @@ function parseParticles(file, guidIndex) {
         position: vec3(shape.m_Position),
         rotation: vec3(shape.m_Rotation),
         randomDirection: shape.randomDirectionAmount ?? shape.randomDirection ?? 0,
+        scaling: ps.scalingMode ?? 0, // 0 hierarchy, 1 local, 2 shape
         // Mesh shapes (6, 13, 14) without their mesh fire from the origin along +Z
         hasMesh: [shape.m_Mesh, shape.m_MeshRenderer, shape.m_SkinnedMeshRenderer].some((m) => m?.fileID),
       },
@@ -3432,6 +3451,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     materials,
   };
   mkdirSync(out, { recursive: true });
+  const blinker = parseTrainBlinker(guidIndex);
+  if (blinker) for (const config of Object.values(manifest.themeConfigs)) config.trainBlinker = blinker;
   writeJson(path.join(out, 'manifest.json'), manifest);
 
   const shaders = {};

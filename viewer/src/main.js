@@ -1027,6 +1027,8 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
     await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
   }
   if (signalSeed != null) await applySignalColor(obj, signalSeed, signalColor);
+  // (after the materials are set: the run's own moving trains)
+  if (/_Train_Moving_/i.test(name)) attachTrainBlinkers(obj, true);
   return obj;
 }
 
@@ -1119,6 +1121,7 @@ async function instantiateChunk(prefab, layer, seed, worldZ, { keepObstacles = f
     if (x.lanes?.length) o.position.x = x.lanes[Math.floor(rng() * x.lanes.length)];
   }
   if (prefab.chunk) placeMovingTrains(obj);
+  if (prefab.chunk) attachTrainBlinkers(obj);
   obj.traverse((o) => {
     if (!o.isMesh) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -1153,6 +1156,59 @@ function placeMovingTrains(obj) {
       t.train.position.z += shift;
       end = t.max + shift;
     }
+  }
+}
+
+/**
+ * 2.x+ MovingTrainBlinker: a moving train's lights blink as the runner comes within its
+ * trigger (the 200 before the train's meeting point): the lights' color × the config's curve,
+ * `loops` times over `duration` each (2.13: on-off-on-off, 0.55 s, 5 times). Each train gets
+ * its own lights material (the shared uniforms stay shared).
+ */
+const trainBlinkers = new Set(); // { node, mats: [{ mat, base }], cfg, start }
+function attachTrainBlinkers(obj, whole = false) {
+  const cfg = manifest.themeConfigs?.[state.theme]?.trainBlinker;
+  if (!cfg) return;
+  obj.traverse((o) => {
+    if (whole ? o !== obj : !(o.userData.moving > 0)) return;
+    const mats = [];
+    o.traverse((m) => {
+      if (!m.isMesh) return;
+      const own = [].concat(m.material).map((mat) => {
+        if (!/Train_lights$/i.test(mat.name ?? '') || !mat.uniforms?.uColor) return mat;
+        const copy = mat.clone();
+        copy.uniforms = { ...mat.uniforms, uColor: { value: mat.uniforms.uColor.value.clone() } };
+        copy.userData.blink = true;
+        mats.push({ mat: copy, base: mat.uniforms.uColor.value.clone() });
+        return copy;
+      });
+      m.material = Array.isArray(m.material) ? own : own[0];
+    });
+    if (mats.length) trainBlinkers.add({ node: o, mats, cfg, start: null });
+  });
+}
+function curveAt(keys, t) {
+  if (t <= keys[0][0]) return keys[0][1];
+  for (let i = 1; i < keys.length; i++) if (t <= keys[i][0]) return keys[i - 1][1] + ((keys[i][1] - keys[i - 1][1]) * (t - keys[i - 1][0])) / Math.max(keys[i][0] - keys[i - 1][0], 1e-6);
+  return keys[keys.length - 1][1];
+}
+const tmpBlink = new THREE.Vector3();
+function updateTrainBlinkers(now) {
+  const runner = camera.position.z + 33; // the game camera rides 33 behind the runner
+  for (const b of trainBlinkers) {
+    let root = b.node;
+    while (root.parent) root = root.parent;
+    if (root !== scene) {
+      trainBlinkers.delete(b);
+      continue;
+    }
+    const anchor = b.node.getWorldPosition(tmpBlink).z;
+    const inside = runner >= anchor - b.cfg.trigger && runner <= anchor;
+    if (inside && b.start == null) b.start = now;
+    if (runner < anchor - b.cfg.trigger) b.start = null; // back before the trigger: again next time
+    const t = b.start == null ? Infinity : now - b.start;
+    const v = t < b.cfg.duration * b.cfg.loops ? curveAt(b.cfg.curve, (t % b.cfg.duration) / b.cfg.duration) : 1;
+    for (const { mat, base } of b.mats) mat.uniforms.uColor.value.copy(base).multiplyScalar(v).setW(base.w);
   }
 }
 
@@ -2955,6 +3011,7 @@ renderer.setAnimationLoop(() => {
   globals.uTime.value = now;
   updateChallenge(now);
   updateMeshAnimations(now);
+  updateTrainBlinkers(now);
   updateAnimators(dt);
   placeFollowEffects();
   updateParticles(dt, studio.active ? studio.camera : camera);
