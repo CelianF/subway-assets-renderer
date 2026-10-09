@@ -29,46 +29,92 @@ function el(tag, attrs = {}, ...children) {
 
 // ---------------------------------------------------------------- environments
 
+// Cities named in more than one word, and event names that belong to another city's group
+const CITY_WORDS = ['New York', 'San Francisco', 'Buenos Aires', 'Las Vegas', 'St Petersburg', 'Mexico City', 'Subway City', 'Hong Kong', 'Little Rock', 'Space Station', 'Brawl Stars', 'Haunted Hood', 'Lunar New Year', 'The North Pole', 'Underwater World', 'Venice Beach', 'Cosmic Crossroads', 'Fantasy Fest', 'Winter Xtreme', 'journey To The East'];
+const CITY_ALIASES = { 'Aloha Hawaii': 'Hawaii' };
+/** The city a map belongs to ("Vancouver Autumn", "Amsterdam Old" → Vancouver, Amsterdam): the tiles' order. */
+function cityOf(theme) {
+  const name = prettyTheme(theme);
+  for (const [k, v] of Object.entries(CITY_ALIASES)) if (name.startsWith(k)) return v;
+  return CITY_WORDS.find((c) => name.startsWith(c)) ?? name.split(' ')[0];
+}
+
+let allEnvs = [];
+const search = $('env-search');
+search.addEventListener('input', () => renderEnvs());
+
 async function loadEnvs() {
-  const envs = await (await fetch('/api/envs')).json();
-  $('count').textContent = envs.length ? `(${envs.length})` : '';
+  allEnvs = await (await fetch('/api/envs')).json();
+  renderEnvs();
+}
+
+function renderEnvs() {
+  const q = search.value.trim().toLowerCase();
+  const version = (e) => (/^\d/.test(e.gameVersion ?? '') ? e.gameVersion : '0');
+  const envs = allEnvs
+    .map((env) => ({ env, city: cityOf(env.theme), name: prettyTheme(env.theme) }))
+    .filter(({ env, city, name }) => !q || [name, city, env.theme, env.gameVersion, env.note].some((s) => s?.toLowerCase().includes(q)))
+    // By city, the city's own map first, then its events; newest version first
+    .sort((a, b) => a.city.localeCompare(b.city) || a.name.localeCompare(b.name) || version(b.env).localeCompare(version(a.env), undefined, { numeric: true }));
+  const cities = Map.groupBy(envs, (e) => e.city);
+  $('count').textContent = allEnvs.length ? (q ? `(${envs.length} of ${allEnvs.length})` : `(${allEnvs.length})`) : '';
+  search.classList.toggle('hidden', allEnvs.length === 0);
+  $('empty').textContent = allEnvs.length ? `No environment matches "${search.value.trim()}".` : 'No environment yet. Upload an APK to extract its maps.';
   $('empty').classList.toggle('hidden', envs.length > 0);
   $('envs').replaceChildren(
-    ...envs.map((env) => {
-      const thumb = el('div', { class: 'thumb' });
-      if (env.thumbnail) thumb.style.backgroundImage = `url(/envs/${env.id}/thumbnail.jpg?${Date.parse(env.createdAt)})`;
-      else thumb.append(el('span', {}, 'Open once to generate a preview'));
-      const open = () => (location.href = `/viewer.html?env=${encodeURIComponent(env.id)}`);
-      return el(
-        'article',
-        { class: 'env' },
-        el('button', { class: 'thumb-btn', onclick: open, title: `Open ${env.theme}` }, thumb),
+    ...[...cities].map(([city, group]) =>
+      el(
+        'section',
+        { class: 'city' },
         el(
           'div',
-          { class: 'env-info' },
-          el('h3', {}, prettyTheme(env.theme)),
-          el('p', {}, `v${env.gameVersion}`, env.copy ? el('span', { class: 'env-note' }, ` · ${env.note ?? `copy ${env.copy}`}`) : null),
-          el(
-            'div',
-            { class: 'env-actions' },
-            el('button', { class: 'primary', onclick: open }, 'Open'),
-            el('a', { class: 'button', href: `/api/envs/${encodeURIComponent(env.id)}/export`, download: '', title: 'Download a .subwaymap file to share this map' }, 'Share'),
-            el(
-              'button',
-              {
-                class: 'danger',
-                onclick: async () => {
-                  if (!confirm(`Delete ${prettyTheme(env.theme)} (v${env.gameVersion})? This removes its files.`)) return;
-                  await fetch(`/api/envs/${encodeURIComponent(env.id)}`, { method: 'DELETE' });
-                  loadEnvs();
-                },
-              },
-              'Delete',
-            ),
-          ),
+          { class: 'city-head' },
+          el('h3', { class: 'city-name' }, city, el('small', {}, ` ${group.length}`)),
+          // Every map of the city shown (the search narrows it) in one .subwaymap
+          group.length > 1
+            ? el('a', { class: 'button', href: `/api/export?ids=${group.map(({ env }) => encodeURIComponent(env.id)).join(',')}&name=${encodeURIComponent(city)}`, download: '', title: `Download one .subwaymap file with ${group.length === 2 ? 'both' : `all ${group.length}`} ${city} maps` }, 'Share city')
+            : null,
         ),
-      );
-    }),
+        el('div', { class: 'grid' }, ...group.map(({ env }) => envTile(env))),
+      ),
+    ),
+  );
+}
+
+/** An environment's tile: preview, name, version, open / share / delete. */
+function envTile(env) {
+  const thumb = el('div', { class: 'thumb' });
+  if (env.thumbnail) thumb.style.backgroundImage = `url(/envs/${env.id}/thumbnail.jpg?${Date.parse(env.createdAt)})`;
+  else thumb.append(el('span', {}, 'Open once to generate a preview'));
+  const open = () => (location.href = `/viewer.html?env=${encodeURIComponent(env.id)}`);
+  return el(
+    'article',
+    { class: 'env' },
+    el('button', { class: 'thumb-btn', onclick: open, title: `Open ${env.theme}` }, thumb),
+    el(
+      'div',
+      { class: 'env-info' },
+      el('h3', {}, prettyTheme(env.theme)),
+      el('p', {}, `v${env.gameVersion}`, env.copy ? el('span', { class: 'env-note' }, ` · ${env.note ?? `copy ${env.copy}`}`) : null),
+      el(
+        'div',
+        { class: 'env-actions' },
+        el('button', { class: 'primary', onclick: open }, 'Open'),
+        el('a', { class: 'button', href: `/api/envs/${encodeURIComponent(env.id)}/export`, download: '', title: 'Download a .subwaymap file to share this map' }, 'Share'),
+        el(
+          'button',
+          {
+            class: 'danger',
+            onclick: async () => {
+              if (!confirm(`Delete ${prettyTheme(env.theme)} (v${env.gameVersion})? This removes its files.`)) return;
+              await fetch(`/api/envs/${encodeURIComponent(env.id)}`, { method: 'DELETE' });
+              loadEnvs();
+            },
+          },
+          'Delete',
+        ),
+      ),
+    ),
   );
 }
 
@@ -86,10 +132,12 @@ function showJob(label, fraction, log = '') {
 async function installPackage(file) {
   $('drop').classList.add('busy');
   $('job').classList.remove('failed');
-  const send = (onConflict, note = '') =>
+  // resolved: the conflict dialog's { choices, notes }, one per map (a city package has several)
+  const send = (resolved = null) =>
     new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/import?name=${encodeURIComponent(file.name)}${onConflict ? `&onConflict=${onConflict}&note=${encodeURIComponent(note)}` : ''}`);
+      const query = resolved ? `&choices=${encodeURIComponent(JSON.stringify(resolved.choices))}&notes=${encodeURIComponent(JSON.stringify(resolved.notes))}` : '';
+      xhr.open('POST', `/api/import?name=${encodeURIComponent(file.name)}${query}`);
       xhr.upload.onprogress = (e) => e.lengthComputable && showJob(`Installing ${file.name}`, e.loaded / e.total);
       xhr.onload = () => {
         const body = JSON.parse(xhr.responseText || '{}');
@@ -99,13 +147,12 @@ async function installPackage(file) {
       xhr.send(file);
     });
   try {
-    let env = await send(null);
-    if (env.conflicts) {
-      const { choices, notes } = await askConflicts(env.conflicts);
-      const id = env.conflicts[0].id;
-      env = await send(choices[id], notes[id]);
-    }
-    if (env.skipped) showJob(`Kept the existing ${prettyTheme(env.theme)} (v${env.gameVersion})`, 1);
+    let env = await send();
+    if (env.conflicts) env = await send(await askConflicts(env.conflicts));
+    if (env.envs) {
+      const kept = env.skipped ? `, ${env.skipped} kept as they were` : '';
+      showJob(`${env.name ? `${env.name}: ` : ''}${env.envs.length} map${env.envs.length === 1 ? '' : 's'} installed${kept}`, 1);
+    } else if (env.skipped) showJob(`Kept the existing ${prettyTheme(env.theme)} (v${env.gameVersion})`, 1);
     else showJob(`Installed ${prettyTheme(env.theme)} (v${env.gameVersion})${env.copy ? ` as "${env.note ?? `copy ${env.copy}`}"` : ''}`, 1);
   } catch (e) {
     showJob(`Install failed: ${e.message}`, null);

@@ -157,8 +157,11 @@ async function findConflicts(maps) {
 // A .subwaymap is a zip of one environment folder plus a subwaymap.json header:
 //   subwaymap.json  { format, id, theme, gameVersion, createdAt }
 //   env.json, manifest.json, thumbnail.jpg?, glb/…, mesh/…, tex/…
+// A city package (format 2, "Share city") holds several, each in its own folder:
+//   subwaymap.json  { format: 2, name, maps: [{ dir, id, theme, gameVersion, createdAt }] }
+//   <dir>/env.json, <dir>/manifest.json, …
 
-const SUBWAYMAP_FORMAT = 1;
+const SUBWAYMAP_FORMAT = 2;
 const MAX_PACKAGE = 512 * 1024 * 1024;
 
 async function listFiles(dir, base = dir) {
@@ -174,20 +177,41 @@ async function listFiles(dir, base = dir) {
 async function exportEnv(id) {
   const dir = path.join(ENVS, slug(id));
   const env = JSON.parse(await readFile(path.join(dir, 'env.json'), 'utf8'));
-  const header = { format: SUBWAYMAP_FORMAT, id: env.id, theme: env.theme, gameVersion: env.gameVersion, createdAt: env.createdAt };
+  // (format 1: single maps stay readable by older versions)
+  const header = { format: 1, id: env.id, theme: env.theme, gameVersion: env.gameVersion, createdAt: env.createdAt };
   const entries = [{ name: 'subwaymap.json', data: Buffer.from(JSON.stringify(header, null, 1)) }];
   for (const rel of await listFiles(dir)) entries.push({ name: rel, data: await readFile(path.join(dir, rel)) });
   return { env, zip: writeZip(entries) };
 }
 
-async function importEnv(buf, sourceName, policy = null, note = '') {
+/** Several environments in one package (a city's maps), format 2. */
+async function exportEnvs(ids, name) {
+  const maps = [];
+  const entries = [];
+  for (const id of ids) {
+    const dir = path.join(ENVS, slug(id));
+    const env = JSON.parse(await readFile(path.join(dir, 'env.json'), 'utf8'));
+    const folder = slug(env.id ?? id);
+    maps.push({ dir: folder, id: env.id, theme: env.theme, gameVersion: env.gameVersion, createdAt: env.createdAt });
+    for (const rel of await listFiles(dir)) entries.push({ name: `${folder}/${rel}`, data: await readFile(path.join(dir, rel)) });
+  }
+  const header = { format: 2, name, maps };
+  return writeZip([{ name: 'subwaymap.json', data: Buffer.from(JSON.stringify(header, null, 1)) }, ...entries]);
+}
+
+async function importEnv(buf, sourceName, policy = null, note = '', choices = null, notes = {}) {
   const entries = readZip(buf);
   const headerEntry = entries.find((e) => e.name === 'subwaymap.json');
   if (!headerEntry) throw new Error('Not a .subwaymap package (subwaymap.json missing)');
   const header = JSON.parse(headerEntry.data.toString('utf8'));
   if (header.format > SUBWAYMAP_FORMAT) throw new Error('This .subwaymap was made by a newer version of the viewer');
+  if (Array.isArray(header.maps)) return importCity(entries, header, sourceName, choices, notes);
   if (!entries.some((e) => e.name === 'manifest.json')) throw new Error('Package has no manifest.json');
   const id = slug(`${header.theme}_${header.gameVersion}`);
+  if (choices && CONFLICT_POLICIES.has(choices[id])) {
+    policy = choices[id];
+    note = notes?.[id] ?? '';
+  }
   if (!policy) {
     const conflicts = await findConflicts([{ id, theme: header.theme, gameVersion: header.gameVersion }]);
     if (conflicts.length) return { conflicts };
@@ -199,6 +223,36 @@ async function importEnv(buf, sourceName, policy = null, note = '') {
     await rm(staging, { recursive: true, force: true });
     throw e;
   }
+}
+
+/**
+ * A city package: every map in it, each with the conflict choice made for it (asked for
+ * all at once: { conflicts } until `choices` comes back). Returns { envs, skipped }.
+ */
+async function importCity(entries, header, sourceName, choices, notes) {
+  const maps = header.maps.map((m) => ({ ...m, key: slug(`${m.theme}_${m.gameVersion}`) }));
+  if (!choices) {
+    const conflicts = await findConflicts(maps.map((m) => ({ id: m.key, theme: m.theme, gameVersion: m.gameVersion })));
+    if (conflicts.length) return { conflicts };
+  }
+  const envs = [];
+  let skipped = 0;
+  for (const m of maps) {
+    const prefix = `${m.dir}/`;
+    const own = entries.filter((e) => e.name.startsWith(prefix)).map((e) => ({ name: e.name.slice(prefix.length), data: e.data }));
+    if (!own.some((e) => e.name === 'manifest.json')) throw new Error(`Package has no manifest.json for ${m.theme} (v${m.gameVersion})`);
+    const policy = CONFLICT_POLICIES.has(choices?.[m.key]) ? choices[m.key] : 'replace';
+    const staging = path.join(JOBS, `import-${randomUUID()}`);
+    try {
+      const env = await installPackage(own, m, m.key, staging, sourceName, policy, notes?.[m.key] ?? '');
+      if (env.skipped) skipped++;
+      else envs.push(env);
+    } catch (e) {
+      await rm(staging, { recursive: true, force: true });
+      throw e;
+    }
+  }
+  return { envs, skipped, name: header.name };
 }
 
 async function installPackage(entries, header, id, staging, sourceName, policy, note) {
@@ -425,12 +479,34 @@ export async function handle(req, res) {
       res.end(zip);
       return true;
     }
+    // GET /api/export?ids=<id>,<id>…&name=<city>  -> <city>.subwaymap with all of them
+    if (parts[1] === 'export' && parts.length === 2 && req.method === 'GET') {
+      const ids = (url.searchParams.get('ids') ?? '').split(',').filter(Boolean);
+      if (!ids.length || ids.some((id) => !existsSync(path.join(ENVS, slug(id), 'env.json')))) return sendJson(res, 404, { error: 'Not found' }), true;
+      const name = url.searchParams.get('name') || 'maps';
+      const zip = await exportEnvs(ids, name);
+      res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': `attachment; filename="${slug(`${name}_${ids.length}_maps`)}.subwaymap"`,
+        'Content-Length': zip.length,
+      });
+      res.end(zip);
+      return true;
+    }
     // POST /api/import?name=<file>   (.subwaymap body)
     if (parts[1] === 'import' && req.method === 'POST') {
       const name = path.basename(url.searchParams.get('name') ?? 'map.subwaymap');
       await mkdir(JOBS, { recursive: true });
       const policy = CONFLICT_POLICIES.has(url.searchParams.get('onConflict')) ? url.searchParams.get('onConflict') : null;
-      const result = await importEnv(await readBody(req, MAX_PACKAGE), name, policy, url.searchParams.get('note') ?? '');
+      // City packages: one choice per map ({ id: policy }) and their notes, as JSON
+      const json = (key) => {
+        try {
+          return JSON.parse(url.searchParams.get(key) ?? 'null');
+        } catch {
+          return null;
+        }
+      };
+      const result = await importEnv(await readBody(req, MAX_PACKAGE), name, policy, url.searchParams.get('note') ?? '', json('choices'), json('notes') ?? {});
       sendJson(res, result.conflicts ? 409 : 200, result);
       return true;
     }

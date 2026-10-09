@@ -194,6 +194,40 @@ button.danger {
 
 /* ---------------------------------------------------------------- grid */
 
+.env-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 36px 0 14px;
+}
+.env-head h2 {
+  margin: 0;
+}
+.city + .city {
+  margin-top: 28px;
+}
+.city-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 10px;
+}
+.city-name {
+  font-size: 15px;
+  margin: 0;
+}
+.city-name small {
+  color: var(--muted);
+  font-weight: 400;
+}
+.env-search {
+  width: 260px;
+  max-width: 100%;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));

@@ -35,8 +35,11 @@
       </section>
 
       <section>
-        <h2>Environments <small id="count"></small></h2>
-        <div class="grid" id="envs"></div>
+        <div class="env-head">
+          <h2>Environments <small id="count"></small></h2>
+          <input class="note-input env-search hidden" id="env-search" type="search" placeholder="Search (city, version…)" />
+        </div>
+        <div class="cities" id="envs"></div>
         <p class="empty hidden" id="empty">No environment yet. Upload an APK to extract its maps.</p>
       </section>
     </main>
