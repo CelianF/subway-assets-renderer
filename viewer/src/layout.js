@@ -508,7 +508,16 @@ function classicLayout(manifest, names, seed, sections, showcase = false) {
     // Debug: every chunk once, by difficulty (as the game unlocks them)
     // (not the ones a run never picks: zMaximum below zMinimum, e.g. 1.10's jetpack landing)
     const usable = chunks.filter((c) => c.zMax == null || c.zMax > c.zMin);
+    // Start chunks (picked only at 0) are built to follow the intro, whose scenery covers
+    // their first half (1.38 Arabia: the road from 180 on is theirs): each one after the
+    // first gets its own intro, its back edge where the last chunk ended
+    const introBack = intro ? Math.max(0, -(manifest.prefabs[intro.name]?.bbox?.[0][2] ?? 0)) : 0;
+    let starts = 0;
     for (const chunk of usable.sort((a, b) => a.zMin - b.zMin || a.name.localeCompare(b.name))) {
+      if (intro && chunk.zMin === 0 && chunk.zMax != null && chunk.zMax <= 1 && starts++ > 0) {
+        z += introBack;
+        items.push({ prefab: intro.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(rng() * 2 ** 31) });
+      }
       items.push({ prefab: chunk.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(rng() * 2 ** 31) });
       z += chunk.zSize;
     }

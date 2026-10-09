@@ -375,6 +375,12 @@ uniform vec4 uRunners[${MAX_ALT_ZONES}];
 uniform vec2 uColorSize;
 uniform sampler2D uMaskTex;
 uniform vec2 uResolution;
+#ifdef SNOW_GLITTER
+uniform sampler2D uNoiseTex;
+uniform vec4 uGlitter; // _OverlayNoiseTexScale, _OverlayTranslationSpeedNoise0, …Noise1, _OverlayMultiplier
+uniform vec3 uEllipsePos; // x absolute, z ahead of the camera (Unity axes)
+uniform vec4 uEllipse; // radii x, z; sin, cos of its angle
+#endif
 uniform vec4 uUvWobble; // 1.x water: x amplitude, x frequency, y amplitude, y frequency
 uniform vec2 uUvWobbleSpeed;
 #ifdef WATER_DISTORT
@@ -488,6 +494,21 @@ ${CUT_MAIN}
 #endif
 #ifdef DISTANCE_FADE
   c.rgb *= clamp(vDepth / uFalloff, 0.0, 1.0); // the coins' halo: seen from afar, gone up close
+#endif
+#ifdef SNOW_GLITTER
+  // 1.x Custom/Distorted/Planar Projected Noise Overlay (1.67 Arabia's snow), as compiled:
+  // two noise lookups projected from above, scrolling along X and along Z, on what faces
+  // up, where the mask has snow, within an ellipse ahead of the camera, added on
+  vec2 xz = vec2(-vWorld.x, vWorld.z); // Unity's axes (glb mirrors X)
+  float inv = 1.0 / uGlitter.x;
+  float tw = uTime * 3.0; // _Time.w
+  vec2 ga = xz * inv + vec2(0.0, tw * uGlitter.z * inv);
+  vec2 gb = xz * inv + vec2(tw * uGlitter.y * inv, 0.0);
+  float up = max(0.0, vNormalW.y);
+  vec2 d = xz - vec2(uEllipsePos.x, cameraPosition.z + uEllipsePos.z);
+  d = vec2(uEllipse.w * d.x - uEllipse.z * d.y, uEllipse.z * d.x + uEllipse.w * d.y);
+  float ellipse = clamp(1.0 - (d.x * d.x / (uEllipse.x * uEllipse.x) + d.y * d.y / (uEllipse.y * uEllipse.y)), 0.0, 1.0);
+  c.rgb += (texture2D(uNoiseTex, vec2(-gb.y, gb.x)).rgb * up) * (texture2D(uNoiseTex, ga).rgb * up) * ellipse * uGlitter.w * texture2D(uMaskTex, vUv).r;
 #endif
   float fog = fogFactor(vDepth);
 #ifdef FOG_MULTIPLIER
@@ -747,6 +768,8 @@ function translateDistorted(def) {
     floats._HasReflections = 1;
     floats._DistortedReflect = 1;
   }
+  // Planar Projected Noise Overlay (1.67 Arabia's snow): glitter over the snow mask
+  if (/Planar Projected Noise Overlay/i.test(def.shader) && textures._MaskTex && textures._NoiseTex) floats._Glitter = 1;
   if (/SPmask/i.test(def.shader) && textures._Mask) {
     textures._MaskTex = textures._Mask;
     floats._ScreenMask = 1;
@@ -756,6 +779,12 @@ function translateDistorted(def) {
 }
 
 function translateLegacy(def) {
+  // 1.x Custom/Additive Constant Color (1.67 Arabia's event_2 glow): texture × _MainColor,
+  // added on, no fog (it drew as a black square)
+  if (def.shader === 'Custom/Additive Constant Color') {
+    const tint = def.colors?._MainColor ?? [1, 1, 1, 1];
+    return { ...def, colors: { ...def.colors, _Color: [...tint.slice(0, 3), 1] }, floats: { ...def.floats, FADE_MODE: 2, _SrcMode: 1, _DstMode: 1, _ZWrite: 0, _HasTint: 1, _HasFogMultiplier: 1, _FogMultiplier: 0 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 3000 };
+  }
   // 1.x distant scenery (1.65 Amsterdam's hedges, trees, windmills): unlit, in the distant fog
   if (def.shader === 'Custom/Distant Environment') return { ...def, floats: { ...def.floats, _DistantFog: 1 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
   if (/^Custom\/Distorted\//.test(def.shader) && !/Skyline/.test(def.shader)) return translateDistorted(def);
@@ -866,8 +895,11 @@ export class MaterialLibrary {
     if (/_Common_FountainTexture/i.test(main?.url ?? '')) defines.MASK_TEXTURE = '';
     const altTex = this.tex(def, '_AlternateTex');
     if (on('_HasAlternateColors', 'ALTERNATE_COLORS_ENABLED') && altTex) defines.ALTERNATE = '';
-    const maskTex = def.shader === 'SYBO/Bend/Common/ScreenMask' || f._ScreenMask ? this.tex(def, '_MaskTex') : null;
-    if (maskTex) defines.SCREEN_MASK = '';
+    const screenMask = def.shader === 'SYBO/Bend/Common/ScreenMask' || f._ScreenMask;
+    const noiseTex = f._Glitter ? this.tex(def, '_NoiseTex') : null;
+    const maskTex = screenMask || noiseTex ? this.tex(def, '_MaskTex') : null;
+    if (maskTex && screenMask) defines.SCREEN_MASK = '';
+    if (maskTex && noiseTex) defines.SNOW_GLITTER = '';
     const wave = /(^|\/)(Legacy\/)?VertexWave|^Bend\/Wave \(Vertex Color Control/.test(def.shader); // 1.x flags (and the 1.x tulip heads' Gradient variant)
     if (f._HasGradient) defines.GRADIENT = '';
     if (f._DistantFog) defines.DISTANT_FOG = '';
@@ -908,6 +940,10 @@ export class MaterialLibrary {
         uAltTex: { value: altTex ?? WHITE },
         uAltRef: { value: this.tex(def, '_AlternateRef') ?? refTex ?? WHITE },
         uMaskTex: { value: maskTex ?? WHITE },
+        uNoiseTex: { value: noiseTex ?? WHITE },
+        uGlitter: { value: new THREE.Vector4(f._OverlayNoiseTexScale ?? 15, f._OverlayTranslationSpeedNoise0 ?? 1, f._OverlayTranslationSpeedNoise1 ?? 1, f._OverlayMultiplier ?? 1) },
+        uEllipsePos: { value: new THREE.Vector3(...(c._EllipsePos ?? [0, 0, 200]).slice(0, 3)) },
+        uEllipse: { value: new THREE.Vector4(...(c._EllipseRadiiAndAngles ?? [200, 60, 0, 1])) },
         uIndentTex: { value: BLACK }, // (each snow segment gets its own: ThemeEffectTextureIndent)
         // 2.x: directions mirrored on X like the glb
         uWaveDir: { value: new THREE.Vector3(...(c._WaveDirection ?? [0, 0, 0]).slice(0, 3)).multiply(wave2x ? new THREE.Vector3(-1, 1, 1) : new THREE.Vector3(1, 1, 1)) },

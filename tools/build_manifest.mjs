@@ -1522,6 +1522,41 @@ function sampleClipTracks(text, stop, length, start, tracks, fps = 30) {
 }
 
 /**
+ * One float curve of a clip (`attribute` on `path`), sampled at 30 fps from Unity's Hermite
+ * keys to its last key: { times, values, duration }, or null.
+ */
+function sampleFloatCurve(text, attribute, path = '') {
+  const floats = text.split('\n  m_FloatCurves:')[1]?.split(/\n  \w/)[0] ?? '';
+  for (const item of floats.split('\n  - curve:').slice(1)) {
+    if (item.match(/\n\s+attribute: (.*)/)?.[1].trim() !== attribute) continue;
+    if ((item.match(/\n\s+path: (.*)/)?.[1].trim() ?? '') !== path) continue;
+    const keys = [...item.matchAll(/time: ([^\n]+)\n\s+value: ([^\n]+)\n\s+inSlope: ([^\n]+)\n\s+outSlope: ([^\n]+)/g)].map(([, t, v, i, o]) => ({ t: Number(t), v: Number(v), i: Number(i), o: Number(o) }));
+    if (!keys.length) return null;
+    const at = (time) => {
+      if (time <= keys[0].t) return keys[0].v;
+      const k = keys.findIndex((key) => key.t >= time);
+      if (k < 0) return keys[keys.length - 1].v;
+      const a = keys[k - 1];
+      const b = keys[k];
+      const dt = b.t - a.t;
+      const u = (time - a.t) / dt;
+      if (!Number.isFinite(a.o) || !Number.isFinite(b.i)) return a.v;
+      return (2 * u ** 3 - 3 * u ** 2 + 1) * a.v + (u ** 3 - 2 * u ** 2 + u) * dt * a.o + (-2 * u ** 3 + 3 * u ** 2) * b.v + (u ** 3 - u ** 2) * dt * b.i;
+    };
+    const duration = keys[keys.length - 1].t;
+    const frames = Math.max(1, Math.round(duration * 30));
+    const times = [];
+    const values = [];
+    for (let f = 0; f <= frames; f++) {
+      times.push(round((f / frames) * duration, 4));
+      values.push(round(at((f / frames) * duration), 4));
+    }
+    return { times, values, duration: round(duration, 4) };
+  }
+  return null;
+}
+
+/**
  * Component on/off curves (m_Enabled): sampled as steps, { property: 'enabled', classID,
  * script }. parseAnimators keeps the ones that show or hide something.
  */
@@ -1676,6 +1711,24 @@ function parseMeshAnimations(file, guidIndex) {
     const wrap = Number(doc.match(/\n {2}_wrapMode: (\d+)/)?.[1] ?? 0); // 1 Once, 4 PingPong, else repeat
     const trigger = docs.find((d) => d.kind === '114' && new RegExp(`\\n {2}_meshMorpher: \\{fileID: ${fid}\\}`).test(d.doc));
     const after = names.get(goOf.get(trigger?.doc.match(/\n {2}_animation: \{fileID: (\d+)/)?.[1]));
+    // Manual (_animationType 1): the morph is _animTime, keyed by a legacy clip on the
+    // morpher's own object (1.67 Arabia's camels graze: frames 2, 0, 2, 3.9 over 4.5 s),
+    // started at a random time by AnimationInitializer
+    let timeline = null;
+    if (/\n {2}_animationType: 1\b/.test(doc)) {
+      const own = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+      for (const { doc: adoc, kind } of docs) {
+        if (kind !== '111' || adoc.match(/m_GameObject: \{fileID: (\d+)/)?.[1] !== own) continue;
+        const clip = guidIndex.get(adoc.match(/\n {2}m_Animation: \{[^}]*guid: (\w+)/)?.[1]);
+        const curve = clip && existsSync(clip) ? sampleFloatCurve(read(clip), '_animTime', '') : null;
+        if (!curve) continue;
+        const loops = /\n {2}m_WrapMode: 2/.test(read(clip)) || /\n {2}m_WrapMode: 2/.test(adoc);
+        const init = docs.find((d) => d.kind === '114' && d.doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1] === own && /\n {4}StartTimeMax:/.test(d.doc))?.doc;
+        const start = init ? [num(init.match(/StartTimeMin: ([\d.e-]+)/)?.[1] ?? '0'), num(init.match(/StartTimeMax: ([\d.e-]+)/)?.[1] ?? '0')] : [0, 0];
+        timeline = { ...curve, loop: loops, start };
+        break;
+      }
+    }
     out[names.get(go)] = {
       frames,
       duration: [loopDuration, loopDuration],
@@ -1686,6 +1739,7 @@ function parseMeshAnimations(file, guidIndex) {
       delay: 0,
       materials: materialsOf.get(go) ?? [],
       ...(after ? { after } : {}),
+      ...(timeline ? { timeline } : {}),
     };
   }
   for (const { doc } of docs) {

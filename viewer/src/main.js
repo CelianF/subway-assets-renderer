@@ -755,13 +755,22 @@ async function applyMeshAnimations(obj, anims, seed) {
   const rng = mulberry32(seed ^ 0x6d657368);
   const table = sanitizedTable(Object.entries(anims)); // GLTFLoader renames "X (1)" to "X_(1)"
   const jobs = [];
-  obj.traverse((o) => {
+  // A node and one inside it can share the name (1.67 Arabia's camel: the root and its body
+  // mesh): the innermost carries the flipbook, or the saddle took the body's frames
+  const matches = [];
+  obj.traverse((o) => nodeKey(table, o.name) && matches.push(o));
+  const inside = (o, outer) => {
+    for (let p = o.parent; p; p = p.parent) if (p === outer) return true;
+    return false;
+  };
+  for (const o of matches) {
     const key = nodeKey(table, o.name);
-    if (!key) return;
     const anim = table[key];
+    // (MeshMorpher targets only: a multi-part mesh's parts sit under a same-named group)
+    if (anim.morph && matches.some((m) => m !== o && inside(m, o) && nodeKey(table, m.name) === key)) continue;
     // One primitive: the node is the mesh; several: a group of meshes
     const meshes = o.isMesh ? [o] : o.children.filter((c) => c.isMesh);
-    if (!meshes.length && !anim.materials?.length) return;
+    if (!meshes.length && !anim.materials?.length) continue;
     jobs.push(
       Promise.all(anim.frames.map((url) => loadGlb(url))).then((scenes) => {
         const frames = scenes.map((scene) => {
@@ -815,10 +824,13 @@ async function applyMeshAnimations(obj, anims, seed) {
           morph: anim.morph,
           // Shown once the bird's clip is past its rest pose: wings out as it takes off
           clip: anim.after ? (animatedNode(obj, anim.after)?.userData.clip ?? null) : null,
+          // Manual morphers: the frame keyed over time, from a random start (AnimationInitializer)
+          timeline: anim.timeline ?? null,
+          timelineStart: anim.timeline ? anim.timeline.start[0] + rng() * (anim.timeline.start[1] - anim.timeline.start[0]) : 0,
         });
       }),
     );
-  });
+  }
   await Promise.all(jobs);
 }
 
@@ -859,8 +871,20 @@ function updateMorph(a, time) {
     if (!shown) return;
   }
   const last = a.frames.length - 1;
-  const u = (local / a.duration) * last;
-  const at = !a.loop ? Math.min(u, last) : a.pingPong ? last - Math.abs((u % (2 * last)) - last) : u % last;
+  let at;
+  if (a.timeline) {
+    // MeshMorpher Manual: the clip's _animTime is the frame (blended between neighbors)
+    const tl = a.timeline;
+    let t = local + a.timelineStart;
+    t = tl.loop ? t % tl.duration : Math.min(t, tl.duration);
+    const k = Math.min(tl.times.length - 1, Math.max(0, Math.floor((t / tl.duration) * (tl.times.length - 1))));
+    const k1 = Math.min(k + 1, tl.times.length - 1);
+    const f = k1 > k ? (t - tl.times[k]) / (tl.times[k1] - tl.times[k]) : 0;
+    at = Math.min(Math.max(tl.values[k] + (tl.values[k1] - tl.values[k]) * f, 0), last);
+  } else {
+    const u = (local / a.duration) * last;
+    at = !a.loop ? Math.min(u, last) : a.pingPong ? last - Math.abs((u % (2 * last)) - last) : u % last;
+  }
   const i = Math.min(Math.floor(at), last - 1);
   const f = at - i;
   for (const [k, mesh] of a.meshes.entries()) {
