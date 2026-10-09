@@ -26,3 +26,6 @@ dist/
 # .NET build output
 bin/
 obj/
+
+# Local Claude skill (not shared)
+/.claude/skills/import-audit/

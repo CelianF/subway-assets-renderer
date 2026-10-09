@@ -55,6 +55,7 @@ export const globals = {
   uTime: { value: 0 },
   uFogColor: { value: new THREE.Color(0.63, 0.69, 0.74) },
   uFogRange: { value: new THREE.Vector2(428, 600) }, // ThemeConfig FogStart/EndDistance
+  uDistantFogRange: { value: new THREE.Vector2(-500, 950) }, // 1.x theme _distantFogStart/EndDistance
   uFogOn: { value: 1 },
   uBend: bend,
   uResolution: { value: new THREE.Vector2(1920, 1080) }, // render target size (screen-space masks)
@@ -115,9 +116,10 @@ export function setTrackCuts(zones) {
 }
 
 /** Applies a theme's fog (ThemeConfig); `scale` stretches the distances for free roaming. */
-export function setFog({ color, start, end } = {}, enabled = true, scale = 1) {
+export function setFog({ color, start, end, distant } = {}, enabled = true, scale = 1) {
   if (color) globals.uFogColor.value.setRGB(color[0], color[1], color[2]); // raw gamma values
   if (start != null) globals.uFogRange.value.set(start * scale, end * scale);
+  if (distant) globals.uDistantFogRange.value.set(distant[0] * scale, distant[1] * scale);
   globals.uFogOn.value = enabled ? 1 : 0;
 }
 
@@ -338,9 +340,15 @@ const CUT_MAIN = /* glsl */ `
 const FOG_GLSL = /* glsl */ `
 uniform vec3 uFogColor;
 uniform vec2 uFogRange;
+uniform vec2 uDistantFogRange;
 uniform float uFogOn;
 float fogFactor(float depth) {
+#ifdef DISTANT_FOG
+  // 1.x Custom/Distant Environment: its own, longer haze (already part-way in up close)
+  return uFogOn * clamp((depth - uDistantFogRange.x) / max(uDistantFogRange.y - uDistantFogRange.x, 1.0), 0.0, 1.0);
+#else
   return uFogOn * clamp((depth - uFogRange.x) / max(uFogRange.y - uFogRange.x, 1.0), 0.0, 1.0);
+#endif
 }
 `;
 
@@ -746,6 +754,8 @@ function translateDistorted(def) {
 }
 
 function translateLegacy(def) {
+  // 1.x distant scenery (1.65 Amsterdam's hedges, trees, windmills): unlit, in the distant fog
+  if (def.shader === 'Custom/Distant Environment') return { ...def, floats: { ...def.floats, _DistantFog: 1 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
   if (/^Custom\/Distorted\//.test(def.shader) && !/Skyline/.test(def.shader)) return translateDistorted(def);
   // Specials/Coin Glow (the coin's halo): its program isn't in the game files, only its
   // transparent queue without depth writes. Drawn like the other pickups' PickupGlow, on
@@ -758,6 +768,12 @@ function translateLegacy(def) {
   }
   if (!/^(SYBO\/)?Bend\//.test(def.shader) || /Combined|Specials|Common\/ScreenMask|Legacy\/VertexWave/.test(def.shader)) return def;
   const floats = { ...def.floats };
+  // 1.x tulips (1.65 Amsterdam): grey petals gradient-mapped from _Color1 to _Color2 (its
+  // _Color is a leftover the shader doesn't read)
+  if (/^Bend\/Wave \(Vertex Color Control, Gradient\)/.test(def.shader)) {
+    floats._HasGradient = 1;
+    def = { ...def, colors: { ...def.colors, _Color: def.colors?._Color1 ?? [1, 1, 1, 1] } };
+  }
   // Pre-3.0 additive shaders keep their color in _TintColor (2.8 Cambridge's red owl eyes)
   if (def.colors?._TintColor && !def.colors._Color) def = { ...def, colors: { ...def.colors, _Color: def.colors._TintColor } };
   for (const [re, flags] of LEGACY_SHADERS) if (re.test(def.shader)) Object.assign(floats, flags, def.floats.FADE_MODE != null ? {} : {});
@@ -852,10 +868,12 @@ export class MaterialLibrary {
     if (maskTex) defines.SCREEN_MASK = '';
     const wave = /(^|\/)(Legacy\/)?VertexWave|^Bend\/Wave \(Vertex Color Control\)/.test(def.shader); // 1.x flags
     if (f._HasGradient) defines.GRADIENT = '';
+    if (f._DistantFog) defines.DISTANT_FOG = '';
     if (/MeshNearPlayer$/.test(def.shader)) defines.NEAR_PLAYER = '';
     if (/PlayerSnowPlow$|Texture Indentation$/.test(def.shader)) defines.SNOW_PLOW = '';
     if (wave) defines.WAVE = '';
-    const wave2x = def.shader === 'SYBO/Bend/VertexWave';
+    // 1.x Bend/Wave (Vertex Color Control) compiles to the same wave as 2.x (1.65 Amsterdam's tulips)
+    const wave2x = def.shader === 'SYBO/Bend/VertexWave' || /^Bend\/Wave \(Vertex Color Control/.test(def.shader);
     if (wave2x) defines.WAVE_2X = '';
     if (def.shader === 'SYBO/Bend/Specials/Coin Glow') defines.DISTANCE_FADE = '';
 

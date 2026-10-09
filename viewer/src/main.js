@@ -431,9 +431,10 @@ async function applyMorphMeshes(obj, list) {
 async function applyAnimators(obj, url, seed, state = null) {
   if (!animatorFiles.has(url)) animatorFiles.set(url, fetch(dataUrl(url)).then((r) => r.json()).catch(() => []));
   const rng = mulberry32(seed ^ 0x616e696d);
+  const taken = new Set(); // Animators sharing a name (2.x FlyingBird's three colors): one node each
   for (const base of await animatorFiles.get(url)) {
     const anim = base.reveal && (state === 'revealed' || state === 'animated') ? revealClip(base) : base;
-    const mixer = animationMixer(obj, anim);
+    const mixer = animationMixer(obj, anim, taken);
     if (!mixer) continue;
     if (anim === base) mixer.setTime(rng() * anim.duration);
     else if (state === 'revealed') {
@@ -467,9 +468,10 @@ function revealClip(anim) {
 }
 
 /** A playing mixer for a baked clip ({ node, duration, tracks }) under obj, or null. */
-function animationMixer(obj, anim) {
-  const root = animatedNode(obj, anim.node);
+function animationMixer(obj, anim, taken = null) {
+  const root = animatedNode(obj, anim.node, taken);
   if (!root) return null; // its variant wasn't picked
+  taken?.add(root);
   // Unity paths ("Armature/Bone/Bone.007") walked child by child from the Animator
   const find = (path) => {
     let node = root;
@@ -488,11 +490,14 @@ function animationMixer(obj, anim) {
       const mesh = node.morphTargetDictionary ? node : node.children.find((c) => c.morphTargetDictionary?.[t.name] != null);
       return mesh ? new THREE.NumberKeyframeTrack(`${mesh.uuid}.morphTargetInfluences[${t.name}]`, t.times, t.values) : null;
     }
+    // Components switched on and off (2.x FlyingBird's wings)
+    if (t.property === 'visible') return new THREE.BooleanKeyframeTrack(`${node.uuid}.visible`, t.times, t.values.map(Boolean));
     return new Track[t.property](`${node.uuid}.${t.property}`, t.times, t.values);
   }).filter(Boolean);
   if (!tracks.length) return null;
   const mixer = new THREE.AnimationMixer(root);
-  mixer.clipAction(new THREE.AnimationClip(anim.node, anim.duration, tracks)).play();
+  const action = mixer.clipAction(new THREE.AnimationClip(anim.node, anim.duration, tracks)).play();
+  root.userData.clip = { action, lead: anim.lead ?? 0 }; // what a bird's wings wait for
   return mixer;
 }
 
@@ -518,14 +523,16 @@ async function nameRandomGroups() {
  * (3.70 Ireland: the outer sheep node places it 44 to the side, the inner one hops; animating
  * the outer pulled the sheep onto the road).
  */
-function animatedNode(obj, name) {
+function animatedNode(obj, name, taken = null) {
   const key = THREE.PropertyBinding.sanitizeNodeName(name);
   const matches = [];
-  obj.traverse((o) => (o.name === key || o.name.replace(/_\d+$/, '') === key) && matches.push(o));
   const inside = (o, outer) => {
     for (let p = o.parent; p; p = p.parent) if (p === outer) return true;
     return false;
   };
+  // (nor a node wrapping one already taken: a leftover clip of a variant that wasn't picked)
+  const free = (o) => !taken || (!taken.has(o) && ![...taken].some((t) => inside(t, o)));
+  obj.traverse((o) => (o.name === key || o.name.replace(/_\d+$/, '') === key) && free(o) && matches.push(o));
   return matches.find((o) => o.name === key && !matches.some((m) => m !== o && inside(m, o)))
     ?? matches.find((o) => !matches.some((m) => m !== o && inside(m, o)))
     ?? null;
@@ -740,8 +747,9 @@ function updateAnimators(dt) {
 }
 
 // MeshAnimation flipbooks (water ripples, fire, wing flaps): the game swaps a node's mesh
-// through a list of frames; the glb only holds the first one
-const meshAnimations = new Set(); // { root, meshes, frames, duration, offset, delay, loop }
+// through a list of frames; the glb only holds the first one. 1.x MeshMorpher (`morph`)
+// blends each frame into the next, on a mesh of its own (its node is left empty)
+const meshAnimations = new Set(); // { root, meshes, frames, duration, offset, delay, loop, morph, clip }
 
 async function applyMeshAnimations(obj, anims, seed) {
   const rng = mulberry32(seed ^ 0x6d657368);
@@ -753,7 +761,7 @@ async function applyMeshAnimations(obj, anims, seed) {
     const anim = table[key];
     // One primitive: the node is the mesh; several: a group of meshes
     const meshes = o.isMesh ? [o] : o.children.filter((c) => c.isMesh);
-    if (!meshes.length) return;
+    if (!meshes.length && !anim.materials?.length) return;
     jobs.push(
       Promise.all(anim.frames.map((url) => loadGlb(url))).then((scenes) => {
         const frames = scenes.map((scene) => {
@@ -761,6 +769,34 @@ async function applyMeshAnimations(obj, anims, seed) {
           scene.traverse((m) => m.isMesh && geos.push(m.geometry));
           return geos;
         });
+        if (!frames[0][0]) return;
+        if (!meshes.length && !anim.morph) {
+          // An empty mesh slot the flipbook draws into (2.x FlyingBird's wings)
+          const mesh = new THREE.Mesh(frames[0][0], new THREE.MeshBasicMaterial({ name: anim.materials[0] }));
+          mesh.name = `${o.name}_flipbook`;
+          o.add(mesh);
+          meshes.push(mesh);
+        }
+        if (anim.morph) {
+          // Its own copy of the first frame, its positions rewritten every frame
+          const first = frames[0][0];
+          const geometry = new THREE.BufferGeometry();
+          for (const [key, attr] of Object.entries(first.attributes)) if (key !== 'position') geometry.setAttribute(key, attr);
+          const src = first.attributes.position;
+          const position = new THREE.Float32BufferAttribute(src.count * 3, 3).setUsage(THREE.DynamicDrawUsage);
+          for (let v = 0; v < src.count; v++) position.setXYZ(v, src.getX(v), src.getY(v), src.getZ(v));
+          geometry.setAttribute('position', position);
+          geometry.setIndex(first.index);
+          for (const g of first.groups) geometry.addGroup(g.start, g.count, g.materialIndex);
+          if (!meshes.length) {
+            // Named like the glb's materials, so the library swaps in the real one
+            const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ name: anim.materials[0] }));
+            mesh.name = `${o.name}_morph`;
+            o.add(mesh);
+            meshes.push(mesh);
+          } else meshes.forEach((m) => (m.geometry = geometry));
+          meshes.forEach((m) => (m.frustumCulled = false));
+        }
         for (const mesh of meshes) {
           // Full frames replace the cutaway's floor/upper split; too small to need it
           mesh.userData.cutaway = false;
@@ -775,6 +811,10 @@ async function applyMeshAnimations(obj, anims, seed) {
           offset: anim.randomStart ? rng() * duration : 0,
           delay: anim.delay,
           loop: anim.loop,
+          pingPong: anim.pingPong,
+          morph: anim.morph,
+          // Shown once the bird's clip is past its rest pose: wings out as it takes off
+          clip: anim.after ? (animatedNode(obj, anim.after)?.userData.clip ?? null) : null,
         });
       }),
     );
@@ -790,6 +830,10 @@ function updateMeshAnimations(time) {
       if (a.attached || time - (a.created ??= time) > 60) meshAnimations.delete(a);
       continue;
     }
+    if (a.morph) {
+      updateMorph(a, time);
+      continue;
+    }
     const t = Math.max(0, time - a.delay) / a.duration + a.offset / a.duration;
     const n = (a.frames ?? a.nodes).length;
     const i = a.loop ? Math.floor(t * n) % n : Math.min(n - 1, Math.floor(t * n));
@@ -802,6 +846,37 @@ function updateMeshAnimations(time) {
       const geo = a.frames[i][k] ?? a.frames[i][0];
       if (geo && mesh.geometry !== geo) mesh.geometry = geo;
     });
+  }
+}
+
+/** 1.x MeshMorpher: the frames' vertices blended, the whole list once per `duration`. */
+function updateMorph(a, time) {
+  let local = Math.max(0, time - a.delay) + a.offset;
+  if (a.clip) {
+    local = a.clip.action.time - a.clip.lead;
+    const shown = local >= 0;
+    a.meshes.forEach((m) => (m.visible = shown));
+    if (!shown) return;
+  }
+  const last = a.frames.length - 1;
+  const u = (local / a.duration) * last;
+  const at = !a.loop ? Math.min(u, last) : a.pingPong ? last - Math.abs((u % (2 * last)) - last) : u % last;
+  const i = Math.min(Math.floor(at), last - 1);
+  const f = at - i;
+  for (const [k, mesh] of a.meshes.entries()) {
+    const from = (a.frames[i][k] ?? a.frames[i][0])?.attributes.position;
+    const to = (a.frames[i + 1][k] ?? a.frames[i + 1][0])?.attributes.position;
+    const pos = mesh.geometry.attributes.position;
+    if (!from || !to || from.count !== pos.count || to.count !== pos.count) continue;
+    for (let v = 0; v < pos.count; v++) {
+      pos.setXYZ(
+        v,
+        from.getX(v) + (to.getX(v) - from.getX(v)) * f,
+        from.getY(v) + (to.getY(v) - from.getY(v)) * f,
+        from.getZ(v) + (to.getZ(v) - from.getZ(v)) * f,
+      );
+    }
+    pos.needsUpdate = true;
   }
 }
 
@@ -1257,6 +1332,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
     }
   }
   if (!only && !dynamicOnly) await addThemeEffects(length, id);
+  if (!dynamicOnly) await placeDistantObjects(only ? [] : layout.items, length, id);
   await placeChallenge(length, id); // (studio zones change with the items: every rebuild)
   if (!only) await placeFloor(length, id);
   updateVisibility();
@@ -1292,6 +1368,78 @@ async function addThemeEffects(length, id) {
       copy.position.set(0, segment.position.y, z);
       layers.effect.add(copy);
     }
+  }
+}
+
+/**
+ * 1.x distant scenery (DistantEnvironmentController, 1.65 Amsterdam's hedges, trees and
+ * windmills). Every 90 units of run, each object (nearest first) may spawn beside the run
+ * where the stretch is of a kind it allows (Amsterdam: the low pieces, its tulip fields),
+ * at a random true offset from the track, its own minimum spacing apart. It's drawn shrunk
+ * by projectionX / offset and pulled towards the camera by as much (DistantEnvironmentObject),
+ * on the ground: as big on screen as it would be that far away, but within the fog.
+ */
+const distantGroup = new THREE.Group();
+scene.add(distantGroup);
+const distantObjects = []; // { obj, true: Vector3, factor }
+// EnvironmentKind (type, density) -> the boundary slots of that kind of stretch
+const DISTANT_KIND_SLOTS = { '1,1': 'low', '1,2': 'medium', '1,4': 'high', '2,0': 'tube', '4,0': 'pillars', '8,0': 'gate', '16,0': 'station', '32,0': 'epic' };
+const SPAWN_AHEAD = 1260; // the game spawns them this far ahead of the runner
+
+async function placeDistantObjects(items, length, id) {
+  distantGroup.clear();
+  distantObjects.length = 0;
+  const cfg = manifest.themeConfigs?.[state.theme]?.distantObjects;
+  if (!cfg || !items.length) return;
+  const rng = mulberry32(state.seed ^ 0x64697374);
+  // Stretches of each kind, per side: from the boundary pieces laid out
+  const stretches = [];
+  for (const it of items) {
+    const m = /^boundary_([a-z]+?)(?:_(?:start|mid|end))?(?:_(left|right))?$/.exec(it.slot ?? '');
+    if (!m) continue;
+    const len = manifest.prefabs[it.prefab]?.bbox?.[1][2] ?? 90;
+    stretches.push({ kind: m[1], side: m[2] ?? null, z0: it.pos[2], z1: it.pos[2] + Math.max(len, 1) });
+  }
+  const kindsAt = (z, side) => new Set(stretches.filter((st) => st.z0 <= z && z < st.z1 && (!st.side || !side || st.side === side)).map((st) => st.kind));
+  const objects = [...cfg.objects].sort((a, b) => Math.abs(a.x[1]) - Math.abs(b.x[1]));
+  const last = objects.map(() => -SPAWN_AHEAD);
+  let lastAny = 0;
+  const spawns = [];
+  for (let z = 0; z < length; z += 90) {
+    if (z < cfg.initialMinDistance || z < lastAny + cfg.minDistanceBetween) continue;
+    objects.forEach((d, i) => {
+      const side = d.side === 0 ? 'left' : d.side === 1 ? 'right' : rng() < 0.5 ? 'right' : 'left';
+      const kinds = kindsAt(z, side);
+      const allowed = !d.kinds.length || d.kinds.some(([t, dens]) => kinds.has(DISTANT_KIND_SLOTS[`${t},${dens}`]));
+      if (!allowed || z < d.initialMinDistance || z < last[i] + d.minDistanceBetween || rng() >= d.spawnRate) return;
+      const offset = d.x[0] + rng() * (d.x[1] - d.x[0]);
+      // Unity's right is -X here (glb mirrored)
+      const x = side === 'right' ? -offset : offset;
+      // Farther than the projection plane: its true place pushed back as far as it's pulled in
+      const stretch = offset / d.projectionX;
+      const camZ = z - SPAWN_AHEAD - 33; // the game camera, 33 behind the runner
+      spawns.push({ d, x, z: stretch > 1 ? camZ + (z - camZ) * stretch : z, factor: d.projectionX / offset });
+      last[i] = z;
+      lastAny = z;
+    });
+  }
+  const objs = await Promise.all(spawns.map((sp) => instantiate(sp.d.prefab, null, 'environment', Math.floor(rng() * 2 ** 31)).catch(() => null)));
+  if (id !== buildId) return;
+  spawns.forEach((sp, i) => {
+    const obj = objs[i];
+    if (!obj) return;
+    obj.scale.setScalar(sp.factor);
+    distantGroup.add(obj);
+    distantObjects.push({ obj, true: new THREE.Vector3(sp.x, 0, sp.z), factor: sp.factor });
+  });
+  updateDistantObjects();
+}
+
+/** Each frame, as DistantEnvironmentObject: camera + (true place - camera) × factor, on the ground. */
+function updateDistantObjects() {
+  const cam = camera.position;
+  for (const { obj, true: t, factor } of distantObjects) {
+    obj.position.set(cam.x + (t.x - cam.x) * factor, t.y, cam.z + (t.z - cam.z) * factor);
   }
 }
 
@@ -1889,6 +2037,7 @@ async function loadSkylineLayers(cfg) {
 }
 
 function updateSkyline() {
+  updateDistantObjects();
   for (const obj of skylineGroup.children) obj.position.set(0, 0, camera.position.z + obj.userData.distance * state.skylineDistance);
 }
 

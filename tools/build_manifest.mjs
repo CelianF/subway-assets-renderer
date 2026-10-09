@@ -215,6 +215,25 @@ function parseThemeConfig(file, guidIndex) {
     const texGuid = mat.match(/_MainTex:\n\s+m_Texture: \{fileID: \d+, guid: (\w+)/)?.[1];
     if (/_HasTexture: 1\b/.test(mat) && texGuid && guidIndex.has(texGuid)) out.sky.texture = guidIndex.get(texGuid);
   }
+  // 2.x skyline (2.1.0 Amsterdam): a list of flat silhouette layers, farthest first, each
+  // filled across the view (Style 0, 1) or one monument at a time (2, 3), in its own tint
+  const bgLayers = text.split('\n  BackgroundLayers:')[1]?.split(/\n {2}\w/)[0] ?? '';
+  const layers = bgLayers.split(/\n {2}- Prefabs:/).slice(1).map((layer, i) => {
+    const prefabs = [...layer.matchAll(GUID_RE_G)].map(([, g]) => guidIndex.get(g)).filter((p) => p?.endsWith('.prefab')).map(stem);
+    const single = Number(layer.match(/\n {4}Style: (\d+)/)?.[1] ?? 0) >= 2;
+    return {
+      name: `Layer ${i + 1}`,
+      fill: single ? [] : prefabs,
+      singles: single ? prefabs : [],
+      tint: color('    Tint', layer),
+      index: i + 1,
+      offset: num(layer.match(/\n {4}Offset: \{x: [^,]+, y: [^,]+, z: ([\d.e-]+)\}/)?.[1] ?? '0'),
+    };
+  }).filter((l) => l.fill.length || l.singles.length);
+  if (layers.length) {
+    const limits = text.match(/\n {2}Limits: \{x: ([\d.e-]+), y: ([\d.e-]+)\}/);
+    out.skylineLayers = { distance: number('DistanceFromPlayer') ?? 1000, spacing: 5, limits: limits ? [num(limits[1]), num(limits[2])] : [-350, 750], layers };
+  }
   const bg = text.match(/BackgroundLayer:\n {4}Prefab: \{fileID: \d+, guid: (\w+)/);
   if (bg && guidIndex.has(bg[1])) {
     out.background = {
@@ -974,6 +993,37 @@ function parseLegacyTheme(file, guidIndex) {
       power: 1,
     },
   };
+  // Distant scenery (1.65 Amsterdam's hedges, trees, windmills: DistantEnvironmentController):
+  // objects spawned beside the run on some kinds of stretch, drawn smaller and nearer than
+  // they are (the viewer projects them), in their own longer fog
+  const distantStart = number('_distantFogStartDistance');
+  const distantEnd = number('_distantFogEndDistance');
+  if (distantStart != null && distantEnd != null) config.fog.distant = [distantStart, distantEnd];
+  const distantText = text.split('\n  _distantEnvironmentSettings:')[1]?.split(/\n {2}\w/)[0] ?? '';
+  const distant = distantText.split(/\n {2}- _name: /).slice(1).map((entry) => {
+    const field = (key) => number(key, entry.replace(/\n {4}/g, '\n  '));
+    return {
+      name: entry.split('\n')[0].trim(),
+      prefab: prefabName(entry.match(/\n {4}_prefab: \{fileID: \d+, guid: (\w+)/)?.[1]),
+      side: field('_environmentSide') ?? 2, // 0 left, 1 right, 2 either
+      // EnvironmentKind: type (1 Fillers, 2 Tube, 4 Pillars, 8 Gates, 16 Station, 32 Epic) and
+      // density (0 default; fillers 1 low, 2 medium, 4 high); none listed: anywhere
+      kinds: [...(entry.split('_environmentKind:')[1]?.split(/\n {4}_minTrueXOffset/)[0] ?? '').matchAll(/_type: (\d+)\n\s+_density: (\d+)/g)].map(([, t, d]) => [Number(t), Number(d)]),
+      x: [field('_minTrueXOffset') ?? 0, field('_maxTrueXOffset') ?? 0],
+      projectionX: field('_projectionPositionX') ?? 250,
+      initialMinDistance: field('_initialMinDistance') ?? 0,
+      minDistanceBetween: field('_minDistanceBetween') ?? 0,
+      spawnRate: field('_spawnRate') ?? 1,
+    };
+  }).filter((d) => d.prefab);
+  if (distant.length) {
+    const global = text.split('\n  _distantEnvironmentGlobalSetting:')[1] ?? '';
+    config.distantObjects = {
+      initialMinDistance: num(global.match(/_globalInitialMinDistance: ([\d.e-]+)/)?.[1] ?? '0'),
+      minDistanceBetween: num(global.match(/_globalMinDistanceBetween: ([\d.e-]+)/)?.[1] ?? '0'),
+      objects: distant,
+    };
+  }
   if (layers.length) {
     config.skylineLayers = {
       distance: number('_backgroundStartDistance') ?? 1000,
@@ -1110,11 +1160,17 @@ function parseAnimators(file, guidIndex) {
     const tracks = new Map(); // path|property -> { times, values }
     let start = 0;
     for (const { clip } of sequence) {
-      if (!clip || !existsSync(clip)) continue;
+      if (!clip || !existsSync(clip)) {
+        // A state without a clip (2.x FlyingBird's Idle, until the runner comes near): the
+        // rest pose, held (keys before the next clip's hold its first values)
+        if (tracks.size || sequence.some((st) => st.clip && existsSync(st.clip))) start += HOLD;
+        continue;
+      }
       const text = read(clip);
       const stop = Number(text.match(/m_StopTime: ([\d.eE+-]+)/)?.[1] ?? 0);
       const length = stop < 0.1 ? HOLD : stop;
       sampleClipTracks(text, stop, length, start, tracks, FPS);
+      sampleEnabledTracks(text, stop, length, start, tracks, FPS);
       start += length;
     }
     if (tracks.size) out.push({ node: names.get(go), duration: round(start, 4), tracks: [...tracks.values()] });
@@ -1130,6 +1186,12 @@ function parseAnimators(file, guidIndex) {
     const reveal = kind === '114' && guidIndex.get(doc.match(/\n {2}_revealAnimation: \{[^}]*guid: (\w+)/)?.[1]);
     if (!reveal) continue;
     for (const [, fid] of doc.matchAll(/\n\s+- Animation: \{fileID: (\d+)/g)) scriptReveal.set(fid, reveal);
+  }
+  // Animations a bird trigger plays along with its wings' MeshMorpher
+  const triggered = new Set();
+  for (const { doc, kind } of docs) {
+    const anim = kind === '114' && /\n {2}_meshMorpher: \{fileID: [1-9]/.test(doc) && doc.match(/\n {2}_animation: \{fileID: (\d+)/)?.[1];
+    if (anim) triggered.add(anim);
   }
   for (const { doc, kind, fid } of docs) {
     if (kind !== '111') continue;
@@ -1148,7 +1210,7 @@ function parseAnimators(file, guidIndex) {
       if (rtracks.size) revealed = { duration: round(rstop, 4), tracks: [...rtracks.values()] };
     }
     const text = read(clip);
-    const lastKey = Math.max(0, ...[...text.matchAll(/\n\s+time: ([\d.eE+-]+)/g)].map(([, t]) => Number(t)));
+    const lastKey = Math.max(0, ...[...text.matchAll(/\n\s+(?:- )?time: ([\d.eE+-]+)/g)].map(([, t]) => Number(t)));
     const stop = Math.max(Number(text.match(/m_StopTime: ([\d.eE+-]+)/)?.[1] ?? 0), lastKey);
     if (stop <= 0) continue;
     const tracks = new Map();
@@ -1165,6 +1227,17 @@ function parseAnimators(file, guidIndex) {
       continue;
     }
     const looping = /m_LoopTime: 1/.test(text) || /m_WrapMode: 2/.test(doc);
+    if (!looping && triggered.has(fid)) {
+      // Played when the runner comes near (1.x FlyingBirdCharacterTrigger): the rest pose
+      // held first, then the clip (the bird sits, then flies off)
+      for (const t of tracks.values()) {
+        const n = t.values.length / t.times.length;
+        t.times = [0, ...t.times.map((x) => round(x + HOLD, 4))];
+        t.values = [...t.values.slice(0, n), ...t.values];
+      }
+      out.push({ node: names.get(go), duration: round(HOLD + stop, 4), tracks: [...tracks.values()], lead: HOLD });
+      continue;
+    }
     const duration = looping ? stop : stop + HOLD;
     for (const t of tracks.values()) {
       const n = t.values.length / t.times.length;
@@ -1172,6 +1245,22 @@ function parseAnimators(file, guidIndex) {
       t.values.push(...t.values.slice(-n));
     }
     out.push({ node: names.get(go), duration: round(duration, 4), tracks: [...tracks.values()], ...(revealed ? { reveal: revealed } : {}) });
+  }
+  // On/off curves become visibility: renderers, and mesh flipbooks drawing into an empty
+  // MeshFilter (2.x FlyingBird's wings: nothing shows until the clip turns them on)
+  const meshFilters = new Map(docs.filter((d) => d.kind === '33').map((d) => [d.fid, d.doc]));
+  const hidingScripts = new Set();
+  for (const { doc, kind } of docs) {
+    if (kind !== '114' || !/\n {2}_meshes:/.test(doc)) continue;
+    const filter = meshFilters.get(doc.match(/\n {2}_meshFilter: \{fileID: (\d+)/)?.[1]);
+    if (filter && /m_Mesh: \{fileID: 0\}/.test(filter)) hidingScripts.add(doc.match(/m_Script: \{[^}]*guid: (\w+)/)?.[1]);
+  }
+  for (const anim of out) {
+    anim.tracks = anim.tracks.flatMap((t) => {
+      if (t.property !== 'enabled') return [t];
+      if (!['23', '137'].includes(t.classID) && !(t.classID === '114' && hidingScripts.has(t.script))) return [];
+      return [{ path: t.path, property: 'visible', times: t.times, values: t.values }];
+    });
   }
   return out;
 }
@@ -1433,6 +1522,31 @@ function sampleClipTracks(text, stop, length, start, tracks, fps = 30) {
 }
 
 /**
+ * Component on/off curves (m_Enabled): sampled as steps, { property: 'enabled', classID,
+ * script }. parseAnimators keeps the ones that show or hide something.
+ */
+function sampleEnabledTracks(text, stop, length, start, tracks, fps = 30) {
+  const frames = Math.max(1, Math.round(length * fps));
+  const floats = text.split('\n  m_FloatCurves:')[1]?.split(/\n  \w/)[0] ?? '';
+  for (const item of floats.split('\n  - curve:').slice(1)) {
+    if (!/\n\s+attribute: m_Enabled\b/.test(item)) continue;
+    const curvePath = item.match(/\n\s+path: (.*)/)?.[1].trim() ?? '';
+    const classID = item.match(/\n\s+classID: (\d+)/)?.[1];
+    const script = item.match(/\n\s+script: \{[^}]*guid: (\w+)/)?.[1] ?? null;
+    const keys = [...item.matchAll(/time: ([^\n]+)\n\s+value: ([^\n]+)/g)].map(([, t, v]) => ({ t: Number(t), v: Number(v) }));
+    if (!keys.length) continue;
+    const at = (time) => [...keys].reverse().find((k) => k.t <= time + 1e-6)?.v ?? keys[0].v;
+    const key = `${curvePath}|enabled`;
+    if (!tracks.has(key)) tracks.set(key, { path: curvePath, property: 'enabled', classID, script, times: [], values: [] });
+    const track = tracks.get(key);
+    for (let f = 0; f <= frames; f++) {
+      track.times.push(round(start + (f / frames) * length, 4));
+      track.values.push(at(Math.min((f / frames) * stop, stop)) >= 0.5 ? 1 : 0);
+    }
+  }
+}
+
+/**
  * TrailRenderers swept by a legacy Animation clip (3.60 Ireland: the rainbow drawn over the
  * sea when the player passes). Returns [{ node, material, width, animation: { node,
  * duration, tracks } }] so the viewer can lay the finished trail down as a ribbon.
@@ -1466,7 +1580,7 @@ function parseTrails(file, guidIndex) {
     const material = guidIndex.get(doc.match(/m_Materials:\n\s+- \{fileID: \d+, guid: (\w+)/)?.[1]);
     if (!animated || !material) continue; // a still trail draws nothing
     const text = read(clipOf.get(animated));
-    const lastKey = Math.max(0, ...[...text.matchAll(/\n\s+time: ([\d.eE+-]+)/g)].map(([, t]) => Number(t)));
+    const lastKey = Math.max(0, ...[...text.matchAll(/\n\s+(?:- )?time: ([\d.eE+-]+)/g)].map(([, t]) => Number(t)));
     const stop = Math.max(Number(text.match(/m_StopTime: ([\d.eE+-]+)/)?.[1] ?? 0), lastKey);
     const tracks = new Map();
     sampleClipTracks(text, stop, stop, 0, tracks);
@@ -1529,15 +1643,51 @@ function parseSkinnedMeshes(file, guidIndex) {
 
 /** MeshAnimation components (water ripples, fire, wing flaps): mesh flipbooks.
  *
- * GameObject name -> { frames: [mesh names], duration: [min, max], loop, randomStart, delay }.
- * The glb export only holds the first frame. */
+ * GameObject name -> { frames: [mesh names], duration: [min, max], loop, randomStart, delay,
+ * materials }. The glb export only holds the first frame (or none: 1.x MeshMorpher wings).
+ * 1.x MeshMorpher (1.65 Amsterdam's pigeon wings): `morph`, blending each frame into the next;
+ * a bird trigger shows it when its Animation starts playing (`after`: that node). */
 function parseMeshAnimations(file, guidIndex) {
   const docs = yamlDocs(read(file));
   const names = new Map();
+  const goOf = new Map(); // component -> GameObject
+  const materialsOf = new Map(); // GameObject -> renderer's material names
   for (const { doc, kind, fid } of docs) {
     if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    if (go) goOf.set(fid, go);
+    if (kind === '23' || kind === '137') {
+      const mats = [...(doc.split('m_Materials:')[1]?.split(/\n {2}\w/)[0] ?? '').matchAll(GUID_RE_G)]
+        .map(([, g]) => guidIndex.get(g))
+        .filter((p) => p?.endsWith('.mat'))
+        .map(stem);
+      if (mats.length) materialsOf.set(go, mats);
+    }
   }
   const out = {};
+  for (const { doc, fid } of docs) {
+    if (!doc.startsWith('!u!114') || !/\n {2}_morphTargets:/.test(doc) || !/\n {2}_loopDuration:/.test(doc)) continue;
+    const go = goOf.get(doc.match(/\n {2}_targetMeshFilter: \{fileID: (\d+)/)?.[1]) ?? doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    const block = doc.match(/\n {2}_morphTargets:\n((?: {2}- .*\n)+)/);
+    if (!go || !names.has(go) || !block) continue;
+    const frames = [...block[1].matchAll(GUID_RE_G)].map(([, g]) => guidIndex.get(g)).filter(Boolean).map((p) => stem(p));
+    if (frames.length < 2) continue;
+    const loopDuration = num(doc.match(/\n {2}_loopDuration: ([\d.e-]+)/)[1]);
+    const wrap = Number(doc.match(/\n {2}_wrapMode: (\d+)/)?.[1] ?? 0); // 1 Once, 4 PingPong, else repeat
+    const trigger = docs.find((d) => d.kind === '114' && new RegExp(`\\n {2}_meshMorpher: \\{fileID: ${fid}\\}`).test(d.doc));
+    const after = names.get(goOf.get(trigger?.doc.match(/\n {2}_animation: \{fileID: (\d+)/)?.[1]));
+    out[names.get(go)] = {
+      frames,
+      duration: [loopDuration, loopDuration],
+      loop: wrap !== 1,
+      ...(wrap === 4 ? { pingPong: true } : {}),
+      morph: true,
+      randomStart: false,
+      delay: 0,
+      materials: materialsOf.get(go) ?? [],
+      ...(after ? { after } : {}),
+    };
+  }
   for (const { doc } of docs) {
     if (!doc.startsWith('!u!114') || !/\n {2}_meshes:/.test(doc) || !/_durationMin:/.test(doc)) continue;
     const go = doc.match(/m_GameObject: \{fileID: (\d+)/);
@@ -1555,6 +1705,7 @@ function parseMeshAnimations(file, guidIndex) {
       loop: field('_looping', 1) !== 0,
       randomStart: field('_randomStart', 0) !== 0,
       delay: field('_startDelay', 0),
+      materials: materialsOf.get(go[1]) ?? [],
     };
   }
   return out;
@@ -2854,6 +3005,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   // 1.x: skyline layers, and the cars / short pieces composites are built from
   const composites = new Map(Object.values(legacy).flatMap((t) => Object.entries(t.composites)));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.skylineLayers?.layers ?? []).flatMap((l) => [...l.fill, ...l.singles])));
+  transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.distantObjects?.objects ?? []).map((d) => d.prefab)));
   transitionPrefabs.push([...composites.values()].flatMap((parts) => parts.map((p) => p.prefab)));
   const classicNames = new Set([...(classic?.chunks ?? []), ...(classic?.pieces ?? [])].map((c) => c.name));
   const nameLists = [...Object.values(themes).flatMap((slots) => Object.values(slots)), ...transitionPrefabs];
@@ -3207,6 +3359,7 @@ function splitByTheme(manifest, staging, out, log) {
     if (config.background) names.add(config.background.prefab);
     for (const e of config.effects ?? []) names.add(e.prefab);
     for (const l of config.skylineLayers?.layers ?? []) for (const n of [...l.fill, ...l.singles]) names.add(n);
+    for (const d of config.distantObjects?.objects ?? []) names.add(d.prefab);
     for (const n of [...names]) for (const part of manifest.prefabs[n]?.parts ?? []) names.add(part.prefab);
     for (const queue = [...names]; queue.length; ) {
       for (const entry of Object.values(manifest.prefabs[queue.pop()]?.placeholders ?? {})) {
