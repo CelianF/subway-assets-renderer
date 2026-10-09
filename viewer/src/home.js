@@ -4,8 +4,17 @@
 import { addCredit } from './credit.js';
 
 const $ = (id) => document.getElementById(id);
-// Old games prefix themes with an internal number ("1.118_BuenosAires"): shown as "Buenos Aires"
-const prettyTheme = (t) => t.replace(/^\d+\.\d+_/, '').replace(/([a-z])([A-Z0-9])/g, '$1 $2');
+// Old games prefix themes with an internal number ("1.118_BuenosAires", "1.102.0_Bangkok")
+// and tag remakes with a year, HD or a version ("Bangkok_2017", "ArabiaHD_2017"): the name
+// is the city ("Buenos Aires", "Bangkok", "Arabia"), the tags go in the tile's note
+function splitTheme(t) {
+  let base = t.replace(/^\d+(?:\.\d+)+_/, '');
+  const tags = [];
+  for (let m; (m = base.match(/^(.*?[A-Za-z])[_\s-]?(\d{4}|HD|v?\d+(?:\.\d+)+)$/)); base = m[1]) tags.unshift(m[2]);
+  return { name: base.replace(/_/g, ' ').replace(/([a-z])([A-Z0-9])/g, '$1 $2'), tags };
+}
+const prettyTheme = (t) => splitTheme(t).name;
+const themeTags = (t) => splitTheme(t).tags.join(' ');
 
 addCredit();
 
@@ -53,7 +62,7 @@ function renderEnvs() {
   const version = (e) => (/^\d/.test(e.gameVersion ?? '') ? e.gameVersion : '0');
   const envs = allEnvs
     .map((env) => ({ env, city: cityOf(env.theme), name: prettyTheme(env.theme) }))
-    .filter(({ env, city, name }) => !q || [name, city, env.theme, env.gameVersion, env.note].some((s) => s?.toLowerCase().includes(q)))
+    .filter(({ env, city, name }) => !q || [name, city, env.theme, env.gameVersion, env.note, themeTags(env.theme)].some((s) => s?.toLowerCase().includes(q)))
     // By city, the city's own map first, then its events; newest version first
     .sort((a, b) => a.city.localeCompare(b.city) || a.name.localeCompare(b.name) || version(b.env).localeCompare(version(a.env), undefined, { numeric: true }));
   const cities = Map.groupBy(envs, (e) => e.city);
@@ -95,7 +104,13 @@ function envTile(env) {
       'div',
       { class: 'env-info' },
       el('h3', {}, prettyTheme(env.theme)),
-      el('p', {}, `v${env.gameVersion}`, env.copy ? el('span', { class: 'env-note' }, ` · ${env.note ?? `copy ${env.copy}`}`) : null),
+      el(
+        'p',
+        {},
+        `v${env.gameVersion}`,
+        themeTags(env.theme) ? el('span', { class: 'env-note' }, ` · ${themeTags(env.theme)}`) : null,
+        env.copy ? el('span', { class: 'env-note' }, ` · ${env.note ?? `copy ${env.copy}`}`) : null,
+      ),
       el(
         'div',
         { class: 'env-actions' },

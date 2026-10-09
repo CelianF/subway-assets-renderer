@@ -11,6 +11,7 @@ import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path';
 import { catalogThemes, parseCatalog, themeBundles } from './catalog.js';
 import { readZip } from './zip.js';
+import { versionFromName } from '../tools/version_name.mjs';
 
 const CATALOG = 'assets/aa/catalog.json';
 // Shared bundles the kit keeps besides the remote cities' own dependencies: game modes,
@@ -57,7 +58,7 @@ export async function saveRemoteKit(apkPath, root, sourceName = '') {
   // 3.70 keeps its bundles under assets/aa/Android/<version>/; 3.19 keeps them in Android/
   // itself, next to a countryflags-builtin_assets_assets/ folder: then the APK's name tells
   const folder = entries.map((e) => e.name.match(/^assets\/aa\/Android\/([^/]+)\//)?.[1]).find(isVersion);
-  const version = folder ?? sourceName.match(/(?:^|[_+\s-])(\d+\.\d+(?:\.\d+)?)(?=[-_+\s(]|\.(?:apk|xapk|zip)$|$)/i)?.[1];
+  const version = folder ?? versionFromName(sourceName);
   if (!version) return null;
   const catalog = parseCatalog(JSON.parse(catalogEntry.data.toString('utf8')));
   const maps = [];

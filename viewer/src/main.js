@@ -1795,15 +1795,17 @@ function themeWeather() {
   let best = null;
   let volume = 0;
   let leaves = null;
-  // (not a prop's own leaves, which fall where the prop stands: 1.98 Atlanta's trees)
-  const propFx = new Set(Object.values(manifest.prefabs).flatMap((p) => Object.values(p.placeholders ?? {}).flatMap((e) => e.prefabs.map((x) => x.name))));
+  // Leaves only from the start train or the intro: others fall where their piece stands
+  // (1.98 Atlanta's trees, 2.5 Bali's landmark)
+  const slots = Object.assign({}, ...Object.values(manifest.themes?.[state.theme] ?? {}));
+  const startFx = new Set([...(slots.prop_train_start ?? []), ...Object.keys(manifest.prefabs).filter((n) => manifest.prefabs[n].chunk?.intro)]);
   for (const [prefab, p] of Object.entries(manifest.prefabs)) {
     for (const [name, def] of Object.entries(p.particles ?? {})) {
       if (!def.loop) continue;
       if (/snow/i.test(name) && def.shape?.type === 5) {
         const v = def.shape.box.reduce((a, b) => a * b, 1);
         if (v > volume) [best, volume] = [def, v];
-      } else if (/lea(f|ves)|petal|blossom/i.test(name) && !propFx.has(prefab)) leaves ??= def;
+      } else if (/lea(f|ves)|petal|blossom/i.test(name) && startFx.has(prefab)) leaves ??= def;
     }
   }
   if (best || !leaves) return best;

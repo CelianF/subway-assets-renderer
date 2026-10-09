@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { createHash } from 'node:crypto';
+import { versionFromName } from './version_name.mjs';
 
 const GUID_RE = /guid: ([0-9a-f]{32})/;
 const GUID_RE_G = /guid: ([0-9a-f]{32})/g;
@@ -2314,7 +2315,7 @@ function parseClassic(root, project, guidIndex, log) {
     // (Globals.cs, or SocialManager.cs in 1.10: any script that names it)
     let city = null;
     for (const f of listDir(scriptDir).filter((p) => p.endsWith('.cs'))) {
-      city = read(f).match(/fblogo_([a-z]+)\.png/i)?.[1] ?? null;
+      city = read(f).match(/fblogo_([a-z]+)\d*\.png/i)?.[1] ?? null; // (1.31: "fblogo_bangkok2014.png")
       if (city) break;
     }
     const MULTI_WORD = { losangeles: 'LosAngeles', newyork: 'NewYork', sanfrancisco: 'SanFrancisco', buenosaires: 'BuenosAires', hongkong: 'HongKong', stpetersburg: 'StPetersburg', riodejaneiro: 'RioDeJaneiro', mexicocity: 'MexicoCity' };
@@ -3372,8 +3373,9 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const settings = path.join(root, 'ExportedProject', 'ProjectSettings', 'ProjectSettings.asset');
   const bundleVersion = existsSync(settings) ? read(settings).match(/bundleVersion: (.+)/)?.[1].trim() : null;
   // Old exports (1.44) have no bundleVersion: download sites put it in the file name
-  // ("com.kiloo.subwaysurf_1.44.0-70_…apk", "Subway+Surfers_3.69.2_APKPure.apk")
-  const nameVersion = (sourceName ?? '').match(/(?:^|[_+\s-])(\d+\.\d+(?:\.\d+)?)(?=[-_+\s(]|\.(?:apk|xapk|zip)$|$)/i)?.[1] ?? null;
+  // ("com.kiloo.subwaysurf_1.44.0-70_…apk", "Subway+Surfers_3.69.2_APKPure.apk",
+  // "subway-surfers-1-31-0.apk")
+  const nameVersion = versionFromName(sourceName);
   const version = bundleVersion || nameVersion ? [null, bundleVersion || nameVersion] : null;
   const categories = ['boundary', 'track', 'special', 'obstacle', 'train', 'prop', 'other'];
   const manifest = {

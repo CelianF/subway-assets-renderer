@@ -265,10 +265,12 @@ void main() {
   p.y -= texture2D(uIndentTex, uv).r * 8.0;
 #endif
 #ifdef WATER_WAVE
-  // Bend/Wave (1.x water): two sine swells across the surface (world space, sizes in units)
+  // Bend/Wave (UV Distorted), 1.x water: world height swells by two sines (seconds), along
+  // Unity's z as compiled. Across x the compiled frequency tore chunk seams open (their edge
+  // vertices sit 1-2 units apart from chunk to chunk), so that swell runs long (1.106 Bali)
   vec3 ww = (modelMatrix * vec4(p, 1.0)).xyz;
-  p.y += sin(ww.x * uWaterWave.z * 0.01 + uTime * uWaterSpeed.x) * uWaterWave.x * 0.25
-       + sin(ww.z * uWaterWave.w * 0.01 + uTime * uWaterSpeed.y) * uWaterWave.y * 0.25;
+  p.y += (uWaterWave.x * sin(uWaterWave.z * 0.01 * -ww.x + uWaterSpeed.x * uTime)
+        + uWaterWave.y * sin(uWaterWave.w * ww.z + uWaterSpeed.y * uTime)) / max(length(modelMatrix[1].xyz), 1e-4);
 #endif
   vWorld = (modelMatrix * vec4(p, 1.0)).xyz;
   vNormalW = normalize(mat3(modelMatrix) * n);
@@ -383,6 +385,9 @@ uniform vec4 uEllipse; // radii x, z; sin, cos of its angle
 #endif
 uniform vec4 uUvWobble; // 1.x water: x amplitude, x frequency, y amplitude, y frequency
 uniform vec2 uUvWobbleSpeed;
+uniform vec4 uUvWave; // _xWaveYDistortion amplitude, frequency, speed, start
+uniform float uUvWavePos; // _xWaveYDistortionPosFactor
+uniform vec2 uScrollF; // uScroll, for the fragment shader
 #ifdef WATER_DISTORT
 uniform sampler2D uDisplaceTex; // Specials/Water: a scrolling noise ripples the texture
 uniform vec2 uDisplaceScroll;
@@ -436,8 +441,23 @@ void main() {
 ${CUT_MAIN}
   vec2 uv = vUv;
 #ifdef UV_WOBBLE
-  uv.x += sin(vUv.y * uUvWobble.y * 6.2832 + uTime * uUvWobbleSpeed.x) * uUvWobble.x;
-  uv.y += sin(vUv.x * uUvWobble.w * 6.2832 + uTime * uUvWobbleSpeed.y) * uUvWobble.z * 0.1;
+  // After the compiled shader (Unity's V-up UVs, world z): x sways by two sines, the second
+  // growing up the texture; y is pushed by a sine fading out at the top, kept inside the
+  // texture (unclamped, it slid off into pale bands). The sways change a tenth as fast along
+  // z and the push is a tenth as strong: as compiled they squashed and folded the texture
+  // (1.106 Bali)
+  {
+    vec2 u = vec2(vUv.x, 1.0 - vUv.y);
+    // The strip under the track maps u mirrored along z (1.102 Bangkok: u = 1 - the outer
+    // water's): flipped back, so its pattern meets the rest and drifts the same way
+    float duz = dFdx(u.x) * dFdx(vWorld.z) + dFdy(u.x) * dFdy(vWorld.z);
+    if (duz > 0.0) u.x = 1.0 - u.x + 2.0 * uScrollF.x * uTime / 20.0;
+    float w = clamp((u.y - uUvWave.w) / (1.0 - uUvWave.w), 0.0, 1.0);
+    float ux = u.x + uUvWobble.x * sin(uTime * uUvWobbleSpeed.x + vWorld.z * uUvWobble.y * 0.1)
+                   + uUvWave.x * sin(uTime * uUvWave.z + w * w * uUvWave.y + uUvWavePos * 0.1 * vWorld.z);
+    float uy = clamp(u.y - (1.0 - u.y) * uUvWobble.z * 0.1 * sin(uTime * uUvWobbleSpeed.y + vWorld.z * uUvWobble.w), 0.0, 1.0) + 0.002;
+    uv = vec2(ux, 1.0 - uy);
+  }
 #endif
 #ifdef WATER_DISTORT
   uv += (texture2D(uDisplaceTex, vUv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5) * uDisplaceStrength;
@@ -793,7 +813,9 @@ function translateLegacy(def) {
   // the same glow texture: added on, tinted, growing in over its _Falloff distance (a guess:
   // coins glow from afar, the haze would cover them up close)
   if (def.shader === 'SYBO/Bend/Specials/Coin Glow') return { ...def, floats: { ...def.floats, FADE_MODE: 2, _SrcMode: 1, _DstMode: 1, _HasTint: 1, _ZWrite: 0 } };
-  if (/^Bend\/Wave \(UV Distorted\)/.test(def.shader)) {
+  // 1.x water, and 2.x Bend/UVWave (2.5 Bali, 1.100 San Francisco): the same shader renamed,
+  // same properties (2.x moves the texture per vertex; both share the tuned look below)
+  if (/^Bend\/Wave \(UV Distorted\)|^(SYBO\/)?Bend\/UVWave$/.test(def.shader)) {
     // 1.x water: scrolling, UV-wobbled texture on a gently swelling surface
     return { ...def, floats: { ...def.floats, _HasScroll: 1, _WaterWave: 1 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
   }
@@ -926,7 +948,8 @@ export class MaterialLibrary {
         uColor: { value: tint },
         uColor2: { value: color4(c._Color2) },
         uMultiplier: { value: f._Multiplier ?? 1 },
-        uScroll: { value: new THREE.Vector2(...((water ? c._TextureScrollSpeed : c._ScrollSpeed) ?? [0, 0]).slice(0, 2)) },
+        // (1.x water scrolls by _Time.y, seconds: 20x the _Time.x scroll)
+        uScroll: { value: new THREE.Vector2(...((water ? c._TextureScrollSpeed : c._ScrollSpeed) ?? [0, 0]).slice(0, 2)).multiplyScalar(f._WaterWave ? 20 : 1) },
         uDisplaceTex: { value: water ? this.tex(def, '_DisplaceTex') ?? WHITE : WHITE },
         uDisplaceScroll: { value: new THREE.Vector2(...(c._DisplaceScrollSpeed ?? [0, 0]).slice(0, 2)) },
         uDisplaceStrength: { value: f._DisplaceStrength ?? 0 },
@@ -955,6 +978,9 @@ export class MaterialLibrary {
         uWaterSpeed: { value: new THREE.Vector2(f._SpeedX ?? 1, f._SpeedZ ?? 1) },
         uUvWobble: { value: new THREE.Vector4(f._xDistortionAplitude ?? 0, f._xDistortionFrequency ?? 0, f._yDistortionAplitude ?? 0, f._yDistortionFrequency ?? 0) },
         uUvWobbleSpeed: { value: new THREE.Vector2(f._xDistortionSpeed ?? 0, f._yDistortionSpeed ?? 0) },
+        uUvWave: { value: new THREE.Vector4(f._xWaveYDistortionAplitude ?? 0, f._xWaveYDistortionFrequency ?? 0, f._xWaveYDistortionSpeed ?? 0, f._xWaveYDistortionStart ?? 0) },
+        uUvWavePos: { value: f._xWaveYDistortionPosFactor ?? 0 },
+        uScrollF: { value: new THREE.Vector2(...(c._ScrollSpeed ?? [0, 0]).slice(0, 2)).multiplyScalar(20) },
       },
     });
     this.applyRenderState(mat, name, def);

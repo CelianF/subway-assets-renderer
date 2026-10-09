@@ -29,6 +29,7 @@
       "app/**",
       "server/**",
       "tools/build_manifest.mjs",
+      "tools/version_name.mjs",
       "viewer/dist/**"
     ],
     "extraResources": [
