@@ -289,6 +289,18 @@ function sanitizedTable(entries) {
   return Object.fromEntries(entries.map(([k, v]) => [THREE.PropertyBinding.sanitizeNodeName(k), v]));
 }
 
+/**
+ * In-game ad spots (1.107+ BillboardAdPlacement): a blank quad the ad SDK (Adverty) fills at
+ * runtime, its renderer off until then: the board shows its own poster, as in the game.
+ */
+function markAdSpots(obj, spots) {
+  const table = sanitizedTable(spots.map((n) => [n, true]));
+  obj.traverse((node) => nodeKey(table, node.name) && (node.visible = false));
+}
+// The ad billboards themselves spawn only when the game's online config allows it
+// (RandomizerOnlineSettings placeholders): never seen in play, shown on request
+const hasAdSpots = () => Object.values(manifest?.prefabs ?? {}).some((p) => Object.values(p.placeholders ?? {}).some((e) => e.online));
+
 /** Keeps LOD0 only: the export contains every LODGroup level, which overlap and z-fight. */
 function removeLowLods(obj, lodHidden = []) {
   const hidden = sanitizedTable(lodHidden.map((n) => [n, true]));
@@ -991,6 +1003,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   // Skinned meshes need their own skeleton (a plain clone keeps the source's bones)
   const obj = prefab.animators ? cloneSkinned(source) : source.clone();
   removeLowLods(obj, prefab.lodHidden);
+  if (prefab.adSpots) markAdSpots(obj, prefab.adSpots);
   if (prefab.randomizers) applyRandomizers(obj, prefab.randomizers, variantSeed, name, variants);
   if (prefab.skinned) await applySkinned(obj, prefab.skinned);
   if (prefab.morphMeshes) await applyMorphMeshes(obj, prefab.morphMeshes);
@@ -1155,8 +1168,9 @@ async function fillPlaceholders(obj, placeholders, { layer, seed, cutMode, signa
   obj.traverse((node) => {
     const key = nodeKey(table, node.name);
     if (!key) return;
-    const { prefabs, probability, all } = table[key];
+    const { prefabs, probability, all, online } = table[key];
     if (rng() >= probability) return;
+    if (online && !state.ads) return;
     let picks = all ? prefabs : [weightedPick(rng, prefabs)];
     // Signal lights: the run's red/green choice, not a random one. Named lamps, or (1.44
     // "extra_lights_place": event_3/event_5) two lamps where red is the upper one
@@ -1240,6 +1254,7 @@ const state = {
   skyline: true,
   particles: params.get('particles') !== '0', // smoke, steam, glows, sparks
   weather: params.get('weather') !== '0', // snow or leaves along the whole run (from the start train's)
+  ads: params.get('ads') === '1', // ad billboards the game's online config spawns (off in play)
   skylineOpacity: 1,
   skylineDistance: 1,
   obstacleMode: params.get('obstacleMode') ?? 'random',
@@ -2342,11 +2357,21 @@ const generation = createWorkbar(
         },
         {
           title: 'Scenery',
-          visible: () => hasSlot('classic_chunk'),
+          visible: () => hasSlot('classic_chunk') || hasAdSpots(),
           controls: [
             {
               type: 'toggle',
+              label: 'Ad billboards',
+              title: "Ad boards the game's online config spawns (off in play). They show their poster: the ad slot stays blank without an ad server",
+              obj: state,
+              key: 'ads',
+              visible: hasAdSpots,
+              onChange: () => rebuild(),
+            },
+            {
+              type: 'toggle',
               label: 'Mix scenery',
+              visible: () => hasSlot('classic_chunk'),
               title: 'Each section picks its own look (tunnel, forest, city…). Off: long stretches of one look, as in the game',
               obj: state.gen,
               key: 'classicMix',

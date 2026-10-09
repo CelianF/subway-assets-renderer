@@ -1769,7 +1769,7 @@ function parseMeshAnimations(file, guidIndex) {
 /** 1.x placeholders: empty nodes the game fills at runtime with one prefab from a list
  * (Placeholder + MultiplePlaceholderPrefabProvider): tube sides, water ripples, props.
  *
- * GameObject name -> { prefabs: [{ name, weight }], probability, all }. */
+ * GameObject name -> { prefabs: [{ name, weight }], probability, all, online? }. */
 function parsePlaceholders(file, guidIndex) {
   const docs = yamlDocs(read(file));
   const names = new Map();
@@ -1791,11 +1791,39 @@ function parsePlaceholders(file, guidIndex) {
     }
     const prob = doc.match(/\n {2}_spawnProbability: ([\d.e-]+)/);
     if (prob) entry.probability = num(prob[1]);
+    // Spawned only if the game's online config says so (1.107 ad billboards: off in play)
+    const script = doc.match(/m_Script: .*guid: (\w+)/)?.[1];
+    if (script && stem(guidIndex.get(script) ?? '') === 'RandomizerOnlineSettings') entry.online = true;
     byGo.set(go, entry);
   }
   const out = {};
   for (const [go, entry] of byGo) if (entry.prefabs.length) out[names.get(go)] = entry;
   return out;
+}
+
+/** In-game ad spots (1.107+ BillboardAdPlacement, Adverty): a placeholder quad the SDK
+ * swaps for an ad at runtime, its own renderer switched off; with no ad served nothing
+ * shows. GameObject names of the placements and of the renderers they point at. */
+function parseAdSpots(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  const goOf = new Map();
+  for (const { doc, kind, fid } of docs) {
+    if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    if (go) goOf.set(fid, go);
+  }
+  const spots = new Set();
+  for (const { doc, kind } of docs) {
+    if (kind !== '114') continue;
+    const guid = doc.match(/m_Script: .*guid: (\w+)/)?.[1];
+    if (!guid || !/AdPlacement$/.test(stem(guidIndex.get(guid) ?? ''))) continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    if (names.has(go)) spots.add(names.get(go));
+    const renderer = doc.match(/_\w*MeshRenderer: \{fileID: (\d+)/)?.[1];
+    if (renderer && names.has(goOf.get(renderer))) spots.add(names.get(goOf.get(renderer)));
+  }
+  return sortedStrings(spots);
 }
 
 /** The prefab root's own scale when it isn't 1: 1.x placeholders keep it on the spawned copy
@@ -3245,6 +3273,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     }
     const filled = Object.entries(placeholders).filter(([, e]) => e.prefabs.length);
     if (filled.length) info.placeholders = Object.fromEntries(filled);
+    const adSpots = parseAdSpots(prefabPath, guidIndex);
+    if (adSpots.length) info.adSpots = adSpots;
     const rootScale = parseRootScale(prefabPath);
     // (a particle system in Shape scaling mode: the scale only stretches its emitter, see below)
     const shapeScaled = rootScale && !info.bbox && /\n {2}scalingMode: 2/.test(read(prefabPath));
