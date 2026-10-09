@@ -713,6 +713,8 @@ const LEGACY_SHADERS = [
   [/UV ?(\w+ )?Scroll/i, { _HasScroll: 1, _HasTint: 1 }], // UVScroll, 1.x "UV Lava Scroll"
   [/Reflection/i, { _HasReflections: 1, _HasTint: 1 }],
   [/Diffuse|MatCap/i, { _HasTint: 1 }],
+  // 2.x Bend/Diffuse ScreenMask (rails): its _MaskTex sampled at the screen position, added on
+  [/ScreenMask/i, { _ScreenMask: 1 }],
   // VertexWaveGradient (2.x tulips): grey petals gradient-mapped from _Color to _Color2
   [/VertexWaveGradient/i, { _HasGradient: 1 }],
   [/VertexWave$/i, { _HasTint: 1 }],
@@ -866,7 +868,7 @@ export class MaterialLibrary {
     if (on('_HasAlternateColors', 'ALTERNATE_COLORS_ENABLED') && altTex) defines.ALTERNATE = '';
     const maskTex = def.shader === 'SYBO/Bend/Common/ScreenMask' || f._ScreenMask ? this.tex(def, '_MaskTex') : null;
     if (maskTex) defines.SCREEN_MASK = '';
-    const wave = /(^|\/)(Legacy\/)?VertexWave|^Bend\/Wave \(Vertex Color Control\)/.test(def.shader); // 1.x flags
+    const wave = /(^|\/)(Legacy\/)?VertexWave|^Bend\/Wave \(Vertex Color Control/.test(def.shader); // 1.x flags (and the 1.x tulip heads' Gradient variant)
     if (f._HasGradient) defines.GRADIENT = '';
     if (f._DistantFog) defines.DISTANT_FOG = '';
     if (/MeshNearPlayer$/.test(def.shader)) defines.NEAR_PLAYER = '';
