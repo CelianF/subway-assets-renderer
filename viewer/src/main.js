@@ -1275,10 +1275,11 @@ function applyEffectPlayers(obj, players, seed) {
     if (frames.length < 2) return;
     // As EffectPlayer.cs: a cycle lasts a random time in [duration, maxDuration], split
     // evenly between frames; a frame changes on the first update after its wait runs out
-    // and the wait restarts from there, so at the game's 60 fps each frame lasts whole
-    // updates, at least two (Mexico's fire: 24 frames in 0.32 s plays in 0.8 s)
+    // and the wait restarts from there, so each frame lasts whole updates, at least two.
+    // Updates at 120 Hz, as the game runs on current phones: at 60 the shore foam (1.86
+    // Buenos Aires, 32 frames in 0.8 s) swapped 20 times a second and looked choppy
     const cycle = fx.maxDuration > fx.duration ? fx.duration + rng() * (fx.maxDuration - fx.duration) : fx.duration;
-    const tick = 1 / 60;
+    const tick = 1 / 120;
     const perFrame = (Math.ceil(Math.max(cycle / frames.length, 0) / tick - 1e-6) + 1) * tick;
     const duration = perFrame * frames.length;
     meshAnimations.add({ root: obj, nodes: frames, duration, offset: fx.randomStart ? rng() * duration : 0, delay: 0, loop: fx.loop });
