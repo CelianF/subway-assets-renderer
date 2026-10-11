@@ -317,6 +317,8 @@ const DOT = (() => {
 
 /** Blend, texture and tint of a particle material (Unity built-in, SYBO, 1.x Custom). */
 function particleLook(materials, name, renderMode = 0) {
+  // Unity's built-in Sprites-Default: a white square, alpha blended, in the particle color
+  if (name === '__builtin_Sprites-Default') return { map: WHITE, src: 5, dst: 10, fadeMode: 1, tint: [1, 1, 1, 1], vertexColors: true };
   const def = name ? materials.defs[name] : null;
   const shader = def?.shader ?? 'Particles/Additive';
   const f = def?.floats ?? {};
@@ -648,9 +650,11 @@ class Emitter {
       }
       const lt = this.age[i] / this.life[i];
       if (force) {
-        const fx = -sample(force.x, lt, this.rand[i * 2]) * dt;
-        const fy = sample(force.y, lt, this.rand[i * 2]) * dt;
-        const fz = sample(force.z, lt, this.rand[i * 2]) * dt;
+        // (randomizePerFrame: a new pick every frame, the confetti flutters; else one per particle)
+        const rf = force.perFrame ? Math.random() : this.rand[i * 2];
+        const fx = -sample(force.x, lt, force.perFrame ? Math.random() : rf) * dt;
+        const fy = sample(force.y, lt, force.perFrame ? Math.random() : rf) * dt;
+        const fz = sample(force.z, lt, force.perFrame ? Math.random() : rf) * dt;
         if (force.world) {
           const f = forceTmp.set(fx, fy, fz).applyMatrix3(this.toLocal);
           v[p] += f.x;

@@ -192,8 +192,15 @@ varying float vColorA; // RGBA vertex colors: their alpha fades transparent piec
 #include <clipping_planes_pars_vertex>
 #include <skinning_pars_vertex>
 #include <morphtarget_pars_vertex>
+#ifdef GRAFFITI
+attribute vec2 uv1;
+varying vec2 vUv1;
+#endif
 
 void main() {
+#ifdef GRAFFITI
+  vUv1 = uv1;
+#endif
   // Unity applies tiling/offset (and scrolls) with V pointing up; glTF UVs have V
   // flipped, so convert to Unity space and back or scrolling runs the wrong way.
   vec2 offset = uMainST.zw;
@@ -361,6 +368,10 @@ uniform float uFalloff;
 uniform sampler2D uMap;
 uniform vec4 uColor;
 uniform vec4 uColor2;
+#ifdef GRAFFITI
+uniform sampler2D uFrontTex;
+varying vec2 vUv1;
+#endif
 uniform float uMultiplier;
 uniform sampler2D uRefTex;
 uniform vec4 uRefColor;
@@ -463,6 +474,9 @@ ${CUT_MAIN}
   uv += (texture2D(uDisplaceTex, vUv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5) * uDisplaceStrength;
 #endif
   vec4 c = texture2D(uMap, uv);
+#ifdef GRAFFITI
+  c *= texture2D(uFrontTex, vUv1); // the tag over the wall, on the second UV set
+#endif
   vec3 base = c.rgb;
 #ifdef ALTERNATE
   c = mix(c, texture2D(uAltTex, vUv), altRatio());
@@ -558,9 +572,12 @@ ${CUT_GLSL}
 
 void main() {
 ${CUT_MAIN}
+  // As compiled (3.12): red + green cut at _AlphaKillValue; green - red picks the main color,
+  // the rest the foam color (3.x Copenhagen's waves are cyan foam, not white)
   vec4 m = texture2D(uMap, vUv);
-  if (max(m.r, m.g) < uAlphaKill) discard;
-  vec3 c = mix(uMainColor.rgb, uFoamColor.rgb, m.r) + vec3(m.r * 0.6); // foam fill is bright
+  if (m.r + m.g - uAlphaKill < 0.0) discard;
+  float d = m.g - m.r;
+  vec3 c = uMainColor.rgb * d + uFoamColor.rgb * (1.0 - d);
   gl_FragColor = vec4(mix(c, uFogColor, fogFactor(vDepth)), 1.0);
 }
 `;
@@ -814,6 +831,9 @@ function translateLegacy(def) {
     return { ...def, colors: { ...def.colors, _Color: def.colors?._Color1 ?? [1, 1, 1, 1] }, floats: { ...def.floats, _HasGradient: 1, _HasFogMultiplier: 1, _FogMultiplier: 0 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
   }
   if (/^Custom\/Distorted\//.test(def.shader) && !/Skyline/.test(def.shader)) return translateDistorted(def);
+  // SYBO/Bend/Specials/Overlay Graffiti (3.x Copenhagen's wall tags): the wall (_BackTex, first
+  // UVs) times the tag (_FrontTex, second UVs); it drew nothing before
+  if (def.shader === 'SYBO/Bend/Specials/Overlay Graffiti') return { ...def, textures: { ...def.textures, _MainTex: def.textures._BackTex }, floats: { ...def.floats, _Graffiti: 1 } };
   // Specials/Coin Glow (the coin's halo): its program isn't in the game files, only its
   // transparent queue without depth writes. Drawn like the other pickups' PickupGlow, on
   // the same glow texture: added on, tinted, growing in over its _Falloff distance (a guess:
@@ -891,7 +911,9 @@ export class MaterialLibrary {
     else if (/Bend\/(Legacy\/|Panning )Texture And Double Alpha$/.test(def.shader)) mat = this.doubleAlpha(name, def);
     else {
       const translated = translateLegacy(def);
-      if ((translated === def && !TRANSLATED.test(def.shader)) || translated.unruled) {
+      // (SYBO/Bend/Specials/*: each one its own shader, drawn plain unless named here)
+      const special = /Specials\//.test(def.shader) && !/Specials\/(Water|Fountain|NoFloorLava|Overlay Graffiti|Coin Glow|ThemeVfx\/MeshNearPlayer)$/.test(def.shader);
+      if ((translated === def && !TRANSLATED.test(def.shader)) || translated.unruled || special) {
         if (!unruledShaders.has(def.shader)) console.warn(`[materials] no viewer rule for shader "${def.shader}" (${name}): drawn as a plain texture`);
         unruledShaders.set(def.shader, [...(unruledShaders.get(def.shader) ?? []), name]);
       }
@@ -946,6 +968,7 @@ export class MaterialLibrary {
     if (maskTex && noiseTex) defines.SNOW_GLITTER = '';
     const wave = /(^|\/)(Legacy\/)?VertexWave|^Bend\/Wave \(Vertex Color Control/.test(def.shader); // 1.x flags (and the 1.x tulip heads' Gradient variant)
     if (f._HasGradient) defines.GRADIENT = '';
+    if (f._Graffiti) defines.GRAFFITI = '';
     if (f._DistantFog) defines.DISTANT_FOG = '';
     if (/MeshNearPlayer$/.test(def.shader)) defines.NEAR_PLAYER = '';
     if (/PlayerSnowPlow$|Texture Indentation$/.test(def.shader)) defines.SNOW_PLOW = '';
@@ -969,6 +992,7 @@ export class MaterialLibrary {
         uMainST: { value: new THREE.Vector4(...(main?.scale ?? [1, 1]), ...(main?.offset ?? [0, 0])) },
         uColor: { value: tint },
         uColor2: { value: color4(c._Color2) },
+        uFrontTex: { value: f._Graffiti ? this.tex(def, '_FrontTex') ?? WHITE : WHITE },
         uMultiplier: { value: f._Multiplier ?? 1 },
         // (1.x water scrolls by _Time.y, seconds: 20x the _Time.x scroll)
         uScroll: { value: new THREE.Vector2(...((water ? c._TextureScrollSpeed : c._ScrollSpeed) ?? [0, 0]).slice(0, 2)).multiplyScalar(f._WaterWave ? 20 : 1) },

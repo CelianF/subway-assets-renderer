@@ -1230,7 +1230,10 @@ function parseAnimators(file, guidIndex) {
       out.push({ node: names.get(go), duration: 1, tracks: [...tracks.values()], ...(revealed ? { reveal: revealed } : {}) });
       continue;
     }
-    const looping = /m_LoopTime: 1/.test(text) || /m_WrapMode: 2/.test(doc);
+    // The component's wrap mode, or the clip's own when it's Default (0): 1.71 Copenhagen's
+    // butterfly loops by its clip, and paused 1.5 s each lap when only the component was read
+    const wrap = Number(doc.match(/m_WrapMode: (\d+)/)?.[1] ?? 0) || Number(text.match(/m_WrapMode: (\d+)/)?.[1] ?? 0);
+    const looping = /m_LoopTime: 1/.test(text) || wrap === 2;
     if (!looping && triggered.has(fid)) {
       // Played when the runner comes near (1.x FlyingBirdCharacterTrigger): the rest pose
       // held first, then the clip (the bird sits, then flies off)
@@ -2518,6 +2521,13 @@ function minMaxCurve(c, fallback = 0) {
   if (c == null) return { mode: 0, min: fallback, max: fallback };
   if (typeof c === 'number') return { mode: 0, min: c, max: c }; // very old serializations
   const out = { mode: c.minMaxState ?? 0, min: c.minScalar ?? c.scalar ?? fallback, max: c.scalar ?? fallback };
+  // Unity 5.5 and older keep no minScalar: two constants are the scalar times each curve's
+  // first key (1.71 Copenhagen's confetti force: 30 × [-1, 1], read as a steady 30)
+  const first = (curve) => (Array.isArray(curve?.m_Curve) && curve.m_Curve.length ? curve.m_Curve[0].value : null);
+  if (out.mode === 3 && c.minScalar == null && first(c.minCurve) != null && first(c.maxCurve) != null) {
+    out.min = out.max * first(c.minCurve);
+    out.max *= first(c.maxCurve);
+  }
   if (out.mode === 1 || out.mode === 2) {
     out.curve = curveKeys(c.maxCurve);
     if (out.mode === 2) out.minCurve = curveKeys(c.minCurve);
@@ -2647,11 +2657,13 @@ function parseParticles(file, guidIndex) {
           radial: minMaxCurve(vel.radial),
         } : {}),
       } : null,
-      force: force ? { x: minMaxCurve(force.x), y: minMaxCurve(force.y), z: minMaxCurve(force.z), world: force.inWorldSpace === 1 } : null,
+      force: force ? { x: minMaxCurve(force.x), y: minMaxCurve(force.y), z: minMaxCurve(force.z), world: force.inWorldSpace === 1, ...(force.randomizePerFrame === 1 ? { perFrame: true } : {}) } : null,
       sheet: uv && (uv.tilesX > 1 || uv.tilesY > 1) ? { x: uv.tilesX, y: uv.tilesY, frame: minMaxCurve(uv.frameOverTime), cycles: uv.cycles ?? 1, row: uv.animationType === 1 ? (uv.randomRow ? -1 : uv.rowIndex ?? 0) : null } : null,
       render: {
         mode: r.m_RenderMode ?? 0,
-        material: matGuid ? stem(guidIndex.get(matGuid)) : null,
+        // (Unity's built-in Sprites-Default, fileID 10754: plain squares in the particle color,
+        // 3.12 Copenhagen's landmark confetti; it isn't in any export)
+        material: matGuid ? stem(guidIndex.get(matGuid)) : (r.m_Materials ?? []).some((m) => m?.fileID === 10754) ? '__builtin_Sprites-Default' : null,
         mesh: meshGuid && guidIndex.has(meshGuid) ? stem(guidIndex.get(meshGuid)) : null,
         // Mesh particles pick one of up to four meshes (Paris Summer Games' balloon colors),
         // uniformly (distribution 0) or by weight
