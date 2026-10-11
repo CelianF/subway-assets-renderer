@@ -588,8 +588,11 @@ export function prefabVariants(manifest, prefab) {
   const groups = Object.entries(manifest.prefabs[prefab]?.randomizers ?? {})
     .map(([g, e]) => [g, Object.keys((e && typeof e === 'object' && e.weights) || {})])
     .filter(([, kids]) => kids.length > 1);
-  if (!groups.length) return [null];
-  const n = Math.max(...groups.map(([, kids]) => kids.length));
+  // (and once per option of its biggest placeholder, which the showcase takes in turn:
+  // 1.104 Dubai's yacht spot has two yachts)
+  const spawns = Object.values(manifest.prefabs[prefab]?.placeholders ?? {}).filter((e) => !e.online && !e.all).map((e) => e.prefabs.length);
+  const n = Math.max(1, ...groups.map(([, kids]) => kids.length), ...spawns);
+  if (!groups.length) return Array.from({ length: n }, () => null);
   return Array.from({ length: n }, (_, i) => Object.fromEntries(groups.map(([g, kids]) => [g, kids[i % kids.length]])));
 }
 
@@ -842,8 +845,11 @@ export function generateLayout(
     let heights = ['low', 'medium', 'high'].filter((h) => allowed(`boundary_${h}_left`).length && allowed(`boundary_${h}_right`).length);
     const usePieces = heights.length > 0;
     if (!usePieces) heights = ['low', 'medium', 'high'];
+    // One height for the whole stretch: the game's route chunks set the building height
+    // (EnvironmentKind density) for all their blocks, so it changes only between chunks,
+    // never segment by segment (low, high, low...)
+    const height = pick(rng, heights);
     for (let i = 0; i < n; i++) {
-      const height = pick(rng, heights);
       // Ad slots replace a right-hand building now and then (in exports without an
       // active campaign they point at regular buildings)
       const sponsored = ['boundary_sponsored_right_front', 'boundary_sponsored_right_back'].filter(has);

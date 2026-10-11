@@ -878,7 +878,8 @@ const LEGACY_TRACK_INFOS = {
   boundary_tube: { SpawnTracks: true, ShowShadows: true },
 };
 // _environmentKind._type of _environmentTransitionConfigs -> boundary slot
-const LEGACY_ENVIRONMENT_KINDS = { 2: 'boundary_tube' };
+// (fillers, type 1, by density: 1.104 Dubai's low stretches have an entry and an exit piece)
+const LEGACY_ENVIRONMENT_KINDS = { 2: 'boundary_tube', '1/1': 'boundary_low_left', '1/2': 'boundary_medium_left', '1/4': 'boundary_high_left' };
 // Train cars per variant: the moving train's first car is the locomotive
 const LEGACY_TRAIN_CARS = { Cargo: ['cargo', 'cargo'], Standard: ['standard', 'standard_front'], Subway: ['sub', 'sub_front'] };
 const LEGACY_TRAINS = [['static', [1, 2, 3, 5]], ['moving', [3, 5]]];
@@ -951,10 +952,10 @@ function parseLegacyTheme(file, guidIndex) {
     (slots[`track_${kind === 'track' ? 'track' : 'ground'}`] ??= []).push(prefab);
   }
 
-  // Tube entrances/exits
+  // Tube entrances/exits, filler stretches' entry/exit pieces
   const transitions = [];
   for (const cfg of (text.split('\n  _environmentTransitionConfigs:')[1] ?? '').split(/\n {2}- _environmentKind:/).slice(1)) {
-    const slot = LEGACY_ENVIRONMENT_KINDS[number('_type', cfg)];
+    const slot = LEGACY_ENVIRONMENT_KINDS[number('_type', cfg)] ?? LEGACY_ENVIRONMENT_KINDS[`${number('_type', cfg)}/${number('_density', cfg)}`];
     if (!slot) continue;
     for (const at of ['start', 'end']) {
       const part = cfg.split(`_transition${at === 'start' ? 'Start' : 'End'}:`)[1]?.split('_transition')[0] ?? '';
@@ -1794,7 +1795,8 @@ function parseMeshAnimations(file, guidIndex) {
 }
 
 /** 1.x placeholders: empty nodes the game fills at runtime with one prefab from a list
- * (Placeholder + MultiplePlaceholderPrefabProvider): tube sides, water ripples, props.
+ * (Placeholder + MultiplePlaceholderPrefabProvider, or PlaceholderPrefabProvider for a single
+ * one): tube sides, water ripples, props.
  *
  * GameObject name -> { prefabs: [{ name, weight }], probability, all, online? }. */
 function parsePlaceholders(file, guidIndex) {
@@ -1815,6 +1817,12 @@ function parsePlaceholders(file, guidIndex) {
         if (guidIndex.has(g)) entry.prefabs.push({ name: stem(guidIndex.get(g)), weight: num(w) });
       }
       entry.all = /\n {2}_spawnAll: 1/.test(doc);
+    }
+    // PlaceholderPrefabProvider: a single prefab (1.104 Dubai's balloon burner flame,
+    // 0.00_FX_Fire, for MinDevicePerformance 2: high-end devices, as the viewer shows)
+    const single = doc.match(/\n {2}_prefab: \{fileID: \d+, guid: (\w+)/)?.[1];
+    if (single && guidIndex.has(single) && stem(guidIndex.get(doc.match(/m_Script: .*guid: (\w+)/)?.[1]) ?? '') === 'PlaceholderPrefabProvider') {
+      entry.prefabs.push({ name: stem(guidIndex.get(single)), weight: 1 });
     }
     const prob = doc.match(/\n {2}_spawnProbability: ([\d.e-]+)/);
     if (prob) entry.probability = num(prob[1]);

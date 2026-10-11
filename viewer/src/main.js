@@ -1264,6 +1264,7 @@ function updateTrainBlinkers(now) {
  * sides, beach props, fountains, the signal's red or green light). Spawned pieces can
  * have placeholders of their own.
  */
+const placeholderTurns = new Map(); // showcase: which option each placeholder shows next
 async function fillPlaceholders(obj, placeholders, { layer, seed, cutMode, signalSeed, signalColor }) {
   const rng = mulberry32(seed ^ 0x706c6163);
   const table = sanitizedTable(Object.entries(placeholders));
@@ -1272,9 +1273,19 @@ async function fillPlaceholders(obj, placeholders, { layer, seed, cutMode, signa
     const key = nodeKey(table, node.name);
     if (!key) return;
     const { prefabs, probability, all, online } = table[key];
-    if (rng() >= probability) return;
+    // Showcase (debug "show everything"): every placeholder spawns, its options in turn
+    // (1.104 Dubai's hot air balloon only comes from a 17.6% placeholder, never seen)
+    const showcase = state.gen.showcase && !online;
+    if (rng() >= probability && !showcase) return;
     if (online && !state.ads) return;
     let picks = all ? prefabs : [weightedPick(rng, prefabs)];
+    if (showcase && !all) {
+      // (one turn per option list: a tube's eight fish spots share their six fish)
+      const list = prefabs.map((p) => p.name).join('|');
+      const turn = placeholderTurns.get(list) ?? 0;
+      placeholderTurns.set(list, turn + 1);
+      picks = [prefabs[turn % prefabs.length]];
+    }
     // Signal lights: the run's red/green choice, not a random one. Named lamps, or (1.44
     // "extra_lights_place": event_3/event_5) two lamps where red is the upper one
     let red = prefabs.find((p) => /red/i.test(p.name));
