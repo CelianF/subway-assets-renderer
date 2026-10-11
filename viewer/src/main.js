@@ -136,6 +136,14 @@ const status = document.getElementById('status');
 const manifestRes = await fetch(`${DATA}/manifest.json`);
 if (!manifestRes.ok) location.replace('/');
 const manifest = await manifestRes.json();
+// Classic season skins (1.4 Halloween, 1.5 Christmas): the game's default; ?season=0 shows
+// the plain skin the build also has (its textures, meshes, fog, sky and skyline)
+const seasonName = Object.values(manifest.themeConfigs ?? {}).find((c) => c.season)?.season ?? null;
+if (seasonName && new URLSearchParams(location.search).get('season') === '0') {
+  for (const def of Object.values(manifest.materials ?? {})) if (def.textures?._MainTexPlain) def.textures._MainTex = def.textures._MainTexPlain;
+  for (const prefab of Object.values(manifest.prefabs ?? {})) if (prefab.plainGlb) prefab.glb = prefab.plainGlb;
+  for (const config of Object.values(manifest.themeConfigs ?? {})) if (config.plain) Object.assign(config, config.plain);
+}
 const envList = await (await fetch('/api/envs')).json().catch(() => []);
 const envInfo = envList.find((e) => e.id === ENV_ID) ?? { id: ENV_ID, theme: manifest.theme };
 document.title = `${envInfo.theme} · Subway Viewer`;
@@ -1312,6 +1320,7 @@ const state = {
   particles: params.get('particles') !== '0', // smoke, steam, glows, sparks
   weather: params.get('weather') !== '0', // snow or leaves along the whole run (from the start train's)
   ads: params.get('ads') === '1', // ad billboards the game's online config spawns (off in play)
+  season: params.get('season') !== '0', // classic season skin (1.4 Halloween, 1.5 Christmas)
   skylineOpacity: 1,
   skylineDistance: 1,
   obstacleMode: params.get('obstacleMode') ?? 'random',
@@ -2444,6 +2453,20 @@ const generation = createWorkbar(
           title: 'Scenery',
           visible: () => hasSlot('classic_chunk') || hasAdSpots(),
           controls: [
+            {
+              type: 'toggle',
+              label: `${seasonName === 'Xmas' ? 'Christmas' : seasonName} skin`,
+              title: 'The season skin this build shows by default. Off: the plain skin it also has (reloads the map)',
+              obj: state,
+              key: 'season',
+              visible: () => !!seasonName,
+              onChange: (on) => {
+                const url = new URL(location.href);
+                if (on) url.searchParams.delete('season');
+                else url.searchParams.set('season', '0');
+                location.replace(url);
+              },
+            },
             {
               type: 'toggle',
               label: 'Ad billboards',

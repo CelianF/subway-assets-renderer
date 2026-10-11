@@ -2341,24 +2341,29 @@ function parseClassic(root, project, guidIndex, log) {
       }
       log(`  season: ${season} (${textureSwaps.size} textures)`);
     }
-    if (skin) {
+    // (both skins: the season's is the default, the plain one kept for the viewer's toggle)
+    const skinLook = (skin) => {
+      const look = {};
       const rgba = (key) => {
         const m = skin.match(new RegExp(`\\n {4}${key}: \\{r: ([\\d.e-]+), g: ([\\d.e-]+), b: ([\\d.e-]+), a: ([\\d.e-]+)\\}`));
         return m ? m.slice(1, 5).map(Number) : null;
       };
       const refs = (key) => [...new Set([...(skin.split(`\n    ${key}:`)[1]?.split(/\n {4}\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => guidIndex.get(g)).filter((p) => p?.endsWith('.prefab')).map((p) => stem(p)))];
-      config.fog.color = rgba('fogColor') ?? config.fog.color;
+      look.fog = { ...config.fog, color: rgba('fogColor') ?? config.fog.color };
       // No gradient before 1.55: the sky plane sits past the fog's end, so it shows the fog color
-      const fogRGB = config.fog.color?.slice(0, 3) ?? null;
-      config.sky = { top: rgba('fogGradientTop')?.slice(0, 3) ?? fogRGB, bottom: rgba('fogGradientBottom')?.slice(0, 3) ?? fogRGB, power: 1 };
+      const fogRGB = look.fog.color?.slice(0, 3) ?? null;
+      look.sky = { top: rgba('fogGradientTop')?.slice(0, 3) ?? fogRGB, bottom: rgba('fogGradientBottom')?.slice(0, 3) ?? fogRGB, power: 1 };
       const tint = rgba('fogSilhouetteColor');
       const layers = [];
       const fill = refs('backgroundPrefabs');
       const singles = refs('monumentPrefabs');
       if (fill.length) layers.push({ name: 'Back', fill, singles: [], tint, index: 1, offset: 0 });
       if (singles.length) layers.push({ name: 'Front', fill: [], singles, tint, index: 2, offset: 0 });
-      if (layers.length) config.skylineLayers = { distance: 1000, spacing: 5, limits: [-350, 750], layers };
-    }
+      if (layers.length) look.skylineLayers = { distance: 1000, spacing: 5, limits: [-350, 750], layers };
+      return look;
+    };
+    if (skin) Object.assign(config, skinLook(skin));
+    if (seasonal && skins[0]) config.plain = skinLook(skins[0]);
     // The scene is the same for every World Tour city; the city of the build shows in the
     // Facebook share icon Globals.cs points at ("fblogo_vancouver.png")
     // (Globals.cs, or SocialManager.cs in 1.10: any script that names it)
@@ -2385,10 +2390,11 @@ function parseClassic(root, project, guidIndex, log) {
       if (!assetCache.has(file)) assetCache.set(file, meshAsset(file));
       return assetCache.get(file);
     };
+    let plainPass = false; // building the library without the season's meshes
     const geometryFor = (mi, pi, positions, hasUVs) => {
       const file = assetOfMesh.get(mi);
       if (!file || !existsSync(file)) return null;
-      if (meshPrefix) {
+      if (meshPrefix && !plainPass) {
         const base = stem(file);
         const swap = path.join(path.dirname(file), `${meshPrefix}_${base.slice(base.indexOf('_') + 1)}.asset`);
         const geo = swap !== file && existsSync(swap) && loadAsset(swap) ? submeshGeometry(loadAsset(swap), pi, null) : null;
@@ -2441,7 +2447,10 @@ function parseClassic(root, project, guidIndex, log) {
     const libraryGlb = glbSubset(glb, library, extras, rename, skip, geometryFor);
     if (rebuilt || failed) log(`  Primitives rebuilt from mesh assets (UVs): ${rebuilt}${failed ? `, ${failed} left without` : ''}`);
     if (swapped) log(`  Primitives swapped for ${meshPrefix} meshes: ${swapped}`);
-    return { name, chunks, pieces, config, library: libraryGlb, textureSwaps };
+    plainPass = true;
+    const plainLibrary = meshPrefix && swapped ? glbSubset(glb, library, extras, rename, skip, geometryFor) : null;
+    if (seasonal) config.season = SEASON_NAMES[season] ?? season;
+    return { name, chunks, pieces, config, library: libraryGlb, plainLibrary, textureSwaps };
   }
   return null;
 }
@@ -3123,7 +3132,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.effects ?? []).map((e) => e.prefab)));
   // 1.x: skyline layers, and the cars / short pieces composites are built from
   const composites = new Map(Object.values(legacy).flatMap((t) => Object.entries(t.composites)));
-  transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.skylineLayers?.layers ?? []).flatMap((l) => [...l.fill, ...l.singles])));
+  transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => [...(c.skylineLayers?.layers ?? []), ...(c.plain?.skylineLayers?.layers ?? [])].flatMap((l) => [...l.fill, ...l.singles])));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.distantObjects?.objects ?? []).map((d) => d.prefab)));
   transitionPrefabs.push([...composites.values()].flatMap((parts) => parts.map((p) => p.prefab)));
   const classicNames = new Set([...(classic?.chunks ?? []), ...(classic?.pieces ?? [])].map((c) => c.name));
@@ -3174,8 +3183,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     const file = path.join(outGlb, 'Classic_chunks.glb');
     writeFileSync(file, classic.library);
     const { materials } = glbStats(file);
-    for (const c of classic.chunks) prefabs[c.name] = { glb: 'glb/Classic_chunks.glb', node: c.name, meshes: 1, materials, bbox: c.bbox, chunk: c.chunk };
-    for (const p of classic.pieces) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', node: p.name, meshes: 1, materials, bbox: p.bbox, ...(p.offset ? { offset: p.offset } : {}) };
+    // Without the season's meshes (the viewer's season toggle)
+    const plain = classic.plainLibrary ? { plainGlb: 'glb/Classic_chunks_plain.glb' } : {};
+    if (classic.plainLibrary) writeFileSync(path.join(outGlb, 'Classic_chunks_plain.glb'), classic.plainLibrary);
+    for (const c of classic.chunks) prefabs[c.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: c.name, meshes: 1, materials, bbox: c.bbox, chunk: c.chunk };
+    for (const p of classic.pieces) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox, ...(p.offset ? { offset: p.offset } : {}) };
   }
 
   // 1.x: the generic role of each themed prefab (name rules in the viewer use it)
@@ -3400,7 +3412,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   }
   // The classic build's season skin (ThemeAssets): other textures on the same materials
   for (const [name, file] of classic?.textureSwaps ?? []) {
-    if (materials[name]) materials[name].textures._MainTex = { ...materials[name].textures._MainTex, path: path.relative(root, file) };
+    // (the plain skin's texture kept as _MainTexPlain, for the viewer's season toggle)
+    if (materials[name]) Object.assign(materials[name].textures, { _MainTexPlain: materials[name].textures._MainTex, _MainTex: { ...materials[name].textures._MainTex, path: path.relative(root, file) } });
   }
 
   // Textures referenced by materials -> data/tex/
@@ -3494,7 +3507,7 @@ function splitByTheme(manifest, staging, out, log) {
     for (const n of modePrefabs(manifest.modes)) names.add(n);
     if (config.background) names.add(config.background.prefab);
     for (const e of config.effects ?? []) names.add(e.prefab);
-    for (const l of config.skylineLayers?.layers ?? []) for (const n of [...l.fill, ...l.singles]) names.add(n);
+    for (const l of [...(config.skylineLayers?.layers ?? []), ...(config.plain?.skylineLayers?.layers ?? [])]) for (const n of [...l.fill, ...l.singles]) names.add(n);
     for (const d of config.distantObjects?.objects ?? []) names.add(d.prefab);
     for (const n of [...names]) for (const part of manifest.prefabs[n]?.parts ?? []) names.add(part.prefab);
     for (const queue = [...names]; queue.length; ) {
@@ -3506,7 +3519,7 @@ function splitByTheme(manifest, staging, out, log) {
     const mats = new Set(Object.values(prefabs).flatMap((p) => p.materials ?? []));
     const materials = Object.fromEntries(sortedStrings(mats).filter((m) => m in manifest.materials).map((m) => [m, manifest.materials[m]]));
     const files = new Set([
-      ...Object.values(prefabs).map((p) => p.glb).filter(Boolean),
+      ...Object.values(prefabs).flatMap((p) => [p.glb, p.plainGlb]).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => Object.values(p.trackConfigs ?? {}).map((c) => c.glb)).filter(Boolean),
       ...Object.values(prefabs).flatMap((p) => Object.values(p.meshAnimations ?? {}).flatMap((a) => a.frames)),
       ...Object.values(prefabs).flatMap((p) => Object.values(p.particles ?? {}).flatMap((e) => [e.render.meshGlb, ...(e.render.variants ?? []).map((v) => v.meshGlb)])).filter(Boolean),
