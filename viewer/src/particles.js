@@ -194,6 +194,7 @@ function shapeSpawn(shape, pos, dir) {
 const QUAD_VERTEX = /* glsl */ `
 uniform vec2 uBend;
 uniform float uMode; // 0 billboard, 1 stretched, 2 horizontal, 3 vertical
+uniform float uOriented; // 3D-rotated quads in the emitter's frame (Local/World alignment)
 uniform float uLengthScale;
 uniform float uVelocityScale;
 uniform float uMaxSize; // fraction of the view height at that depth
@@ -203,6 +204,7 @@ attribute vec3 iPos;
 attribute vec4 iColor;
 attribute vec4 iMisc; // size, rotation, sheet frame, unused
 attribute vec3 iVel;
+attribute vec2 iTilt; // 3D start rotation about X and Y
 varying vec2 vUv;
 varying vec4 vColor;
 varying float vDepth;
@@ -213,7 +215,14 @@ void main() {
   size = min(size, uMaxSize * depth * 2.0 / projectionMatrix[1][1]);
   vec2 corner = position.xy;
   float c = cos(iMisc.y), s = sin(iMisc.y);
-  if (uMode == 2.0) {
+  if (uOriented > 0.5) {
+    // turned like Unity's Euler: Z (the 2D rotation), then X, then Y
+    vec3 q = vec3(mat2(c, -s, s, c) * position.xy * iMisc.x, 0.0);
+    float cx = cos(iTilt.x), sx = sin(iTilt.x), cy = cos(iTilt.y), sy = sin(iTilt.y);
+    q = vec3(q.x, cx * q.y - sx * q.z, sx * q.y + cx * q.z);
+    q = vec3(cy * q.x + sy * q.z, q.y, -sy * q.x + cy * q.z);
+    mv = modelViewMatrix * vec4(iPos + q, 1.0);
+  } else if (uMode == 2.0) {
     // horizontal: flat in the emitter's XZ plane
     vec3 local = vec3(mat2(c, -s, s, c) * corner * iMisc.x, 0.0).xzy;
     mv = modelViewMatrix * vec4(iPos + local / max(uScale, 1e-4) * uScale, 1.0);
@@ -387,6 +396,7 @@ class Emitter {
     this.life = new Float32Array(this.max);
     this.size0 = new Float32Array(this.max);
     this.rot = new Float32Array(this.max);
+    this.tilt = new Float32Array(this.max * 2);
     this.spin = new Float32Array(this.max);
     this.color0 = new Float32Array(this.max * 4);
     this.rand = new Float32Array(this.max * 2);
@@ -444,6 +454,8 @@ class Emitter {
       this.colorAttr = dyn(4);
       this.miscAttr = dyn(4);
       this.velAttr = dyn(3);
+      this.tiltAttr = dyn(2);
+      geo.setAttribute('iTilt', this.tiltAttr);
       geo.setAttribute('iPos', this.posAttr);
       geo.setAttribute('iColor', this.colorAttr);
       geo.setAttribute('iMisc', this.miscAttr);
@@ -452,6 +464,7 @@ class Emitter {
       const sheet = def.sheet ? new THREE.Vector2(def.sheet.x, def.sheet.y) : new THREE.Vector2(1, 1);
       this.material = makeMaterial(look, QUAD_VERTEX, {
         uMode: { value: [0, 1, 2, 3].includes(def.render.mode) ? def.render.mode : 0 },
+        uOriented: { value: (def.rotationX || def.rotationY) && def.render.mode === 0 && [1, 2].includes(def.render.alignment) ? 1 : 0 },
         uLengthScale: { value: def.render.lengthScale ?? 2 },
         uVelocityScale: { value: def.render.velocityScale ?? 0 },
         uMaxSize: { value: def.render.maxSize || 0.5 },
@@ -497,6 +510,10 @@ class Emitter {
     this.life[i] = Math.max(sample(d.lifetime, t), 0.05);
     this.size0[i] = sample(d.size, t);
     this.rot[i] = -sample(d.rotation, t);
+    // Unity turns particles the other way (as the 2D rotation above), and glb space mirrors
+    // x, which flips turns about Y back: Changan's fog then faces the camera as broad sheets,
+    // as in game (the other sign showed it edge-on, as streaks)
+    this.tilt.set([-sample(d.rotationX, t), sample(d.rotationY, t)], i * 2);
     this.spin[i] = d.rotationOverLife ? -sample(d.rotationOverLife, 0) : 0;
     const col = sampleColor(d.color, t, Math.random(), new THREE.Vector4());
     if (tint) col.multiply(tint);
@@ -563,6 +580,7 @@ class Emitter {
     move(this.life, 1);
     move(this.size0, 1);
     move(this.rot, 1);
+    move(this.tilt, 2);
     move(this.spin, 1);
     move(this.color0, 4);
     move(this.rand, 2);
@@ -759,11 +777,12 @@ class Emitter {
       this.posAttr.setXYZ(i, this.local.pos[i * 3], this.local.pos[i * 3 + 1], this.local.pos[i * 3 + 2]);
       this.velAttr.setXYZ(i, this.local.vel[i * 3], this.local.vel[i * 3 + 1], this.local.vel[i * 3 + 2]);
       this.miscAttr.setXYZW(i, size, this.rot[i], frame, 0);
+      this.tiltAttr.setXY(i, this.tilt[i * 2], this.tilt[i * 2 + 1]);
       this.color(i, lt, col, life);
       this.colorAttr.setXYZW(i, col.x, col.y, col.z, col.w);
     }
     this.object.geometry.instanceCount = this.count;
-    for (const a of [this.posAttr, this.velAttr, this.miscAttr, this.colorAttr]) {
+    for (const a of [this.posAttr, this.velAttr, this.miscAttr, this.colorAttr, this.tiltAttr]) {
       a.needsUpdate = true;
       a.addUpdateRange(0, this.count * a.itemSize);
     }

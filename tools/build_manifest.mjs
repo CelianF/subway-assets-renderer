@@ -2596,6 +2596,8 @@ function parseParticles(file, guidIndex) {
       speed: minMaxCurve(init.startSpeed, 5),
       size: minMaxCurve(init.startSize, 1),
       rotation: minMaxCurve(init.startRotation),
+      // 3D start rotation, X and Y (Z is rotation): 2.18 Changan's fog lies tipped nearly flat
+      ...(init.rotation3D === 1 ? { rotationX: minMaxCurve(init.startRotationX), rotationY: minMaxCurve(init.startRotationY) } : {}),
       color: minMaxGradient(init.startColor),
       gravity: minMaxCurve(init.gravityModifier),
       max: Math.min(init.maxNumParticles ?? 1000, 400),

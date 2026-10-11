@@ -846,6 +846,12 @@ function translateLegacy(def) {
   return { ...def, floats, renderQueue };
 }
 
+// Shaders that reach the plain path with no rule of their own (outside the families the
+// library translates) draw as a flat texture: 1.81 Cairo's sun came out as a dark card. Each
+// is reported once in the console ("[materials] no viewer rule…") and listed here
+const TRANSLATED = /^(SYBO\/)?Bend\/|^Custom\/Distorted\/|^SYBO\/|^Unlit\/|^Mobile\/|^Particles\/|^Legacy Shaders\/Particles\/|^UI\/|^Adverty\//;
+export const unruledShaders = new Map(); // shader -> material names
+
 export class MaterialLibrary {
   constructor(manifest, baseUrl) {
     this.defs = manifest.materials;
@@ -879,7 +885,14 @@ export class MaterialLibrary {
     else if (def.shader === 'SYBO/Bend/Specials/Fountain') mat = this.fountain(name, def);
     else if (def.shader === 'SYBO/Bend/Specials/NoFloorLava') mat = this.lava(name, def);
     else if (/Bend\/(Legacy\/|Panning )Texture And Double Alpha$/.test(def.shader)) mat = this.doubleAlpha(name, def);
-    else mat = this.combined(name, translateLegacy(def)); // incl. VertexWave, ScreenMask and pre-3.0 Bend/* shaders
+    else {
+      const translated = translateLegacy(def);
+      if (translated === def && !TRANSLATED.test(def.shader)) {
+        if (!unruledShaders.has(def.shader)) console.warn(`[materials] no viewer rule for shader "${def.shader}" (${name}): drawn as a plain texture`);
+        unruledShaders.set(def.shader, [...(unruledShaders.get(def.shader) ?? []), name]);
+      }
+      mat = this.combined(name, translated); // incl. VertexWave, ScreenMask and pre-3.0 Bend/* shaders
+    }
     if (cut && mat.defines) {
       mat.defines.TRACK_CUT = cut;
       // Track pieces give way to any floor laid over them (platforms, landmarks, plazas):
