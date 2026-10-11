@@ -347,7 +347,10 @@ function applyRandomizers(obj, randomizers, seed, prefabName = '', forced = null
     } else if (rng() < probability) {
       if (weights) {
         // WeightedChildRandomizer: by the weight of each child (by name)
-        const childKey = (c) => (c.name in weights ? c.name : Object.keys(weights).find((k) => THREE.PropertyBinding.sanitizeNodeName(k) === c.name.replace(/_\d+$/, '')));
+        // (the exact name first: "event_04" isn't "event" + a loader's duplicate suffix, which
+        // left 2.3.1 Edinburgh's med_02_right with neither child, a hole by the start)
+        const sane = (k) => THREE.PropertyBinding.sanitizeNodeName(k);
+        const childKey = (c) => (c.name in weights ? c.name : Object.keys(weights).find((k) => sane(k) === c.name) ?? Object.keys(weights).find((k) => sane(k) === c.name.replace(/_\d+$/, '')));
         // Variants left out in Generation > Landmark weigh nothing (unless that's all of them)
         const allowed = (c) => state.gen.variants[`${prefabName}|${groupName}|${childKey(c)}`] !== false;
         const anyAllowed = children.some((c) => childKey(c) && allowed(c));
