@@ -3088,11 +3088,13 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     const map = new Map();
     for (const p of allGlbs) {
       const prev = map.get(path.basename(p));
-      if (!prev || (!prefer(prev) && prefer(p))) map.set(path.basename(p), p);
+      if (!prev || Number(prefer(p)) > Number(prefer(prev))) map.set(path.basename(p), p);
     }
     return map;
   };
-  const prefabGlbs = byNamePreferring(hasMaterials);
+  // (both with materials: the prefab's export; 2.3.1 Edinburgh's extra_25 model carries its
+  // FBX import's white Standard "surfaceShader_base", the prefab the theme's atlas: white stones)
+  const prefabGlbs = byNamePreferring((p) => hasMaterials(p) + (/\/prefabs?\//i.test(p) ? 0.5 : 0));
   for (const p of listDir(glbDir)) if (p.endsWith('.glb')) prefabGlbs.set(path.basename(p), p);
   const meshGlbs = byNamePreferring((p) => !hasMaterials(p));
   for (const p of listDir(meshDir)) if (p.endsWith('.glb')) meshGlbs.set(path.basename(p), p);
