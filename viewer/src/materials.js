@@ -412,8 +412,6 @@ uniform vec4 uUvWave; // _xWaveYDistortion amplitude, frequency, speed, start
 uniform float uUvWavePos; // _xWaveYDistortionPosFactor
 uniform vec2 uScrollF; // uScroll, for the fragment shader
 uniform vec2 uDrift; // 1.x water: 1 / units per texture height across, ripple speed toward the shore
-uniform float uDriftFold; // where the mesh's v folds back toward the shore (0: it doesn't)
-uniform float uDriftPeak; // the mesh's v there
 #ifdef WATER_DISTORT
 uniform sampler2D uDisplaceTex; // Specials/Water: a scrolling noise ripples the texture
 uniform vec2 uDisplaceScroll;
@@ -495,9 +493,9 @@ ${CUT_MAIN}
     float ux = u.x + uUvWobble.x * sin(uTime * uUvWobbleSpeed.x + vWorld.z * uUvWobble.y * 0.1)
                    + uUvWave.x * sin(uTime * uUvWave.z + w * w * uUvWave.y + uUvWavePos * 0.1 * vWorld.z);
     float push = uUvWobble.z * 0.1 * sin(uTime * uUvWobbleSpeed.y + vWorld.z * uUvWobble.w);
-    // (inside the fold the gradient keeps its peak row: mirrored, it drew a line mid-sea)
-    float vg = uDriftFold > 0.0 && ax < uDriftFold ? uDriftPeak : u.y;
-    float uy0 = clamp(vg - (1.0 - vg) * push, 0.0, 1.0) + 0.002;
+    // (the gradient mirrors back toward the shore with the mesh's v, light > dark > light,
+    // as in game: no line once the row averages stay off the texture's edges)
+    float uy0 = clamp(u.y - (1.0 - u.y) * push, 0.0, 1.0) + 0.002;
     // (gradients of the unwrapped coordinates: the wrap would pick a tiny mip level, a seam)
     vec2 cont = vec2(ux, -vRaw);
     vec2 gx = dFdx(cont), gy = dFdy(cont);
@@ -1147,8 +1145,6 @@ export class MaterialLibrary {
         uUvWave: { value: new THREE.Vector4(f._xWaveYDistortionAplitude ?? 0, f._xWaveYDistortionFrequency ?? 0, f._xWaveYDistortionSpeed ?? 0, f._xWaveYDistortionStart ?? 0) },
         uUvWavePos: { value: f._xWaveYDistortionPosFactor ?? 0 },
         uDrift: { value: new THREE.Vector2(0, 0) }, // set per mesh (main.js measureDrift)
-        uDriftFold: { value: 0 },
-        uDriftPeak: { value: 1 },
         uScrollF: { value: new THREE.Vector2(...(c._ScrollSpeed ?? [0, 0]).slice(0, 2)).multiplyScalar(20) },
       },
     });

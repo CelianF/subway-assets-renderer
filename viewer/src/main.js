@@ -1005,23 +1005,6 @@ function measureDrift(geo, mat) {
   const dudz = median(along);
   const scroll = Math.abs(mat.uniforms.uScrollF?.value.x ?? 0) / 20;
   if (dvdx > 0 && dudz > 0) mat.uniforms.uDrift.value.set(dvdx, scroll / dudz);
-  // Where v folds back toward the shore (1.104 Dubai: it peaks mid-sea), from there in the
-  // gradient holds its last row instead of mirroring (the mirror showed as a line)
-  let peak = -Infinity;
-  let peakAx = 0;
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (let i = 0; i < pos.count; i++) {
-    const ax = Math.abs(pos.getX(i));
-    const v = 1 - uv.getY(i); // Unity's V
-    lo = Math.min(lo, ax);
-    hi = Math.max(hi, ax);
-    if (v > peak) [peak, peakAx] = [v, ax];
-  }
-  if (mat.uniforms.uDriftFold && peakAx > lo + 1 && peakAx < hi - 1) {
-    mat.uniforms.uDriftFold.value = peakAx;
-    mat.uniforms.uDriftPeak.value = peak;
-  }
 }
 
 /** Instantiates a prefab (or one of its runtime track configs) with manifest materials. */
