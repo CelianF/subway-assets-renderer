@@ -1020,10 +1020,31 @@ function parseLegacyTheme(file, guidIndex) {
       spawnRate: field('_spawnRate') ?? 1,
     };
   }).filter((d) => d.prefab);
+  // 1.71 Copenhagen's towers: _distantObjectConfigs, several prefabs each, a spawn
+  // probability, and a projection plane at 250 + (offset - 250) / 3 (DistantEnvironmentController)
+  const objText = text.split('\n  _distantObjectConfigs:')[1]?.split(/\n {2}\w/)[0] ?? '';
+  for (const entry of objText.split(/\n {2}- _name: /).slice(1)) {
+    const field = (key) => number(key, entry.replace(/\n {4}/g, '\n  '));
+    const prefabs = [...(entry.split('_prefabs:')[1]?.split(/\n {4}_\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => prefabName(g)).filter(Boolean);
+    if (!prefabs.length) continue;
+    distant.push({
+      name: entry.split('\n')[0].trim(),
+      prefab: prefabs[0],
+      prefabs,
+      side: field('_environmentSide') ?? 2,
+      kinds: [...(entry.split('_environmentKind:')[1]?.split(/\n {4}_projection/)[0] ?? '').matchAll(/_type: (\d+)\n\s+_density: (\d+)/g)].map(([, t, d]) => [Number(t), Number(d)]),
+      x: [field('_projectionSourceOffsetXMin') ?? 250, field('_projectionSourceOffsetXMax') ?? 250],
+      projectionX: 250,
+      projectionThird: true,
+      initialMinDistance: field('_minDistanceFirstSpawn') ?? 0,
+      minDistanceBetween: field('_minDistanceBetween') ?? 0,
+      spawnRate: field('_spawnProbability') ?? 1,
+    });
+  }
   if (distant.length) {
-    const global = text.split('\n  _distantEnvironmentGlobalSetting:')[1] ?? '';
+    const global = text.split('\n  _distantEnvironmentGlobalSetting:')[1] ?? text.split('\n  _distantObjectGlobalConfig:')[1] ?? '';
     config.distantObjects = {
-      initialMinDistance: num(global.match(/_globalInitialMinDistance: ([\d.e-]+)/)?.[1] ?? '0'),
+      initialMinDistance: num(global.match(/_globalInitialMinDistance: ([\d.e-]+)/)?.[1] ?? global.match(/_globalMinDistanceFirstSpawn: ([\d.e-]+)/)?.[1] ?? '0'),
       minDistanceBetween: num(global.match(/_globalMinDistanceBetween: ([\d.e-]+)/)?.[1] ?? '0'),
       objects: distant,
     };
@@ -2605,6 +2626,12 @@ function parseParticles(file, guidIndex) {
     const vel = mod('VelocityModule');
     const force = mod('ForceModule');
     const uv = mod('UVModule');
+    // Particle trails (3.12 Copenhagen's firework rays: each burst spark leaves a ribbon) and
+    // the speed limit that brakes them
+    const trail = mod('TrailModule');
+    const limit = mod('ClampVelocityModule');
+    const noise = mod('NoiseModule');
+    const trailGuid = (r.m_Materials ?? [])[1]?.guid;
     out[names.get(go)] = {
       duration: ps.lengthInSec ?? 5,
       loop: ps.looping !== 0,
@@ -2657,6 +2684,20 @@ function parseParticles(file, guidIndex) {
           radial: minMaxCurve(vel.radial),
         } : {}),
       } : null,
+      ...(trail && (trail.mode ?? 0) === 0 ? { trail: {
+        lifetime: minMaxCurve(trail.lifetime, 1), // a fraction of the particle's lifetime
+        ratio: trail.ratio ?? 1,
+        minVertexDistance: trail.minVertexDistance ?? 0.2,
+        world: trail.worldSpace === 1,
+        width: minMaxCurve(trail.widthOverTrail, 1),
+        colorOverLife: minMaxGradient(trail.colorOverLifetime),
+        colorOverTrail: minMaxGradient(trail.colorOverTrail),
+        inheritColor: trail.inheritParticleColor === 1,
+        material: trailGuid && guidIndex.has(trailGuid) ? stem(guidIndex.get(trailGuid)) : null,
+      } } : {}),
+      // Noise (3.12 Copenhagen's rockets wobble as they climb): a smooth push, units/s
+      ...(noise ? { noise: { strength: minMaxCurve(noise.strength, 1), frequency: noise.frequency ?? 0.5, scroll: minMaxCurve(noise.scrollSpeed), amount: minMaxCurve(noise.positionAmount, 1) } } : {}),
+      ...(limit && !limit.separateAxis ? { limit: { speed: minMaxCurve(limit.magnitude, 1), dampen: limit.dampen ?? 1 } } : {}),
       force: force ? { x: minMaxCurve(force.x), y: minMaxCurve(force.y), z: minMaxCurve(force.z), world: force.inWorldSpace === 1, ...(force.randomizePerFrame === 1 ? { perFrame: true } : {}) } : null,
       sheet: uv && (uv.tilesX > 1 || uv.tilesY > 1) ? { x: uv.tilesX, y: uv.tilesY, frame: minMaxCurve(uv.frameOverTime), cycles: uv.cycles ?? 1, row: uv.animationType === 1 ? (uv.randomRow ? -1 : uv.rowIndex ?? 0) : null } : null,
       render: {
@@ -3145,7 +3186,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   // 1.x: skyline layers, and the cars / short pieces composites are built from
   const composites = new Map(Object.values(legacy).flatMap((t) => Object.entries(t.composites)));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => [...(c.skylineLayers?.layers ?? []), ...(c.plain?.skylineLayers?.layers ?? [])].flatMap((l) => [...l.fill, ...l.singles])));
-  transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.distantObjects?.objects ?? []).map((d) => d.prefab)));
+  transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.distantObjects?.objects ?? []).flatMap((d) => d.prefabs ?? [d.prefab])));
   transitionPrefabs.push([...composites.values()].flatMap((parts) => parts.map((p) => p.prefab)));
   const classicNames = new Set([...(classic?.chunks ?? []), ...(classic?.pieces ?? [])].map((c) => c.name));
   const nameLists = [...Object.values(themes).flatMap((slots) => Object.values(slots)), ...transitionPrefabs];
@@ -3353,7 +3394,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       }
       if (variants.length > 1 && p.render.mode === 4) p.render.variants = variants;
       else delete p.render.variants;
-      if (p.render.material) info.materials = sortedStrings(new Set([...(info.materials ?? []), p.render.material]));
+      for (const m of [p.render.material, p.trail?.material]) if (m) info.materials = sortedStrings(new Set([...(info.materials ?? []), m]));
     }
     if (Object.keys(particles).length) info.particles = particles;
     // Shape scaling: the spawned copy keeps its root scale, which stretches the shape and its
@@ -3520,7 +3561,7 @@ function splitByTheme(manifest, staging, out, log) {
     if (config.background) names.add(config.background.prefab);
     for (const e of config.effects ?? []) names.add(e.prefab);
     for (const l of [...(config.skylineLayers?.layers ?? []), ...(config.plain?.skylineLayers?.layers ?? [])]) for (const n of [...l.fill, ...l.singles]) names.add(n);
-    for (const d of config.distantObjects?.objects ?? []) names.add(d.prefab);
+    for (const d of config.distantObjects?.objects ?? []) for (const n of d.prefabs ?? [d.prefab]) names.add(n);
     for (const n of [...names]) for (const part of manifest.prefabs[n]?.parts ?? []) names.add(part.prefab);
     for (const queue = [...names]; queue.length; ) {
       for (const entry of Object.values(manifest.prefabs[queue.pop()]?.placeholders ?? {})) {

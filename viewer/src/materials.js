@@ -196,10 +196,16 @@ varying float vColorA; // RGBA vertex colors: their alpha fades transparent piec
 attribute vec2 uv1;
 varying vec2 vUv1;
 #endif
+#ifdef ALPHA_TEX
+varying vec2 vUvRaw;
+#endif
 
 void main() {
 #ifdef GRAFFITI
   vUv1 = uv1;
+#endif
+#ifdef ALPHA_TEX
+  vUvRaw = uv;
 #endif
   // Unity applies tiling/offset (and scrolls) with V pointing up; glTF UVs have V
   // flipped, so convert to Unity space and back or scrolling runs the wrong way.
@@ -372,6 +378,10 @@ uniform vec4 uColor2;
 uniform sampler2D uFrontTex;
 varying vec2 vUv1;
 #endif
+#ifdef ALPHA_TEX
+uniform sampler2D uAlphaTex;
+varying vec2 vUvRaw;
+#endif
 uniform float uMultiplier;
 uniform sampler2D uRefTex;
 uniform vec4 uRefColor;
@@ -471,11 +481,16 @@ ${CUT_MAIN}
   }
 #endif
 #ifdef WATER_DISTORT
-  uv += (texture2D(uDisplaceTex, vUv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r - 0.5) * uDisplaceStrength;
+  // As compiled (3.12): the noise scrolls on the plain UVs, its red pushes the texture
+  // by red × strength along both Unity axes (V points down here)
+  uv += vec2(1.0, -1.0) * texture2D(uDisplaceTex, vUv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r * uDisplaceStrength;
 #endif
   vec4 c = texture2D(uMap, uv);
 #ifdef GRAFFITI
   c *= texture2D(uFrontTex, vUv1); // the tag over the wall, on the second UV set
+#endif
+#ifdef ALPHA_TEX
+  c.a *= texture2D(uAlphaTex, vUvRaw).a; // a still alpha mask under the scrolling texture
 #endif
   vec3 base = c.rgb;
 #ifdef ALTERNATE
@@ -831,6 +846,22 @@ function translateLegacy(def) {
     return { ...def, colors: { ...def.colors, _Color: def.colors?._Color1 ?? [1, 1, 1, 1] }, floats: { ...def.floats, _HasGradient: 1, _HasFogMultiplier: 1, _FogMultiplier: 0 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
   }
   if (/^Custom\/Distorted\//.test(def.shader) && !/Skyline/.test(def.shader)) return translateDistorted(def);
+  // SYBO/Bend/Legacy/Scrolling texture w alpha (Green Jam shockwave): no compiled code in any
+  // build at hand (remote bundles); read from its properties: _MainTex scrolling by
+  // _ScrollSpeed, times _Multiplier, alpha blended, its alpha times the still _AlphaTex
+  // (a gradient fading the band's edges). Inferred, not as compiled
+  if (def.shader === 'SYBO/Bend/Legacy/Scrolling texture w alpha') {
+    return { ...def, floats: { ...def.floats, _HasScroll: 1, _AlphaMask: 1, _HasMultiplier: 1, _Multiplier: def.floats?._Multiplier ?? 1, FADE_MODE: 1, _SrcMode: 5, _DstMode: 10, _ZWrite: 0, _CullMode: 0 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 3000 };
+  }
+  // Bend/Premultiplied (1.65 Amsterdam / 2.6 Bali landmark ripples), as compiled: texture ×
+  // _Color × _Color.a, no blending, no depth writes
+  if (/^(SYBO\/)?Bend\/Premultiplied$/.test(def.shader)) {
+    const c = def.colors?._Color ?? [1, 1, 1, 1];
+    return { ...def, colors: { ...def.colors, _Color: [...c.slice(0, 3).map((v) => v * (c[3] ?? 1)), 1] }, floats: { ...def.floats, _HasTint: 1, _ZWrite: 0 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 3000 };
+  }
+  // SYBO/Bend/Specials/MeshOutliner (3.x hunt tokens): the texture as is, plus an outline pass
+  // (outlineMaterial below; the viewer adds it under each mesh)
+  if (def.shader === 'SYBO/Bend/Specials/MeshOutliner') return { ...def, floats: { ...def.floats, _HasTint: 0 }, outline: true };
   // SYBO/Bend/Specials/Overlay Graffiti (3.x Copenhagen's wall tags): the wall (_BackTex, first
   // UVs) times the tag (_FrontTex, second UVs); it drew nothing before
   if (def.shader === 'SYBO/Bend/Specials/Overlay Graffiti') return { ...def, textures: { ...def.textures, _MainTex: def.textures._BackTex }, floats: { ...def.floats, _Graffiti: 1 } };
@@ -876,6 +907,37 @@ function translateLegacy(def) {
 const TRANSLATED = /^(SYBO\/)?Bend\/|^Custom\/Distorted\/|^SYBO\/|^Unlit\/|^Mobile\/|^Particles\/|^Legacy Shaders\/Particles\/|^UI\/|^Adverty\//;
 export const unruledShaders = new Map(); // shader -> material names
 
+/**
+ * SYBO/Bend/Specials/MeshOutliner's first pass, as compiled (3.12): the mesh pushed out along
+ * its normals by _OutlineWidth (NORMAL_OUTLINE_ENABLED), or scaled by 1 + _OutlineWidth,
+ * in a flat _OutlineColor. Drawn behind the token so only the rim shows.
+ */
+function outlineMaterial(def) {
+  const byNormal = !!def.floats?._HasNormalOutline || (def.keywords ?? []).includes('NORMAL_OUTLINE_ENABLED');
+  return new THREE.ShaderMaterial({
+    name: `${def.name ?? ''}_outline`,
+    defines: byNormal ? { BY_NORMAL: '' } : {},
+    uniforms: { uBend: globals.uBend, uWidth: { value: def.floats?._OutlineWidth ?? 0.1 }, uColor: { value: color4(def.colors?._OutlineColor ?? [0, 0, 0, 1]) } },
+    vertexShader: /* glsl */ `
+uniform vec2 uBend;
+uniform float uWidth;
+void main() {
+#ifdef BY_NORMAL
+  vec3 p = position + normal * uWidth;
+#else
+  vec3 p = position * (1.0 + uWidth);
+#endif
+  vec4 mv = modelViewMatrix * vec4(p, 1.0);
+  float depth = max(-mv.z, 0.0);
+  mv.xy += vec2(uBend.x, -uBend.y) * depth * depth;
+  gl_Position = projectionMatrix * mv;
+}`,
+    fragmentShader: 'uniform vec4 uColor; void main() { gl_FragColor = vec4(uColor.rgb, 1.0); }',
+    side: THREE.BackSide,
+    depthWrite: false,
+  });
+}
+
 export class MaterialLibrary {
   constructor(manifest, baseUrl) {
     this.defs = manifest.materials;
@@ -912,12 +974,13 @@ export class MaterialLibrary {
     else {
       const translated = translateLegacy(def);
       // (SYBO/Bend/Specials/*: each one its own shader, drawn plain unless named here)
-      const special = /Specials\//.test(def.shader) && !/Specials\/(Water|Fountain|NoFloorLava|Overlay Graffiti|Coin Glow|ThemeVfx\/MeshNearPlayer)$/.test(def.shader);
+      const special = /Specials\//.test(def.shader) && !/Specials\/(Water|Fountain|NoFloorLava|Overlay Graffiti|Coin Glow|ThemeVfx\/MeshNearPlayer|MeshOutliner)$/.test(def.shader);
       if ((translated === def && !TRANSLATED.test(def.shader)) || translated.unruled || special) {
         if (!unruledShaders.has(def.shader)) console.warn(`[materials] no viewer rule for shader "${def.shader}" (${name}): drawn as a plain texture`);
         unruledShaders.set(def.shader, [...(unruledShaders.get(def.shader) ?? []), name]);
       }
       mat = this.combined(name, translated); // incl. VertexWave, ScreenMask and pre-3.0 Bend/* shaders
+      if (translated.outline) mat.userData.outline = outlineMaterial(def);
     }
     if (cut && mat.defines) {
       mat.defines.TRACK_CUT = cut;
@@ -969,12 +1032,14 @@ export class MaterialLibrary {
     const wave = /(^|\/)(Legacy\/)?VertexWave|^Bend\/Wave \(Vertex Color Control/.test(def.shader); // 1.x flags (and the 1.x tulip heads' Gradient variant)
     if (f._HasGradient) defines.GRADIENT = '';
     if (f._Graffiti) defines.GRAFFITI = '';
+    if (f._AlphaMask) defines.ALPHA_TEX = '';
     if (f._DistantFog) defines.DISTANT_FOG = '';
     if (/MeshNearPlayer$/.test(def.shader)) defines.NEAR_PLAYER = '';
     if (/PlayerSnowPlow$|Texture Indentation$/.test(def.shader)) defines.SNOW_PLOW = '';
     if (wave) defines.WAVE = '';
     // 1.x Bend/Wave (Vertex Color Control) compiles to the same wave as 2.x (1.65 Amsterdam's tulips)
-    const wave2x = def.shader === 'SYBO/Bend/VertexWave' || /^Bend\/Wave \(Vertex Color Control/.test(def.shader);
+    // (and 3.x SYBO/Bend/Legacy/VertexWave: the same compiled formula, checked on 3.12)
+    const wave2x = def.shader === 'SYBO/Bend/VertexWave' || /^Bend\/Wave \(Vertex Color Control|^SYBO\/Bend\/Legacy\/VertexWave/.test(def.shader);
     if (wave2x) defines.WAVE_2X = '';
     if (def.shader === 'SYBO/Bend/Specials/Coin Glow') defines.DISTANCE_FADE = '';
 
@@ -989,10 +1054,12 @@ export class MaterialLibrary {
       uniforms: {
         ...globals,
         uMap: { value: this.tex(def, '_MainTex') ?? WHITE },
-        uMainST: { value: new THREE.Vector4(...(main?.scale ?? [1, 1]), ...(main?.offset ?? [0, 0])) },
+        // (Specials/Water ignores the texture's tiling, as compiled)
+        uMainST: { value: water ? new THREE.Vector4(1, 1, 0, 0) : new THREE.Vector4(...(main?.scale ?? [1, 1]), ...(main?.offset ?? [0, 0])) },
         uColor: { value: tint },
         uColor2: { value: color4(c._Color2) },
         uFrontTex: { value: f._Graffiti ? this.tex(def, '_FrontTex') ?? WHITE : WHITE },
+        uAlphaTex: { value: f._AlphaMask ? this.tex(def, '_AlphaTex') ?? WHITE : WHITE },
         uMultiplier: { value: f._Multiplier ?? 1 },
         // (1.x water scrolls by _Time.y, seconds: 20x the _Time.x scroll)
         uScroll: { value: new THREE.Vector2(...((water ? c._TextureScrollSpeed : c._ScrollSpeed) ?? [0, 0]).slice(0, 2)).multiplyScalar(f._WaterWave ? 20 : 1) },

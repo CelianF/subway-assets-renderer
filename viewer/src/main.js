@@ -962,10 +962,21 @@ async function applySignalColor(obj, seed, color = null) {
 }
 
 function applyMaterial(mesh, mat) {
+  if (mesh.userData.rim) return; // an outline pass below keeps its own material
   // Unity's untextured placeholder material: helper geometry never visible in game
   if (mat.name === 'DefaultMaterial') mesh.visible = false;
   mesh.material = mat;
   mesh.renderOrder = mat.userData.renderQueue ?? 2000;
+  // Hunt tokens' outline (MeshOutliner): the same geometry, pushed out, drawn first
+  if (mat.userData.outline && !mesh.userData.outlined) {
+    const rim = new THREE.Mesh(mesh.geometry, mat.userData.outline);
+    rim.name = `${mesh.name}_outline`;
+    rim.renderOrder = mesh.renderOrder - 1;
+    rim.frustumCulled = false;
+    rim.userData.rim = true;
+    mesh.add(rim);
+    mesh.userData.outlined = true;
+  }
 }
 
 /** Instantiates a prefab (or one of its runtime track configs) with manifest materials. */
@@ -1527,14 +1538,17 @@ async function placeDistantObjects(items, length, id) {
       // Unity's right is -X here (glb mirrored)
       const x = side === 'right' ? -offset : offset;
       // Farther than the projection plane: its true place pushed back as far as it's pulled in
-      const stretch = offset / d.projectionX;
+      // (1.71+: the plane moves out with the object, at 250 + (offset - 250) / 3)
+      const plane = d.projectionThird ? 250 + (offset - 250) / 3 : d.projectionX;
+      const stretch = offset / plane;
       const camZ = z - SPAWN_AHEAD - 33; // the game camera, 33 behind the runner
-      spawns.push({ d, x, z: stretch > 1 ? camZ + (z - camZ) * stretch : z, factor: d.projectionX / offset });
+      const prefab = d.prefabs?.length ? d.prefabs[Math.floor(rng() * d.prefabs.length)] : d.prefab;
+      spawns.push({ d, prefab, x, z: stretch > 1 ? camZ + (z - camZ) * stretch : z, factor: Math.min(plane / offset, 1) });
       last[i] = z;
       lastAny = z;
     });
   }
-  const objs = await Promise.all(spawns.map((sp) => instantiate(sp.d.prefab, null, 'environment', Math.floor(rng() * 2 ** 31)).catch(() => null)));
+  const objs = await Promise.all(spawns.map((sp) => instantiate(sp.prefab, null, 'environment', Math.floor(rng() * 2 ** 31)).catch(() => null)));
   if (id !== buildId) return;
   spawns.forEach((sp, i) => {
     const obj = objs[i];

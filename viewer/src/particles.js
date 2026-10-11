@@ -72,6 +72,7 @@ const tmpB = new THREE.Vector4();
 const tmpCenter = new THREE.Vector3();
 const tmpRel = new THREE.Vector3();
 const forceTmp = new THREE.Vector3();
+const TRAIL_POINTS = 48; // positions kept per particle trail (spread over the trail's lifetime)
 const tmpEuler = new THREE.Euler();
 /** MinMaxGradient at normalized time t with random r. */
 function sampleColor(c, t, r, out) {
@@ -267,6 +268,32 @@ void main() {
 }
 `;
 
+// Particle trails: a ribbon through each particle's recent positions, turned to face the
+// camera; aPrev is the next point back along the trail, aSide the ribbon edge
+const TRAIL_VERTEX = /* glsl */ `
+uniform vec2 uBend;
+attribute vec3 aPrev;
+attribute float aSide;
+attribute float aWidth;
+attribute vec4 aColor;
+varying vec2 vUv;
+varying vec4 vColor;
+varying float vDepth;
+void main() {
+  vec4 a = modelViewMatrix * vec4(position, 1.0);
+  vec4 b = modelViewMatrix * vec4(aPrev, 1.0);
+  vec2 d = a.xy - b.xy;
+  d = length(d) > 1e-5 ? normalize(d) : vec2(0.0, 1.0);
+  a.xy += vec2(-d.y, d.x) * aSide * aWidth * 0.5;
+  float depth = max(-a.z, 0.0);
+  a.xy += vec2(uBend.x, -uBend.y) * depth * depth;
+  vDepth = -a.z;
+  vUv = vec2(0.5);
+  vColor = aColor;
+  gl_Position = projectionMatrix * a;
+}
+`;
+
 const FRAGMENT = /* glsl */ `
 uniform sampler2D uMap;
 uniform vec4 uTint;
@@ -316,7 +343,7 @@ const DOT = (() => {
 })();
 
 /** Blend, texture and tint of a particle material (Unity built-in, SYBO, 1.x Custom). */
-function particleLook(materials, name, renderMode = 0) {
+export function particleLook(materials, name, renderMode = 0) {
   // Unity's built-in Sprites-Default: a white square, alpha blended, in the particle color
   if (name === '__builtin_Sprites-Default') return { map: WHITE, src: 5, dst: 10, fadeMode: 1, tint: [1, 1, 1, 1], vertexColors: true };
   const def = name ? materials.defs[name] : null;
@@ -333,7 +360,10 @@ function particleLook(materials, name, renderMode = 0) {
   const [src, dst] = blend;
   const fadeMode = src === 2 ? 3 : dst === 1 ? 2 : src === 1 && dst === 10 ? 4 : 1;
   // Legacy particle shaders double _TintColor (0.5 grey = unchanged)
-  const tint = c._TintColor ? c._TintColor.map((v) => v * 2) : c._MainColor && /Additive/i.test(shader) ? [...c._MainColor.slice(0, 3), 1] : c._Color ?? [1, 1, 1, 1];
+  let tint = c._TintColor ? c._TintColor.map((v) => v * 2) : c._MainColor && /Additive/i.test(shader) ? [...c._MainColor.slice(0, 3), 1] : c._Color ?? [1, 1, 1, 1];
+  // Combined's color multiplier (3.12 Copenhagen's firework rays: 1.5, gold-white, not orange)
+  const mult = f._HasMultiplier || def?.keywords?.includes('MULTIPLIER_ENABLED') ? f._Multiplier ?? 1 : 1;
+  if (mult !== 1) tint = [...tint.slice(0, 3).map((v) => v * mult), tint[3] ?? 1];
   // Combined without VERTEX_COLORS: meshes cut from the city atlas ignore the particle
   // color (3.60 Ireland seagulls: dark grey start color, Sydney's fish: red). The rest keep
   // it, their tints and fades live there: billboards (cloud Space Station's purple fog),
@@ -482,7 +512,102 @@ class Emitter {
       object.name = `${node.name}_particles`;
       node.add(object);
     }
+    if (def.trail) this.initTrail(materials);
     this.gravityLocal = null;
+  }
+
+  /** Trail module: per particle, its last TRAIL_POINTS positions, drawn as one ribbon. */
+  initTrail(materials) {
+    const K = TRAIL_POINTS;
+    const n = this.max;
+    this.trail = { pos: new Float32Array(n * K * 3), time: new Float32Array(n * K), count: new Uint8Array(n), life: new Float32Array(n) };
+    const geo = new THREE.BufferGeometry();
+    const attr = (size) => new THREE.BufferAttribute(new Float32Array(n * K * 2 * size), size).setUsage(THREE.DynamicDrawUsage);
+    this.trailAttrs = { position: attr(3), aPrev: attr(3), aSide: attr(1), aWidth: attr(1), aColor: attr(4) };
+    for (const [k, a] of Object.entries(this.trailAttrs)) geo.setAttribute(k, a);
+    const index = [];
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < K - 1; j++) {
+        const v = (i * K + j) * 2;
+        index.push(v, v + 2, v + 1, v + 1, v + 2, v + 3);
+      }
+    }
+    geo.setIndex(index);
+    geo.setDrawRange(0, 0);
+    // The renderer's second material; untextured ones are plain (white), not the soft dot
+    const look = particleLook(materials, this.def.trail.material ?? this.def.render.material, 0);
+    const mat = makeMaterial({ ...look, map: look.map ?? WHITE, vertexColors: true }, TRAIL_VERTEX, {});
+    this.trailObject = new THREE.Mesh(geo, mat);
+    this.trailObject.frustumCulled = false;
+    this.trailObject.userData.particles = true;
+    this.trailObject.renderOrder = 3000;
+    this.trailObject.name = `${this.node.name}_trails`;
+    this.node.add(this.trailObject);
+  }
+
+  uploadTrail() {
+    const tr = this.trail;
+    const td = this.def.trail;
+    const K = TRAIL_POINTS;
+    const { position, aPrev, aSide, aWidth, aColor } = this.trailAttrs;
+    const pts = [];
+    const col = new THREE.Vector4();
+    const life = new THREE.Vector4();
+    const pcol = new THREE.Vector4();
+    const minD2 = (td.minVertexDistance ?? 0.2) ** 2;
+    for (let i = 0; i < this.count; i++) {
+      const p = i * 3;
+      const base = i * K;
+      const x = this.local.pos[p];
+      const y = this.local.pos[p + 1];
+      const z = this.local.pos[p + 2];
+      // Record the head once it has moved far enough, and no oftener than the trail's life
+      // allows for the points kept (else a fast spark used them up in a fraction of it: 3.12
+      // Copenhagen's firework trails were cut at 0.4 s, the game's last 0.75-1.5 s)
+      let c = tr.count[i];
+      const h = base * 3;
+      const gap = tr.life[i] / (K - 2);
+      if (!c || ((x - tr.pos[h]) ** 2 + (y - tr.pos[h + 1]) ** 2 + (z - tr.pos[h + 2]) ** 2 >= minD2 && this.time - tr.time[base] >= gap)) {
+        tr.pos.copyWithin(h + 3, h, h + (K - 1) * 3);
+        tr.time.copyWithin(base + 1, base, base + K - 1);
+        tr.pos[h] = x;
+        tr.pos[h + 1] = y;
+        tr.pos[h + 2] = z;
+        tr.time[base] = this.time;
+        c = Math.min(c + 1, K - 1);
+      }
+      while (c > 1 && this.time - tr.time[base + c - 1] > tr.life[i]) c--;
+      tr.count[i] = c;
+      // The head (the particle now), then the recorded points
+      pts.length = 0;
+      pts.push([x, y, z, 0]);
+      for (let j = 0; j < c; j++) pts.push([tr.pos[h + j * 3], tr.pos[h + j * 3 + 1], tr.pos[h + j * 3 + 2], this.time - tr.time[base + j]]);
+      const lt = this.age[i] / this.life[i];
+      sampleColor(td.colorOverLife, lt, this.rand[i * 2], life);
+      if (td.inheritColor) this.color(i, lt, pcol, col);
+      for (let j = 0; j < K; j++) {
+        const q = pts[Math.min(j, pts.length - 1)];
+        const prev = j + 1 < pts.length ? pts[j + 1] : pts.length > 1 ? [2 * q[0] - pts[pts.length - 2][0], 2 * q[1] - pts[pts.length - 2][1], 2 * q[2] - pts[pts.length - 2][2]] : q;
+        const u = Math.min(q[3] / Math.max(tr.life[i], 1e-3), 1);
+        const w = j < pts.length && pts.length > 1 ? sample(td.width, u, this.rand[i * 2 + 1]) : 0;
+        sampleColor(td.colorOverTrail, u, this.rand[i * 2 + 1], col);
+        col.multiply(life);
+        if (td.inheritColor) col.multiply(pcol);
+        for (let s = 0; s < 2; s++) {
+          const v = (base + j) * 2 + s;
+          position.setXYZ(v, q[0], q[1], q[2]);
+          aPrev.setXYZ(v, prev[0], prev[1], prev[2]);
+          aSide.setX(v, s ? 1 : -1);
+          aWidth.setX(v, w);
+          aColor.setXYZW(v, col.x, col.y, col.z, col.w);
+        }
+      }
+    }
+    for (const a of Object.values(this.trailAttrs)) {
+      a.needsUpdate = true;
+      a.addUpdateRange(0, this.count * K * 2 * a.itemSize);
+    }
+    this.trailObject.geometry.setDrawRange(0, this.count * (K - 1) * 6);
   }
 
   spawn(offset = null, tint = null) {
@@ -510,6 +635,10 @@ class Emitter {
     this.local.vel.set([dir.x * speed, dir.y * speed, dir.z * speed], i * 3);
     this.age[i] = 0;
     this.life[i] = Math.max(sample(d.lifetime, t), 0.05);
+    if (this.trail) {
+      this.trail.count[i] = 0;
+      this.trail.life[i] = sample(d.trail.lifetime, 0) * this.life[i]; // a fraction of the particle's life
+    }
     this.size0[i] = sample(d.size, t);
     this.rot[i] = -sample(d.rotation, t);
     // Unity turns particles the other way (as the 2D rotation above), and glb space mirrors
@@ -588,6 +717,12 @@ class Emitter {
     move(this.rand, 2);
     move(this.axis, 3);
     move(this.heading, 3);
+    if (this.trail) {
+      move(this.trail.pos, TRAIL_POINTS * 3);
+      move(this.trail.time, TRAIL_POINTS);
+      move(this.trail.count, 1);
+      move(this.trail.life, 1);
+    }
   }
 
   step(dt) {
@@ -673,6 +808,38 @@ class Emitter {
         ex = -sample(vel.x, lt, this.rand[i * 2 + 1]);
         ey = sample(vel.y, lt, this.rand[i * 2 + 1]);
         ez = sample(vel.z, lt, this.rand[i * 2 + 1]);
+      }
+      // Noise module: a smooth push through the system's space (sums of sines standing in for
+      // Unity's Perlin noise; its strength in units/s, its frequency per unit)
+      if (d.noise) {
+        const nz = d.noise;
+        const amt = sample(nz.strength, lt, this.rand[i * 2]) * sample(nz.amount, lt, this.rand[i * 2]) * (this.scale ?? 1);
+        const fq = nz.frequency / (this.scale ?? 1);
+        const tt = this.time * (sample(nz.scroll, lt) + 0.3);
+        const px = this.local.pos[p] * fq;
+        const py = this.local.pos[p + 1] * fq;
+        const pz = this.local.pos[p + 2] * fq;
+        const seed = this.ids[i] * 1.618;
+        ex += amt * Math.sin(py * 2.1 + pz * 1.3 + tt + seed) * Math.cos(px * 0.7 + seed);
+        ey += amt * Math.sin(pz * 1.9 + px * 1.1 + tt * 1.3 + seed * 2.0) * Math.cos(py * 0.8);
+        ez += amt * Math.sin(px * 1.7 + py * 1.5 + tt * 0.7 + seed * 3.0) * Math.cos(pz * 0.9);
+      }
+      // Limit velocity, on the whole velocity (velocity module included): past the limit, the
+      // speed eases back by dampen (a fraction per frame at 30 fps, as Unity keeps it framerate-independent). 3.12 Copenhagen's
+      // firework sparks shoot out, then hang where they burst
+      if (d.limit) {
+        const lim = sample(d.limit.speed, lt, this.rand[i * 2 + 1]) * (this.scale ?? 1);
+        const tx = v[p] + ex;
+        const ty = v[p + 1] + ey;
+        const tz = v[p + 2] + ez;
+        const sp = Math.hypot(tx, ty, tz);
+        if (sp > lim) {
+          const k = 1 - (1 - d.limit.dampen) ** (dt * 30);
+          const f = (sp - (sp - lim) * k) / sp;
+          v[p] = tx * f - ex;
+          v[p + 1] = ty * f - ey;
+          v[p + 2] = tz * f - ez;
+        }
       }
       const pos = this.local.pos;
       const x0 = pos[p];
@@ -920,6 +1087,7 @@ export function updateParticles(dt, camera) {
       if (e.root.visible && steps) {
         run(e);
         e.upload();
+        if (e.trail) e.uploadTrail();
       }
       continue;
     }
@@ -946,6 +1114,7 @@ export function updateParticles(dt, camera) {
     if (!steps && !fresh) continue;
     run(e);
     e.upload();
+    if (e.trail) e.uploadTrail();
   }
 }
 
