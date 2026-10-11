@@ -807,9 +807,10 @@ function translateLegacy(def) {
   }
   // 1.x distant scenery (1.65 Amsterdam's hedges, trees, windmills): unlit, in the distant fog
   if (def.shader === 'Custom/Distant Environment') return { ...def, floats: { ...def.floats, _DistantFog: 1 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
-  // 1.x Custom/Unlit No Fog With Gradient (1.81 Cairo's sun): texture red mapped from _Color1
-  // to _Color2, opaque, no fog
-  if (def.shader === 'Custom/Unlit No Fog With Gradient') {
+  // 1.x Custom/Unlit No Fog With Gradient (1.81 Cairo's sun) and Bend/Texture Controlled
+  // Gradient (Background) (1.82 Chicago's clouds): texture red mapped from _Color1 to _Color2,
+  // opaque, no fog
+  if (def.shader === 'Custom/Unlit No Fog With Gradient' || /^Bend\/Texture Controlled Gradient/.test(def.shader)) {
     return { ...def, colors: { ...def.colors, _Color: def.colors?._Color1 ?? [1, 1, 1, 1] }, floats: { ...def.floats, _HasGradient: 1, _HasFogMultiplier: 1, _FogMultiplier: 0 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
   }
   if (/^Custom\/Distorted\//.test(def.shader) && !/Skyline/.test(def.shader)) return translateDistorted(def);
@@ -834,7 +835,9 @@ function translateLegacy(def) {
   }
   // Pre-3.0 additive shaders keep their color in _TintColor (2.8 Cambridge's red owl eyes)
   if (def.colors?._TintColor && !def.colors._Color) def = { ...def, colors: { ...def.colors, _Color: def.colors._TintColor } };
-  for (const [re, flags] of LEGACY_SHADERS) if (re.test(def.shader)) Object.assign(floats, flags, def.floats.FADE_MODE != null ? {} : {});
+  // (waves are read from the name in combined(), skylines by the skyline loaders)
+  let ruled = !!floats._HasGradient || /Skyline|^Bend\/Wave \(Vertex Color Control/.test(def.shader);
+  for (const [re, flags] of LEGACY_SHADERS) if (re.test(def.shader)) ruled = !!Object.assign(floats, flags);
   if (floats._ColorMultiplier != null) Object.assign(floats, { _HasMultiplier: 1, _Multiplier: floats._ColorMultiplier });
   // Bend/UVScroll scrolls by _Time.y (seconds), the Combined shader by _Time.x (seconds / 20):
   // 2.11 Space Station's lane glow is 0.12 there, 2.4 in 3.70's Combined copy
@@ -843,7 +846,8 @@ function translateLegacy(def) {
   }
   // Legacy transparent queues were left at -1 (shader default)
   const renderQueue = def.renderQueue > 0 ? def.renderQueue : floats._DstMode ? 3000 : 2000;
-  return { ...def, floats, renderQueue };
+  // (no name rule matched: drawn as the plain textured Combined shader, see unruledShaders)
+  return { ...def, floats, renderQueue, ...(ruled || /Particle/i.test(def.shader) ? {} : { unruled: true }) };
 }
 
 // Shaders that reach the plain path with no rule of their own (outside the families the
@@ -887,7 +891,7 @@ export class MaterialLibrary {
     else if (/Bend\/(Legacy\/|Panning )Texture And Double Alpha$/.test(def.shader)) mat = this.doubleAlpha(name, def);
     else {
       const translated = translateLegacy(def);
-      if (translated === def && !TRANSLATED.test(def.shader)) {
+      if ((translated === def && !TRANSLATED.test(def.shader)) || translated.unruled) {
         if (!unruledShaders.has(def.shader)) console.warn(`[materials] no viewer rule for shader "${def.shader}" (${name}): drawn as a plain texture`);
         unruledShaders.set(def.shader, [...(unruledShaders.get(def.shader) ?? []), name]);
       }

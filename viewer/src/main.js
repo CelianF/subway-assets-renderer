@@ -2154,9 +2154,14 @@ async function loadSkylineLayers(cfg) {
     }
     // (glb space mirrors x: the game's offset to the left is +x here)
     const [shiftX, shiftY] = layer.shift ?? [0, 0];
+    // Moving singles take turns: the game shows one at a time, picked at random, and the next
+    // only once it has crossed the sky (1.82 Chicago's two cloud sets showed together)
+    const movers = layer.singles.filter((n) => manifest.prefabs[n]?.backgroundObject?.movable);
+    const shown = movers[Math.floor(rng() * movers.length)];
     for (const name of layer.singles) {
       const bo = manifest.prefabs[name]?.backgroundObject;
       if (bo && !bo.movable && !bo.alwaysVisible) continue;
+      if (bo?.movable && name !== shown) continue;
       const x = bo && !bo.movable ? 0 : cfg.limits[0] + rng() * (cfg.limits[1] - cfg.limits[0]);
       await place(name, -(x + shiftX), shiftY);
     }
