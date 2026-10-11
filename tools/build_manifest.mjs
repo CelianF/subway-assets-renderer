@@ -878,8 +878,18 @@ const LEGACY_TRACK_INFOS = {
   boundary_tube: { SpawnTracks: true, ShowShadows: true },
 };
 // _environmentKind._type of _environmentTransitionConfigs -> boundary slot
-// (fillers, type 1, by density: 1.104 Dubai's low stretches have an entry and an exit piece)
-const LEGACY_ENVIRONMENT_KINDS = { 2: 'boundary_tube', '1/1': 'boundary_low_left', '1/2': 'boundary_medium_left', '1/4': 'boundary_high_left' };
+// (by type, fillers by type/density: 1.104 Dubai's low stretches and 1.82 Chicago's pillar
+// halls have entry and exit pieces too): the slot a stretch starts with, ends with, and all
+// its slots (for ExcludeEnvironments, matched against the neighboring stretch)
+const LEGACY_ENVIRONMENT_KINDS = {
+  2: { start: 'boundary_tube', end: 'boundary_tube', slots: ['boundary_tube'] },
+  4: { start: 'boundary_pillars_start', end: 'boundary_pillars_end', slots: ['boundary_pillars_start', 'boundary_pillars_mid', 'boundary_pillars_end'] },
+  8: { start: 'boundary_gate', end: 'boundary_gate', slots: ['boundary_gate'] },
+  16: { start: 'boundary_station_start', end: 'boundary_station_end', slots: ['boundary_station_start', 'boundary_station_mid', 'boundary_station_end'] },
+  32: { start: 'boundary_epic_start', end: 'boundary_epic_end', slots: ['boundary_epic_start', 'boundary_epic_mid', 'boundary_epic_end'] },
+  ...Object.fromEntries([[1, 'low'], [2, 'medium'], [4, 'high']].map(([d, h]) => [`1/${d}`, { start: `boundary_${h}_left`, end: `boundary_${h}_left`, slots: [`boundary_${h}_left`, `boundary_${h}_right`] }])),
+};
+const legacyKind = (type, density) => LEGACY_ENVIRONMENT_KINDS[type === 1 ? `1/${density}` : type];
 // Train cars per variant: the moving train's first car is the locomotive
 const LEGACY_TRAIN_CARS = { Cargo: ['cargo', 'cargo'], Standard: ['standard', 'standard_front'], Subway: ['sub', 'sub_front'] };
 const LEGACY_TRAINS = [['static', [1, 2, 3, 5]], ['moving', [3, 5]]];
@@ -954,13 +964,16 @@ function parseLegacyTheme(file, guidIndex) {
 
   // Tube entrances/exits, filler stretches' entry/exit pieces
   const transitions = [];
-  for (const cfg of (text.split('\n  _environmentTransitionConfigs:')[1] ?? '').split(/\n {2}- _environmentKind:/).slice(1)) {
-    const slot = LEGACY_ENVIRONMENT_KINDS[number('_type', cfg)] ?? LEGACY_ENVIRONMENT_KINDS[`${number('_type', cfg)}/${number('_density', cfg)}`];
-    if (!slot) continue;
+  // (up to the next top-level key: the last config ran on into the route assets' kinds)
+  for (const cfg of (text.split('\n  _environmentTransitionConfigs:')[1]?.split(/\n {2}_\w/)[0] ?? '').split(/\n {2}- _environmentKind:/).slice(1)) {
+    const kind = legacyKind(number('_type', cfg), number('_density', cfg));
+    if (!kind) continue;
     for (const at of ['start', 'end']) {
       const part = cfg.split(`_transition${at === 'start' ? 'Start' : 'End'}:`)[1]?.split('_transition')[0] ?? '';
       const m = part.match(/Prefab: \{fileID: \d+, guid: (\w+)/);
-      if (m && prefabName(m[1])) transitions.push({ slot, at, prefab: prefabName(m[1]), probability: number('SpawnProbability', part) ?? 1, exceptions: [] });
+      // Not next to these stretches (Chicago: no high-stretch arch against a gate)
+      const exceptions = [...(part.split('ExcludeEnvironments:')[1] ?? '').matchAll(/_type: (\d+)\n\s+_density: (\d+)/g)].flatMap(([, t, d]) => legacyKind(Number(t), Number(d))?.slots ?? []);
+      if (m && prefabName(m[1])) transitions.push({ slot: kind[at], at, prefab: prefabName(m[1]), probability: number('SpawnProbability', part) ?? 1, exceptions });
     }
   }
 
