@@ -761,6 +761,17 @@ export function generateLayout(
   let z = 0;
 
   let placeRng = rng; // studio items use their own stable generator
+  // Pieces the run lays and the studio doesn't (station platforms, pillars) draw from their
+  // own generator: from the main one, entering the studio re-rolled every section after the
+  // first station, and with it the pieces' random billboards (1.104 Dubai's wall boards
+  // seemed wiped)
+  const asideRng = mulberry32(seed ^ 0x2545f491);
+  const aside = (fn) => {
+    const prev = placeRng;
+    placeRng = asideRng;
+    fn();
+    placeRng = prev;
+  };
   // Showcase (debug): each slot's prefabs in turn instead of at random
   const turns = new Map();
   const choose = (key, list) => {
@@ -899,7 +910,9 @@ export function generateLayout(
     // (in the studio they are items, wiped and put back like the rest)
     if (has('special_station_platform')) stations.push([start, end]);
     if (obstacleMode === 'studio') return;
-    for (let pz = start; pz + SEGMENT <= end; pz += SEGMENT) place('special_station_platform', [0, 0, pz]);
+    aside(() => {
+      for (let pz = start; pz + SEGMENT <= end; pz += SEGMENT) place('special_station_platform', [0, 0, pz]);
+    });
     if (has('special_station_platform')) platformRanges.push([start, end]);
   }
   function tube() {
@@ -969,7 +982,9 @@ export function generateLayout(
     // ("Fix pillars" puts back any that are missing)
     if (has('obstacle_pillar')) pillarHalls.push([start, z]);
     if (has('obstacle_pillar') && gen.obstacles.pillar && obstacleMode !== 'studio') {
-      for (let pz = start + SEGMENT / 2; pz < z; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], 'obstacle');
+      aside(() => {
+        for (let pz = start + SEGMENT / 2; pz < z; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], 'obstacle');
+      });
       pillarRanges.push([start, z]);
     }
   }

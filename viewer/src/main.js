@@ -967,6 +967,7 @@ function applyMaterial(mesh, mat) {
   if (mat.name === 'DefaultMaterial') mesh.visible = false;
   mesh.material = mat;
   mesh.renderOrder = mat.userData.renderQueue ?? 2000;
+  if (mat.uniforms?.uDrift && !mat.uniforms.uDrift.value.x) measureDrift(mesh.geometry, mat);
   // Hunt tokens' outline (MeshOutliner): the same geometry, pushed out, drawn first
   if (mat.userData.outline && !mesh.userData.outlined) {
     const rim = new THREE.Mesh(mesh.geometry, mat.userData.outline);
@@ -976,6 +977,50 @@ function applyMaterial(mesh, mat) {
     rim.userData.rim = true;
     mesh.add(rim);
     mesh.userData.outlined = true;
+  }
+}
+
+/**
+ * 1.x UV-distorted sea: how many units across one texture height spans, and the world speed
+ * of the game's scroll (along the run, one u per segment), measured on the mesh's grid
+ * edges, so the shader can run the ripples in toward the shore at that speed.
+ */
+function measureDrift(geo, mat) {
+  const pos = geo.attributes.position;
+  const uv = geo.attributes.uv;
+  if (!pos || !uv) return;
+  const across = [];
+  const along = [];
+  const idx = geo.index ? geo.index.array : [...Array(pos.count).keys()];
+  for (let t = 0; t + 2 < idx.length; t += 3) {
+    for (const [a, b] of [[idx[t], idx[t + 1]], [idx[t + 1], idx[t + 2]], [idx[t + 2], idx[t]]]) {
+      const dx = Math.abs(Math.abs(pos.getX(b)) - Math.abs(pos.getX(a)));
+      const dz = Math.abs(pos.getZ(b) - pos.getZ(a));
+      if (dx > 1 && dz < dx * 1e-3) across.push(Math.abs(uv.getY(b) - uv.getY(a)) / dx);
+      if (dz > 1 && dx < dz * 1e-3) along.push(Math.abs(uv.getX(b) - uv.getX(a)) / dz);
+    }
+  }
+  const median = (list) => list.sort((p, q) => p - q)[list.length >> 1] ?? 0;
+  const dvdx = median(across);
+  const dudz = median(along);
+  const scroll = Math.abs(mat.uniforms.uScrollF?.value.x ?? 0) / 20;
+  if (dvdx > 0 && dudz > 0) mat.uniforms.uDrift.value.set(dvdx, scroll / dudz);
+  // Where v folds back toward the shore (1.104 Dubai: it peaks mid-sea), from there in the
+  // gradient holds its last row instead of mirroring (the mirror showed as a line)
+  let peak = -Infinity;
+  let peakAx = 0;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    const ax = Math.abs(pos.getX(i));
+    const v = 1 - uv.getY(i); // Unity's V
+    lo = Math.min(lo, ax);
+    hi = Math.max(hi, ax);
+    if (v > peak) [peak, peakAx] = [v, ax];
+  }
+  if (mat.uniforms.uDriftFold && peakAx > lo + 1 && peakAx < hi - 1) {
+    mat.uniforms.uDriftFold.value = peakAx;
+    mat.uniforms.uDriftPeak.value = peak;
   }
 }
 

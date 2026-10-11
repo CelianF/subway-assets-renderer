@@ -278,11 +278,13 @@ void main() {
   p.y -= texture2D(uIndentTex, uv).r * 8.0;
 #endif
 #ifdef WATER_WAVE
-  // Bend/Wave (UV Distorted), 1.x water: world height swells by two sines (seconds), along
-  // Unity's z as compiled. Across x the compiled frequency tore chunk seams open (their edge
-  // vertices sit 1-2 units apart from chunk to chunk), so that swell runs long (1.106 Bali)
+  // Bend/Wave (UV Distorted), 1.x water: world height swells by two sines (seconds), as
+  // compiled. Their frequencies (2-3 per unit) are far finer than the mesh's 15-20 unit grid:
+  // sampled at the vertices they alias into the long swell seen in play, crests along the
+  // shore rolling across (1.104 Dubai). Stretched across x (once, against seams on 1.106
+  // Bali), the swell turned 90° and ran along the run
   vec3 ww = (modelMatrix * vec4(p, 1.0)).xyz;
-  p.y += (uWaterWave.x * sin(uWaterWave.z * 0.01 * -ww.x + uWaterSpeed.x * uTime)
+  p.y += (uWaterWave.x * sin(uWaterWave.z * -ww.x + uWaterSpeed.x * uTime)
         + uWaterWave.y * sin(uWaterWave.w * ww.z + uWaterSpeed.y * uTime)) / max(length(modelMatrix[1].xyz), 1e-4);
 #endif
   vWorld = (modelMatrix * vec4(p, 1.0)).xyz;
@@ -409,6 +411,9 @@ uniform vec2 uUvWobbleSpeed;
 uniform vec4 uUvWave; // _xWaveYDistortion amplitude, frequency, speed, start
 uniform float uUvWavePos; // _xWaveYDistortionPosFactor
 uniform vec2 uScrollF; // uScroll, for the fragment shader
+uniform vec2 uDrift; // 1.x water: 1 / units per texture height across, ripple speed toward the shore
+uniform float uDriftFold; // where the mesh's v folds back toward the shore (0: it doesn't)
+uniform float uDriftPeak; // the mesh's v there
 #ifdef WATER_DISTORT
 uniform sampler2D uDisplaceTex; // Specials/Water: a scrolling noise ripples the texture
 uniform vec2 uDisplaceScroll;
@@ -462,21 +467,62 @@ void main() {
 ${CUT_MAIN}
   vec2 uv = vUv;
 #ifdef UV_WOBBLE
+  vec4 wobbleColor = vec4(0.0);
+  bool wobbleOn = false;
+#endif
+#ifdef UV_WOBBLE
   // After the compiled shader (Unity's V-up UVs, world z): x sways by two sines, the second
   // growing up the texture; y is pushed by a sine fading out at the top, kept inside the
   // texture (unclamped, it slid off into pale bands). The sways change a tenth as fast along
   // z and the push is a tenth as strong: as compiled they squashed and folded the texture
-  // (1.106 Bali)
+  // (1.106 Bali), and looked off on 1.104 Dubai too.
+  // NOT as compiled: the game's code scrolls along the run (u), but in play the ripples go
+  // toward the shore (1.104 Dubai, the user's footage), so the drift runs across, toward the
+  // track, at the same speed; the texture's gradient across stays put (row averages)
   {
     vec2 u = vec2(vUv.x, 1.0 - vUv.y);
+    u.x -= uScrollF.x * uTime / 20.0; // the scroll the vertex shader put in
     // The strip under the track maps u mirrored along z (1.102 Bangkok: u = 1 - the outer
-    // water's): flipped back, so its pattern meets the rest and drifts the same way
+    // water's): flipped back, so its pattern meets the rest
     float duz = dFdx(u.x) * dFdx(vWorld.z) + dFdy(u.x) * dFdy(vWorld.z);
-    if (duz > 0.0) u.x = 1.0 - u.x + 2.0 * uScrollF.x * uTime / 20.0;
+    if (duz > 0.0) u.x = 1.0 - u.x;
+    // The ripples come in from the open sea: sampled by distance from the track (scale and
+    // speed measured on the mesh: uDrift = 1 / units per texture height, world speed of the
+    // game's scroll), not by the mesh's v, which folds back mid-sea (that fold was the line)
+    float ax = abs(vWorld.x);
+    float vRaw = (ax + uDrift.y * uTime) * uDrift.x;
     float w = clamp((u.y - uUvWave.w) / (1.0 - uUvWave.w), 0.0, 1.0);
     float ux = u.x + uUvWobble.x * sin(uTime * uUvWobbleSpeed.x + vWorld.z * uUvWobble.y * 0.1)
                    + uUvWave.x * sin(uTime * uUvWave.z + w * w * uUvWave.y + uUvWavePos * 0.1 * vWorld.z);
-    float uy = clamp(u.y - (1.0 - u.y) * uUvWobble.z * 0.1 * sin(uTime * uUvWobbleSpeed.y + vWorld.z * uUvWobble.w), 0.0, 1.0) + 0.002;
+    float push = uUvWobble.z * 0.1 * sin(uTime * uUvWobbleSpeed.y + vWorld.z * uUvWobble.w);
+    // (inside the fold the gradient keeps its peak row: mirrored, it drew a line mid-sea)
+    float vg = uDriftFold > 0.0 && ax < uDriftFold ? uDriftPeak : u.y;
+    float uy0 = clamp(vg - (1.0 - vg) * push, 0.0, 1.0) + 0.002;
+    // (gradients of the unwrapped coordinates: the wrap would pick a tiny mip level, a seam)
+    vec2 cont = vec2(ux, -vRaw);
+    vec2 gx = dFdx(cont), gy = dFdy(cont);
+    if (uDrift.x > 0.0) {
+      // Two lookups half a texture apart, each fading out where it wraps (the texture
+      // doesn't tile across: one lookup left a seam line drifting over the sea); the
+      // texture's gradient follows the mesh's v as in game, through row averages
+      vec4 sum = vec4(0.0);
+      for (int k = 0; k < 2; k++) {
+        float f = fract(vRaw + 0.5 * float(k));
+        float uy = clamp(f - (1.0 - f) * push, 0.0, 1.0) + 0.002;
+        vec3 shift = vec3(0.0);
+        for (int r = 0; r < 8; r++) {
+          float ur = float(r) / 8.0 + 0.0625;
+          // (rows kept off the edges: the repeat wrap would average in the other end's rows)
+          shift += textureLod(uMap, vec2(ur, clamp(1.0 - uy0, 0.02, 0.98)), 3.0).rgb - textureLod(uMap, vec2(ur, clamp(1.0 - uy, 0.02, 0.98)), 3.0).rgb;
+        }
+        vec4 t = textureGrad(uMap, vec2(ux, 1.0 - uy), gx, gy);
+        t.rgb += shift / 8.0;
+        sum += t * (1.0 - abs(2.0 * f - 1.0));
+      }
+      wobbleColor = sum;
+      wobbleOn = true;
+    }
+    float uy = uy0;
     uv = vec2(ux, 1.0 - uy);
   }
 #endif
@@ -485,7 +531,11 @@ ${CUT_MAIN}
   // by red × strength along both Unity axes (V points down here)
   uv += vec2(1.0, -1.0) * texture2D(uDisplaceTex, vUv + vec2(1.0, -1.0) * uDisplaceScroll * uTime / 20.0).r * uDisplaceStrength;
 #endif
+#ifdef UV_WOBBLE
+  vec4 c = wobbleOn ? wobbleColor : texture2D(uMap, uv);
+#else
   vec4 c = texture2D(uMap, uv);
+#endif
 #ifdef GRAFFITI
   c *= texture2D(uFrontTex, vUv1); // the tag over the wall, on the second UV set
 #endif
@@ -809,7 +859,10 @@ function translateDistorted(def) {
   const flags = DISTORTED_SHADERS.find(([re]) => re.test(def.shader))?.[1];
   if (flags) Object.assign(floats, flags);
   // Tints: particles-style _TintColor is doubled; additive/premultiplied use _MainColor
-  if (/Alpha Blended/i.test(def.shader) && colors._TintColor) colors._Color = colors._TintColor.map((v) => Math.min(v * 2, 1));
+  // (as compiled: plain Alpha Blended doubles vertex color × tint; "(with Reflection)" takes
+  // the tint as is: doubled, 1.104 Dubai's aquarium glass came out at 0.82 instead of 0.41)
+  if (/Alpha Blended \(with Reflection\)/i.test(def.shader) && colors._TintColor) colors._Color = colors._TintColor;
+  else if (/Alpha Blended/i.test(def.shader) && colors._TintColor) colors._Color = colors._TintColor.map((v) => Math.min(v * 2, 1));
   else if (/Additive|Premultiplied/i.test(def.shader)) {
     const tint = colors._MainColor ?? colors._TintColor;
     if (tint) colors._Color = [...tint.slice(0, 3), 1];
@@ -1093,10 +1146,17 @@ export class MaterialLibrary {
         uUvWobbleSpeed: { value: new THREE.Vector2(f._xDistortionSpeed ?? 0, f._yDistortionSpeed ?? 0) },
         uUvWave: { value: new THREE.Vector4(f._xWaveYDistortionAplitude ?? 0, f._xWaveYDistortionFrequency ?? 0, f._xWaveYDistortionSpeed ?? 0, f._xWaveYDistortionStart ?? 0) },
         uUvWavePos: { value: f._xWaveYDistortionPosFactor ?? 0 },
+        uDrift: { value: new THREE.Vector2(0, 0) }, // set per mesh (main.js measureDrift)
+        uDriftFold: { value: 0 },
+        uDriftPeak: { value: 1 },
         uScrollF: { value: new THREE.Vector2(...(c._ScrollSpeed ?? [0, 0]).slice(0, 2)).multiplyScalar(20) },
       },
     });
     this.applyRenderState(mat, name, def);
+    // A mesh without vertex colors reads them as black in the game (GLES), so its wave weight
+    // (red) is 0; three's ShaderMaterial would hand it white (1.104 Dubai's aquarium fish,
+    // still in game, swam about)
+    if (wave) mat.defaultAttributeValues = { ...mat.defaultAttributeValues, color: [0, 0, 0] };
     if (fadeMode === 1 && /glass/i.test(name)) {
       mat.userData.glass = true;
       mat.userData.baseAlpha = tint.w;

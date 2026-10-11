@@ -631,6 +631,7 @@ class Emitter {
     const speed = sample(d.speed, t);
     pos.x = -pos.x; // Unity -> glb space
     dir.x = -dir.x;
+    if (this.shapeScale) pos.multiply(this.shapeScale);
     if (offset) pos.add(offset);
     if (this.covered?.(pos.z)) {
       // Weather: no snow inside tubes, stations, pillar halls
@@ -737,12 +738,24 @@ class Emitter {
     if (!this.gravityLocal) {
       // World down and the emitter's scale, in its local frame (pieces never move)
       this.node.updateWorldMatrix(true, false);
+      // Shape scaling mode: the transform's scale (here the parents': 1.104 Dubai's aquarium
+      // bubble placeholders are squashed to 0.56) only spreads the start positions; speeds and
+      // sizes stay unscaled (the bubbles rose 22 instead of 40)
+      if (this.def.shape?.scaling === 2 && !this.shapeScale) {
+        const s = new THREE.Vector3().setFromMatrixScale(this.node.matrixWorld);
+        if (Math.abs(s.x - 1) + Math.abs(s.y - 1) + Math.abs(s.z - 1) > 1e-3) {
+          this.shapeScale = s;
+          for (const object of [...(this.parts?.map((q) => q.object) ?? [this.object]), this.trailObject]) object?.scale.set(1 / s.x, 1 / s.y, 1 / s.z);
+          this.object.updateWorldMatrix(true, false);
+        }
+      }
       // (world vectors through the inverse frame, scale included: 1.98 Atlanta's fountain is
       // turned 90° on X and stretched 2.3 x 2.4 x 4.5, its world-down force must stay down)
-      const inv = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().copy(this.node.matrixWorld).invert());
+      const frame = this.shapeScale ? this.object.matrixWorld : this.node.matrixWorld;
+      const inv = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().copy(frame).invert());
       this.toLocal = inv;
       this.gravityLocal = new THREE.Vector3(0, -9.81, 0).applyMatrix3(inv); // per unit of gravity modifier
-      const s = new THREE.Vector3().setFromMatrixScale(this.node.matrixWorld);
+      const s = new THREE.Vector3().setFromMatrixScale(frame);
       this.scale = (Math.abs(s.x) + Math.abs(s.y) + Math.abs(s.z)) / 3;
       if (this.material.uniforms.uScale) this.material.uniforms.uScale.value = this.scale;
     }
