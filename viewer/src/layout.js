@@ -1026,6 +1026,7 @@ export function generateLayout(
       const n = Math.max(1, ...Object.values(groups).map((c) => c.length));
       for (let i = 0; i < n; i++) steps.push(() => epic(Object.keys(groups).length ? Object.fromEntries(Object.entries(groups).map(([g, c]) => [g, c[i % c.length]])) : null));
     }
+    if (has('boundary_PrePortal_Left')) steps.push(() => placeRun('boundary_PrePortal_Left'));
     for (const [i, step] of steps.entries()) {
       if (i > 0 && buildingsType) buildingsLink();
       step();
@@ -1062,6 +1063,18 @@ export function generateLayout(
     const prev = finalPlan[finalPlan.length - 1];
     if (buildingsType && prev && prev !== buildingsType && section !== buildingsType) finalPlan.push(buildingsType);
     finalPlan.push(section);
+  }
+  // Cosmic Crossroads: the run opens in Subway City and goes through the portal
+  // (DefaultPrePortalRouteConfig: Chunk_Intro, 16 cells between PrePortalIntro boundaries the
+  // theme leaves empty, then Chunk_PrePortal, 80 cells whose left slot is the whole start piece)
+  // (Chunk mode: the start piece is in the plan, laid with the rest)
+  let prePortalAt = null;
+  if (has('boundary_PrePortal_Left') && !modeRun && !gen.showcase) {
+    addRun('left', 'boundary_PrePortalIntro_Left', z, z + SEGMENT);
+    addRun('right', 'boundary_PrePortalIntro_Left', z, z + SEGMENT);
+    z += SEGMENT;
+    prePortalAt = z;
+    if (!gen.plan?.length) placeRun('boundary_PrePortal_Left');
   }
   const routeRng = mulberry32(seed ^ 0x5bd1e995);
   const pass = modeRun && mode.route.type === 'sequential' ? routeChunks(mode, routeRng, null) : null;
@@ -1261,8 +1274,15 @@ export function generateLayout(
   // Older game versions ship no chase chunks: fall back to random obstacles
   if (obstacleMode === 'studio') placeStudio();
   else if (routed) placeRoute();
-  else if (obstacleMode === 'chunks' && Object.keys(manifest.chunks ?? {}).length) placeChunks();
-  else placeObstacles();
+  else {
+    // The pre-portal stretch keeps its chunk's own trains (Subway City ones), nothing random
+    if (prePortalAt != null && manifest.prePortal) {
+      placeChunk(manifest.prePortal, prePortalAt, new Set());
+      for (const x of LANES) laneBlocks.push({ x, z0: prePortalAt, z1: prePortalAt + manifest.prePortal.length });
+    }
+    if (obstacleMode === 'chunks' && Object.keys(manifest.chunks ?? {}).length) placeChunks();
+    else placeObstacles();
+  }
   if (obstacleMode !== 'studio' && !routed) placeStationSets();
 
   // Outer lanes around a station (barriers included): no trains or random obstacles there
@@ -1398,7 +1418,7 @@ export function generateLayout(
     let cz = SEGMENT;
     while (cz < length - SEGMENT) {
       const chunk = manifest.chunks[pick(rng, names)];
-      if (noTrackRanges.some(([a, b]) => cz < b && cz + chunk.length > a - 30)) {
+      if (noTrackRanges.some(([a, b]) => cz < b && cz + chunk.length > a - 30) || laneBlocks.some((l) => cz < l.z1 && cz + chunk.length > l.z0)) {
         cz += 90;
         continue;
       }

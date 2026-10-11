@@ -3124,6 +3124,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const placementCount = Object.values(chunks).reduce((n, c) => n + c.placements.length, 0);
   log(`Chunks: ${Object.keys(chunks).length} (${placementCount} placements)`);
   const modes = parseModes(find, guidIndex, log);
+  // Cosmic Crossroads' Subway City opening (DefaultPrePortalRouteConfig, which no asset
+  // references): its chunk lays the start piece and its own trains and coins
+  const prePortalFile = find('Chunk_PrePortal.prefab');
+  const prePortal = prePortalFile ? parseChunk(prePortalFile, guidIndex, { aliases: false }) : null;
+  if (prePortal) log(`Pre-portal chunk: ${prePortal.placements.length} placements, ${prePortal.length} long`);
 
   // Configs point at their theme; match on that, as names differ in old games
   // (theme "1.65_Amsterdam", config "Amsterdam_Config")
@@ -3518,6 +3523,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     slotDepths,
     chunks,
     modes,
+    ...(prePortal ? { prePortal } : {}),
     pickups: pickups.filter((n) => prefabs[n]?.bbox),
     // (a hunt token is a model a few units across; menu-sized ones are left out)
     huntTokens: huntTokens.filter((n) => prefabs[n]?.bbox && prefabs[n].bbox[1][0] - prefabs[n].bbox[0][0] > 2),

@@ -228,11 +228,15 @@ void main() {
     vec3 local = vec3(mat2(c, -s, s, c) * corner * iMisc.x, 0.0).xzy;
     mv = modelViewMatrix * vec4(iPos + local / max(uScale, 1e-4) * uScale, 1.0);
   } else if (uMode == 1.0) {
-    // stretched along the screen-space velocity
+    // stretched along the velocity in 3D, turned about it to face the camera: on screen
+    // only, a particle flying straight away (Cosmic Crossroads' stars into the portal) had
+    // no direction and stood upright
     vec3 v = (modelViewMatrix * vec4(iVel, 0.0)).xyz;
-    vec2 axis = length(v.xy) > 1e-4 ? normalize(v.xy) : vec2(0.0, 1.0);
+    vec3 axis = length(v) > 1e-4 ? normalize(v) : vec3(0.0, 1.0, 0.0);
+    vec3 side = cross(axis, normalize(-mv.xyz));
+    side = length(side) > 1e-4 ? normalize(side) : vec3(1.0, 0.0, 0.0);
     float len = size * uLengthScale + length(v) * uVelocityScale;
-    mv.xy += axis * corner.y * len + vec2(-axis.y, axis.x) * corner.x * size;
+    mv.xyz += axis * corner.y * len + side * corner.x * size;
   } else {
     mv.xy += mat2(c, -s, s, c) * corner * size;
   }
@@ -375,7 +379,10 @@ export function particleLook(materials, name, renderMode = 0) {
   // A mesh particle whose material has no texture is plain (Unity's "white" default), not
   // the soft dot: Vancouver's train start leaves came out black around a colored middle
   if (!map && def && renderMode === 4) map = WHITE;
-  return { map, src, dst, fadeMode, tint, vertexColors };
+  // One/Zero with depth writes: drawn as a solid (3.68 Cosmic Crossroads' rocks and cars
+  // flying into the portal showed their far faces through, sorted as transparent)
+  const opaque = src === 1 && dst === 0 && f._ZWrite !== 0;
+  return { map, src, dst, fadeMode, tint, vertexColors, opaque };
 }
 
 const BLEND = [
@@ -403,9 +410,9 @@ function makeMaterial(look, vertexShader, extraUniforms) {
       uTint: { value: new THREE.Vector4(...look.tint) },
       ...extraUniforms,
     },
-    transparent: true,
-    depthWrite: false,
-    blending: THREE.CustomBlending,
+    transparent: !look.opaque,
+    depthWrite: !!look.opaque,
+    blending: look.opaque ? THREE.NoBlending : THREE.CustomBlending,
     blendSrc: BLEND[look.src],
     blendDst: BLEND[look.dst],
     side: THREE.DoubleSide,
@@ -740,6 +747,14 @@ class Emitter {
       if (this.material.uniforms.uScale) this.material.uniforms.uScale.value = this.scale;
     }
     this.time += dt;
+    // Unity removes the particles that die this frame before emitting: the other way, a full
+    // system dropped what came due as a slot freed, then filled both at once (3.68 Cosmic
+    // Crossroads' two cars flew into the portal merged, born in the same frame)
+    for (let i = this.count - 1; i >= 0; i--) {
+      if (this.age[i] + dt < this.life[i]) continue;
+      for (const sub of this.subs) if (sub.type === 2 && Math.random() < sub.probability) sub.emitter.start(this, null, i, sub.inheritColor);
+      this.kill(i);
+    }
     const local = this.time - this.delay;
     if (this.sources) this.emitSources(dt);
     else if (local >= 0) {
