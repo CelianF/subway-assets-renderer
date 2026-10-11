@@ -2112,17 +2112,33 @@ async function loadSkylineLayers(cfg) {
       depthWrite: false,
       side: THREE.DoubleSide,
     });
-    const place = async (name, x) => {
+    const distance = cfg.distance + (maxIndex - layer.index) * 150 - (layer.offset ?? 0);
+    // Where the game has the layer: its objects keep their size and place on screen here
+    const near = distance / (cfg.distance - layer.index * (cfg.spacing ?? 5) + (layer.offset ?? 0));
+    const own = (m) => {
+      const copy = materials.get(m.name, m).clone();
+      if (copy.uniforms) copy.uniforms = { ...materials.get(m.name, m).uniforms, uFogOn: { value: 0 } };
+      // In the sky's pass so the layer order applies; opaque ones stay unblended
+      if (!copy.transparent) Object.assign(copy, { transparent: true, blending: THREE.NoBlending });
+      copy.side = THREE.DoubleSide; // (flat cards, facing either way like the layer's)
+      return copy;
+    };
+    const place = async (name, x, y = 0) => {
       const prefab = manifest.prefabs[name];
       if (!prefab?.glb || !prefab.bbox) return null;
       const obj = (await loadGlb(prefab.glb)).clone();
       obj.position.x = x;
       obj.traverse((o) => {
         if (!o.isMesh) return;
-        o.material = mat;
+        // (layers with their own materials: 1.81 Cairo's sun and its glow)
+        o.material = layer.own ? (Array.isArray(o.material) ? o.material.map(own) : own(o.material)) : mat;
         o.frustumCulled = false;
         o.renderOrder = -1000 + layer.index; // farther layers first
       });
+      if (layer.own) {
+        obj.position.set(x * near, y * near, 0);
+        obj.scale.set(...(prefab.rootScale ?? [1, 1, 1])).multiplyScalar(near);
+      }
       group.add(obj);
       return prefab;
     };
@@ -2136,8 +2152,15 @@ async function loadSkylineLayers(cfg) {
       await place(name, x - lo[0]);
       x += width;
     }
-    for (const name of layer.singles) await place(name, cfg.limits[0] + rng() * (cfg.limits[1] - cfg.limits[0]));
-    group.userData.distance = cfg.distance + (maxIndex - layer.index) * 150 - (layer.offset ?? 0);
+    // (glb space mirrors x: the game's offset to the left is +x here)
+    const [shiftX, shiftY] = layer.shift ?? [0, 0];
+    for (const name of layer.singles) {
+      const bo = manifest.prefabs[name]?.backgroundObject;
+      if (bo && !bo.movable && !bo.alwaysVisible) continue;
+      const x = bo && !bo.movable ? 0 : cfg.limits[0] + rng() * (cfg.limits[1] - cfg.limits[0]);
+      await place(name, -(x + shiftX), shiftY);
+    }
+    group.userData.distance = distance;
     skylineGroup.add(group);
   }
 }

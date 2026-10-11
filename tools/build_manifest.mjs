@@ -974,6 +974,9 @@ function parseLegacyTheme(file, guidIndex) {
       tint: color('_commonMaterialTintColor', layer),
       index: number('LayerIndex', layer) ?? 0,
       offset: number('z', (layer.match(/_offsetFromLayerDefault: \{[^}]*\}/)?.[0] ?? '').replace(/[{},]/g, '\n')) ?? 0,
+      // (1.81 Cairo's Sun layer: up and to the left, in its own materials)
+      shift: ['x', 'y'].map((k) => number(k, (layer.match(/_offsetFromLayerDefault: \{[^}]*\}/)?.[0] ?? '').replace(/[{},]/g, '\n')) ?? 0),
+      ...(/_useCommonMaterial: 0/.test(layer) ? { own: true } : {}),
     };
   });
   // Before the layered skyline (1.55): background silhouettes and monuments in one color,
@@ -3295,6 +3298,10 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     if (filled.length) info.placeholders = Object.fromEntries(filled);
     const adSpots = parseAdSpots(prefabPath, guidIndex);
     if (adSpots.length) info.adSpots = adSpots;
+    // 1.x skyline objects (BackgroundObject): a fixed one stands at its layer's offset, shown
+    // only if always visible; movable ones are placed within the skyline limits
+    const bgObject = read(prefabPath).match(/\n {2}_alwaysVisible: (\d)\n {2}_movable: (\d)/);
+    if (bgObject) info.backgroundObject = { alwaysVisible: bgObject[1] === '1', movable: bgObject[2] === '1' };
     const rootScale = parseRootScale(prefabPath);
     // (a particle system in Shape scaling mode: the scale only stretches its emitter, see below)
     const shapeScaled = rootScale && !info.bbox && /\n {2}scalingMode: 2/.test(read(prefabPath));

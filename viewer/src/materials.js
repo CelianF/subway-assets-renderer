@@ -807,6 +807,11 @@ function translateLegacy(def) {
   }
   // 1.x distant scenery (1.65 Amsterdam's hedges, trees, windmills): unlit, in the distant fog
   if (def.shader === 'Custom/Distant Environment') return { ...def, floats: { ...def.floats, _DistantFog: 1 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
+  // 1.x Custom/Unlit No Fog With Gradient (1.81 Cairo's sun): texture red mapped from _Color1
+  // to _Color2, opaque, no fog
+  if (def.shader === 'Custom/Unlit No Fog With Gradient') {
+    return { ...def, colors: { ...def.colors, _Color: def.colors?._Color1 ?? [1, 1, 1, 1] }, floats: { ...def.floats, _HasGradient: 1, _HasFogMultiplier: 1, _FogMultiplier: 0 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
+  }
   if (/^Custom\/Distorted\//.test(def.shader) && !/Skyline/.test(def.shader)) return translateDistorted(def);
   // Specials/Coin Glow (the coin's halo): its program isn't in the game files, only its
   // transparent queue without depth writes. Drawn like the other pickups' PickupGlow, on
