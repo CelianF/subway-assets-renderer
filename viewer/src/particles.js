@@ -180,7 +180,9 @@ function shapeSpawn(shape, pos, dir) {
     dir.lerp(r, shape.randomDirection).normalize();
   }
   if (shape.rotation?.some((v) => v)) {
-    const e = new THREE.Euler(shape.rotation[0] * DEG, shape.rotation[1] * DEG, shape.rotation[2] * DEG, 'ZXY');
+    // Unity's Euler turns by Z, then X, then Y: three's 'YXZ' (with 'ZXY', Y went first and
+    // 3.67 Fantasy Fest's arrows, pitched up 32° then turned to the track, flew flat)
+    const e = new THREE.Euler(shape.rotation[0] * DEG, shape.rotation[1] * DEG, shape.rotation[2] * DEG, 'YXZ');
     pos.applyEuler(e);
     dir.applyEuler(e);
   }
@@ -515,6 +517,7 @@ class Emitter {
     for (const object of this.parts?.map((p) => p.object) ?? [this.object]) {
       object.frustumCulled = false;
       object.userData.particles = true;
+      Object.defineProperty(object.userData, 'emitter', { value: this, configurable: true }); // (for probes; out of clone()'s JSON copy)
       object.renderOrder = 3000;
       object.name = `${node.name}_particles`;
       node.add(object);
@@ -781,6 +784,10 @@ class Emitter {
           this.spawn(this.spawnOffset);
           this.emitAcc -= 1;
         }
+      }
+      // (a burst at the very end still fires, on the step that reaches it: 3.67 Fantasy Fest's
+      // landmark arrows have their only volley at 1 s of a 1 s system)
+      if (emitting || inCycle - dt < d.duration) {
         d.bursts.forEach((b, k) => {
           for (let n = 0; n < (b.cycles || 1); n++) {
             const key = `${cycle}:${k}:${n}`;
@@ -1096,6 +1103,14 @@ export function setWeatherVisible(visible) {
 
 const MAX_STEP = 0.05; // longest single simulation step (s)
 
+/** A trigger group's time, counting its laps: { action, cycle, laps, last }. */
+function clockTime(c) {
+  const t = c.action.time;
+  if (t < c.last) c.laps++;
+  c.last = t;
+  return c.laps * c.cycle + t;
+}
+
 /** Steps and uploads every live emitter near the camera; drops those of removed pieces. */
 export function updateParticles(dt, camera) {
   const cam = camera.getWorldPosition(new THREE.Vector3());
@@ -1140,6 +1155,8 @@ export function updateParticles(dt, camera) {
       if (e.def.loop && !e.sources) e.advance(Math.min(e.def.duration + (e.def.lifetime?.max ?? 0), 20));
     }
     if (!steps && !fresh) continue;
+    // A triggered system keeps to its group's clock (fired with the clip and the other systems)
+    if (e.clock) e.time = clockTime(e.clock) - dt;
     run(e);
     e.upload();
     if (e.trail) e.uploadTrail();
@@ -1147,26 +1164,36 @@ export function updateParticles(dt, camera) {
 }
 
 /**
- * A world-space system whose node moves (a theme effect that follows the camera): its
- * particles stay where they are in the world, the node's move taken back off them. A jump
- * (camera reset, new map) carries them along instead.
+ * A world-space system whose node moves (a theme effect that follows the camera) or turns
+ * (3.67 Fantasy Fest's dragon smoke, on a jaw that snaps shut): its particles stay where they
+ * are in the world, the node's change of frame taken back off them. A jump (camera reset, new
+ * map) carries them along instead.
  */
 const lockPos = new THREE.Vector3();
-const lockQuat = new THREE.Quaternion();
+const lockMat = new THREE.Matrix4();
+const lockLin = new THREE.Matrix3();
+const lockV = new THREE.Vector3();
 function keepInWorld(e) {
-  e.node.getWorldPosition(lockPos);
+  // (the frame the particles are kept in: the node's, or its unscaled child in Shape scaling)
+  const frame = e.parts?.[0]?.object ?? e.object;
+  frame.updateWorldMatrix(true, false);
+  lockPos.setFromMatrixPosition(frame.matrixWorld);
   const last = e.worldLock;
+  last.matrix ??= new THREE.Matrix4();
   // (an anchored effect moves by itself: its particles stay even when it jumps back to loop)
   if (last.ready && (last.anchored || lockPos.distanceTo(last.pos) < 300)) {
-    const d = last.pos.sub(lockPos).applyQuaternion(e.node.getWorldQuaternion(lockQuat).invert());
+    // old node space -> world -> new node space
+    lockMat.copy(frame.matrixWorld).invert().multiply(last.matrix);
+    lockLin.setFromMatrix4(lockMat);
     const pos = e.local.pos;
+    const vel = e.local.vel;
     for (let i = 0; i < e.count; i++) {
-      pos[i * 3] += d.x;
-      pos[i * 3 + 1] += d.y;
-      pos[i * 3 + 2] += d.z;
+      lockV.fromArray(pos, i * 3).applyMatrix4(lockMat).toArray(pos, i * 3);
+      lockV.fromArray(vel, i * 3).applyMatrix3(lockLin).toArray(vel, i * 3);
     }
   }
   last.pos.copy(lockPos);
+  last.matrix.copy(frame.matrixWorld);
   last.ready = true;
 }
 

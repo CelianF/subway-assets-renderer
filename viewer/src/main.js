@@ -753,6 +753,38 @@ function updateMotion(mo, dt, time) {
   }
 }
 
+/**
+ * TriggeredEffect groups (3.67 Fantasy Fest's tube dragon: jaw, smoke and confetti): the
+ * game fires them together as the runner comes by. Here they fire together over and over,
+ * on one clock as long as the longest member (a clip played once, a system's whole life).
+ */
+function applyTriggers(obj, triggers, emitters, keyOf) {
+  const sane = (n) => THREE.PropertyBinding.sanitizeNodeName(n);
+  for (const group of triggers) {
+    const systems = emitters.filter((e) => group.particles.some((n) => keyOf(e.node.name) === sane(n)));
+    const clips = [];
+    obj.traverse((o) => {
+      if (o.userData.clip && group.animations.some((n) => o.name === sane(n) || o.name.replace(/_\d+$/, '') === sane(n))) clips.push(o.userData.clip.action);
+    });
+    if (!systems.length && !clips.length) continue;
+    const cycle = Math.max(3, ...systems.map((e) => e.period), ...clips.map((a) => a.getClip().duration + 1));
+    const clock = new THREE.AnimationMixer(obj);
+    const action = clock.clipAction(new THREE.AnimationClip('trigger', cycle, [])).play();
+    mixers.add({ root: obj, mixer: clock });
+    // (the clips hold their end past their keys until the group's lap is over)
+    for (const a of clips) {
+      a.getClip().duration = cycle;
+      a.time = 0;
+    }
+    for (const e of systems) {
+      e.period = cycle;
+      e.clock = { action, cycle, laps: 0, last: 0 };
+      // World-space puffs stay where they were blown when their node moves on (the jaw shuts)
+      if (!e.def.local && clips.length) e.worldLock = { pos: new THREE.Vector3(), ready: false, anchored: true };
+    }
+  }
+}
+
 let motionTime = 0;
 function updateAnimators(dt) {
   motionTime += dt;
@@ -1074,7 +1106,8 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   if (prefab.placeholders) await fillPlaceholders(obj, prefab.placeholders, { layer, seed: variantSeed, cutMode, signalSeed, signalColor });
   if (prefab.particles && state.particles && particles) {
     const table = sanitizedTable(Object.entries(prefab.particles));
-    await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
+    const emitters = await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
+    if (prefab.triggers) applyTriggers(obj, prefab.triggers, emitters, (n) => nodeKey(table, n));
   }
   if (signalSeed != null) await applySignalColor(obj, signalSeed, signalColor);
   // (after the materials are set: the run's own moving trains)
@@ -2177,6 +2210,38 @@ async function loadSkylineLayers(cfg) {
       depthWrite: false,
       side: THREE.DoubleSide,
     });
+    // Multi Skyline's color modes (3.14 Fantasy Fest): 1 mixes GradientB→A by the vertex red
+    const modeMat = layer.colorMode == null ? null : new THREE.ShaderMaterial({
+      uniforms: {
+        uTint: { value: color },
+        uA: { value: new THREE.Color(...(layer.gradientA ?? [1, 1, 1]).slice(0, 3)) },
+        uB: { value: new THREE.Color(...(layer.gradientB ?? [1, 1, 1]).slice(0, 3)) },
+        ...skylineUniforms,
+      },
+      defines: { COLOR_MODE: layer.colorMode },
+      vertexColors: true,
+      vertexShader: `varying vec3 vColor; void main() {
+        #ifdef USE_COLOR
+          vColor = color.rgb;
+        #else
+          vColor = vec3(1.0);
+        #endif
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `uniform vec3 uTint; uniform vec3 uA; uniform vec3 uB; uniform float uOpacity; varying vec3 vColor;
+        void main() {
+        #if COLOR_MODE == 1
+          vec3 c = mix(uB, uA, vColor.r);
+        #elif COLOR_MODE == 2
+          vec3 c = vColor;
+        #else
+          vec3 c = uTint;
+        #endif
+          gl_FragColor = vec4(c, uOpacity); }`,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const isSkyline = (m) => !manifest.materials[m.name] || /Skyline/.test(manifest.materials[m.name].shader);
     const distance = cfg.distance + (maxIndex - layer.index) * 150 - (layer.offset ?? 0);
     // Where the game has the layer: its objects keep their size and place on screen here
     const near = distance / (cfg.distance - layer.index * (cfg.spacing ?? 5) + (layer.offset ?? 0));
@@ -2196,9 +2261,19 @@ async function loadSkylineLayers(cfg) {
       obj.traverse((o) => {
         if (!o.isMesh) return;
         // (layers with their own materials: 1.81 Cairo's sun and its glow)
-        o.material = layer.own ? (Array.isArray(o.material) ? o.material.map(own) : own(o.material)) : mat;
+        if (layer.own) o.material = Array.isArray(o.material) ? o.material.map(own) : own(o.material);
+        else if (modeMat) {
+          // (only Multi Skyline meshes take the layer's color; the glow keeps its own)
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          const out = mats.map((m) => (isSkyline(m) ? modeMat : own(m)));
+          o.material = out.length === 1 ? out[0] : out;
+          // In Unity queue order within the layer: the glow (3109) adds its light over the
+          // monument (2215); drawn first, the monument covered it
+          const queue = Math.max(...mats.map((m) => (isSkyline(m) ? 0 : manifest.materials[m.name]?.renderQueue ?? 2000)));
+          o.userData.layerQueue = queue;
+        } else o.material = mat;
         o.frustumCulled = false;
-        o.renderOrder = -1000 + layer.index; // farther layers first
+        o.renderOrder = -1000 + layer.index + (o.userData.layerQueue ?? 0) / 10000; // farther layers first
       });
       if (layer.own) {
         obj.position.set(x * near, y * near, 0);

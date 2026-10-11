@@ -227,6 +227,14 @@ function parseThemeConfig(file, guidIndex) {
       fill: single ? [] : prefabs,
       singles: single ? prefabs : [],
       tint: color('    Tint', layer),
+      // 3.x lists (3.14 Fantasy Fest, Greece, 3.10 Edinburgh): Multi Skyline's color mode,
+      // 0 tint, 1 GradientB→A by the vertex color's red, 2 vertex colors; the rest keep their own
+      // material (the monument's glow)
+      ...(/\n {4}ColorMode: /.test(layer) && {
+        colorMode: Number(layer.match(/\n {4}ColorMode: (\d+)/)[1]),
+        gradientA: color('    GradientA', layer),
+        gradientB: color('    GradientB', layer),
+      }),
       index: i + 1,
       offset: num(layer.match(/\n {4}Offset: \{x: [^,]+, y: [^,]+, z: ([\d.e-]+)\}/)?.[1] ?? '0'),
     };
@@ -1232,6 +1240,20 @@ function parseAnimators(file, guidIndex) {
     const anim = kind === '114' && /\n {2}_meshMorpher: \{fileID: [1-9]/.test(doc) && doc.match(/\n {2}_animation: \{fileID: (\d+)/)?.[1];
     if (anim) triggered.add(anim);
   }
+  // Clips a TriggeredEffect plays (TriggeredAnimationEffect): once, from the trigger; the
+  // viewer starts them with the group's particles
+  const effectClips = new Set();
+  for (const { doc, kind } of docs) {
+    if (kind !== '114' || !/\n {2}_shouldActivate: /.test(doc)) continue;
+    for (const [, fid] of ((doc.split('\n  _entries:')[1] ?? '').split(/\n {2}\w/)[0]).matchAll(/fileID: (\d+)/g)) {
+      const anim = docs.find((d) => d.fid === fid)?.doc.match(/\n {2}_animation: \{fileID: (\d+)/)?.[1];
+      if (anim) effectClips.add(anim);
+    }
+  }
+  for (const { doc, kind } of docs) {
+    if (kind !== '114' || !/\n {2}_particles:/.test(doc)) continue;
+    for (const [, fid] of ((doc.split('\n  _animations:')[1] ?? '').split(/\n {2}\w/)[0]).matchAll(/fileID: (\d+)/g)) effectClips.add(fid);
+  }
   for (const { doc, kind, fid } of docs) {
     if (kind !== '111') continue;
     const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
@@ -1269,6 +1291,17 @@ function parseAnimators(file, guidIndex) {
     // butterfly loops by its clip, and paused 1.5 s each lap when only the component was read
     const wrap = Number(doc.match(/m_WrapMode: (\d+)/)?.[1] ?? 0) || Number(text.match(/m_WrapMode: (\d+)/)?.[1] ?? 0);
     const looping = /m_LoopTime: 1/.test(text) || wrap === 2;
+    if (!looping && effectClips.has(fid)) {
+      // Once (the default) ends back on the first frame; ClampForever (8) holds the last
+      const back = wrap !== 8;
+      for (const t of tracks.values()) {
+        const n = t.values.length / t.times.length;
+        t.times.push(round(stop + 1 / FPS, 4));
+        t.values.push(...(back ? t.values.slice(0, n) : t.values.slice(-n)));
+      }
+      out.push({ node: names.get(go), duration: round(stop + 1 / FPS, 4), tracks: [...tracks.values()], trigger: true });
+      continue;
+    }
     if (!looping && triggered.has(fid)) {
       // Played when the runner comes near (1.x FlyingBirdCharacterTrigger): the rest pose
       // held first, then the clip (the bird sits, then flies off)
@@ -2602,6 +2635,41 @@ function minMaxGradient(c) {
 const vec3 = (v, f = 0) => [v?.x ?? f, v?.y ?? f, v?.z ?? f];
 
 /** ParticleSystem + ParticleSystemRenderer components: GameObject name -> emitter description. */
+/**
+ * 2.x+ TriggeredEffect: one runner trigger fires its entries together (3.67 Fantasy Fest's
+ * tube dragon opens its jaw and blows smoke and confetti at once; the landmark's two arrow
+ * volleys). [{ animations: [node], particles: [node] }], by GameObject name.
+ */
+function parseTriggerGroups(file) {
+  const docs = yamlDocs(read(file));
+  const byFid = new Map(docs.map((d) => [d.fid, d]));
+  const names = new Map();
+  for (const { doc, kind, fid } of docs) if (kind === '1') names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+  const nodeOf = (fid) => names.get(byFid.get(fid)?.doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1]);
+  const groups = [];
+  for (const { doc, kind } of docs) {
+    if (kind !== '114' || !/\n {2}_shouldActivate: /.test(doc)) continue;
+    const entries = (doc.split('\n  _entries:')[1] ?? '').split(/\n {2}\w/)[0];
+    const group = { animations: [], particles: [] };
+    for (const [, fid] of entries.matchAll(/fileID: (\d+)/g)) {
+      const entry = byFid.get(fid)?.doc ?? '';
+      const anim = entry.match(/\n {2}_animation: \{fileID: (\d+)/)?.[1];
+      const system = entry.match(/\n {2}_particleSystem: \{fileID: (\d+)/)?.[1];
+      if (anim && nodeOf(anim)) group.animations.push(nodeOf(anim));
+      if (system && nodeOf(system)) group.particles.push(nodeOf(system));
+    }
+    if (group.animations.length + group.particles.length) groups.push(group);
+  }
+  // 3.14's TriggeredThemeVisuals: the Animations and ParticleSystems listed straight
+  for (const { doc, kind } of docs) {
+    if (kind !== '114' || !/\n {2}_animations:/.test(doc) || !/\n {2}_particles:/.test(doc)) continue;
+    const list = (key) => [...((doc.split(`\n  ${key}:`)[1] ?? '').split(/\n {2}\w/)[0]).matchAll(/fileID: (\d+)/g)].map(([, fid]) => nodeOf(fid)).filter(Boolean);
+    const group = { animations: list('_animations'), particles: list('_particles') };
+    if (group.animations.length + group.particles.length) groups.push(group);
+  }
+  return groups;
+}
+
 function parseParticles(file, guidIndex) {
   const docs = yamlDocs(read(file));
   const names = new Map();
@@ -3425,6 +3493,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       for (const m of [p.render.material, p.trail?.material]) if (m) info.materials = sortedStrings(new Set([...(info.materials ?? []), m]));
     }
     if (Object.keys(particles).length) info.particles = particles;
+    const triggers = parseTriggerGroups(prefabPath);
+    if (triggers.length) info.triggers = triggers;
     // Shape scaling: the spawned copy keeps its root scale, which stretches the shape and its
     // directions, not the particles (1.98 Atlanta's barbecue smoke rises as a column)
     if (shapeScaled && particles[name]) particles[name].shape.scale = rootScale;
