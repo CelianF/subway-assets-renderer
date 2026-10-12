@@ -152,19 +152,38 @@ export const SECTIONS = {
 export const MAX_SECTION_LENGTH = 10;
 const PARTS = ['start', 'mid', 'end'];
 
-/** A section chunk's pieces in order, each its own prefab if the chunk kept one, else the theme's first. */
+/**
+ * A section chunk's pieces in order, each its own prefab if the chunk kept one, else the
+ * theme's first. Each piece's variant: the chunk's own pick for that piece (`pieceVariants`
+ * by part: start, mid:0, mid:1…, end; null = random), else the chunk's variant on its main
+ * piece (a landmark's start, every tube piece).
+ */
 function sectionPieces(slots, e) {
   const def = SECTIONS[e.kind];
   if (!def) return [];
-  const piece = (i) => {
+  const main = def.parts[0] ? 0 : 1;
+  const piece = (i, part) => {
     const slot = def.parts[i];
     const own = e.prefabs?.[PARTS[i]];
     const prefab = slots[slot]?.includes(own) ? own : slots[slot]?.[0];
-    // (the chosen variant on the section's main piece: a landmark's start, every tube piece)
-    const main = def.parts[0] ? 0 : 1;
-    return slot && prefab ? [{ type: 'piece', slot, prefab, ...(i === main && e.variants ? { variants: e.variants } : {}) }] : [];
+    if (!slot || !prefab) return [];
+    const picked = e.pieceVariants && part in e.pieceVariants ? e.pieceVariants[part] : i === main ? e.variants : null;
+    return [{ type: 'piece', slot, prefab, part, ...(picked ? { variants: picked } : {}) }];
   };
-  return [...piece(0), ...Array.from({ length: sectionLength(e) }, () => piece(1)).flat(), ...piece(2)];
+  return [...piece(0, 'start'), ...Array.from({ length: sectionLength(e) }, (_, k) => piece(1, `mid:${k}`)).flat(), ...piece(2, 'end')];
+}
+
+/** A random group's child as a card or menu label: "FantasyFest_Tube_extra_02" -> "Tube extra 02". */
+export function variantLabel(themeName, child) {
+  return child.replace(new RegExp(`^(${themeName}|SubwayCity)_`, 'i'), '').replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z0-9])/g, '$1 $2').trim();
+}
+
+/** A prefab's biggest random group with a choice in it: [group, children] or null. */
+export function mainRandomGroup(manifest, prefab) {
+  const groups = Object.entries(manifest.prefabs[prefab]?.randomizers ?? {})
+    .map(([g, e]) => [g, Object.keys((e && typeof e === 'object' && e.weights) || {})])
+    .filter(([, kids]) => kids.length > 1);
+  return groups.sort((a, b) => b[1].length - a[1].length)[0] ?? null;
 }
 
 /** A section's middles (a tube: its pieces), 1 to 10; a fixed one's own. */
@@ -247,22 +266,16 @@ export function chunkCards(manifest, themeName, gen = null) {
       const start = manifest.prefabs[real(main)[0]];
       return { id: `section|${kind}`, type: 'section', kind, length: def.length, adjustable: !def.fixed, prefab: real(main)[0], label: def.label };
     });
-  // Each section once per variant of its main piece's random groups (Cosmic Crossroads'
-  // landmarks: the galaxy, the meteors, the pink monster; Fantasy Fest's tube dragon): the
-  // plain card leaves them to the seed
-  // (without the city's prefix: "FantasyFest_Tube_extra_02" -> "Tube extra 02")
-  const nice = (t) => t.replace(new RegExp(`^(${themeName}|SubwayCity)_`, 'i'), '').replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z0-9])/g, '$1 $2').trim();
-  const variantCards = new Map(); // base card -> its variant cards, laid right after it
+  // Each section once per variant of its main piece's random group (Cosmic Crossroads'
+  // landmarks: the galaxy, the meteors, the pink monster; Fantasy Fest's tube dragon), after
+  // its plain card (random), which the bar shows them under
+  const variantCards = new Map();
   for (const card of [...sections]) {
-    const def = SECTIONS[card.kind];
-    const part = def.parts[0] ? 0 : 1;
-    const groupsOf = Object.entries(manifest.prefabs[card.prefab]?.randomizers ?? {})
-      .map(([g, e]) => [g, Object.keys((e && typeof e === 'object' && e.weights) || {})])
-      .filter(([, kids]) => kids.length > 1);
-    if (!groupsOf.length) continue;
-    // (the biggest group: the others stay to the seed)
-    const [group, kids] = groupsOf.sort((a, b) => b[1].length - a[1].length)[0];
-    variantCards.set(card, kids.map((child) => ({ ...card, id: `section|${card.kind}|${group}=${child}`, variants: { [group]: child }, variantPart: PARTS[part], label: `${card.label}: ${nice(child)}` })));
+    const found = mainRandomGroup(manifest, card.prefab);
+    if (!found) continue;
+    const [group, kids] = found;
+    const part = SECTIONS[card.kind].parts[0] ? 0 : 1;
+    variantCards.set(card, kids.map((child) => ({ ...card, id: `section|${card.kind}|${group}=${child}`, base: card.id, variants: { [group]: child }, variantPart: PARTS[part], label: `${card.label}: ${variantLabel(themeName, child)}` })));
   }
   sections.splice(0, sections.length, ...sections.flatMap((c) => [c, ...(variantCards.get(c) ?? [])]));
   if (sections.length) groups.push({ group: 'Sections', cards: sections });

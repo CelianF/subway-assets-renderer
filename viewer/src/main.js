@@ -6,7 +6,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, unruledShaders, setBendDegrees, globals, setFog, createSky, setTrackCuts, setChallengeRunners, setChallengeRunner, MAX_ALT_ZONES, setReversedDepth, texturesReady, zoneClipped, makeZoneUniforms } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs, chunkCards, chunkLength, checkPlan, normalizePlan, sectionPiecesOf, MAX_SECTION_LENGTH } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs, chunkCards, chunkLength, checkPlan, normalizePlan, sectionPiecesOf, variantLabel, mainRandomGroup, MAX_SECTION_LENGTH } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
@@ -2989,6 +2989,19 @@ const chunkDeck = createChunkDeck(document.getElementById('ui'), {
     rebuild();
   },
   check: (plan) => checkPlan(plan),
+  // A section's pieces that have types to pick from: [{ part, label, group, value, options }]
+  pieceOptions: (e) => {
+    const pieces = sectionPiecesOf(manifest, state.theme, e, state.gen);
+    let middle = 0;
+    return pieces.flatMap((p) => {
+      const n = p.part.startsWith('mid') ? ++middle : 0;
+      const found = mainRandomGroup(manifest, p.prefab);
+      if (!found) return [];
+      const [group, kids] = found;
+      const label = p.part === 'start' ? 'Start' : p.part === 'end' ? 'End' : e.kind === 'tube' ? `Piece ${n}` : `Middle ${n}`;
+      return [{ part: p.part, label, group, value: p.variants?.[group] ?? '', options: kids.map((child) => ({ value: child, label: variantLabel(state.theme, child) })) }];
+    });
+  },
   lengthOf: (e) => chunkLength(manifest, e),
   maxLength: MAX_SECTION_LENGTH,
   thumbnail: (card) => chunkThumbnail(card),
@@ -3073,24 +3086,24 @@ async function renderChunkThumbnail(card) {
   // A variant card: framed on what the variant adds (the tube's props sit inside it, out of
   // sight from its entrance), from behind and above
   const picked = card.variants && Object.values(card.variants).map((n) => THREE.PropertyBinding.sanitizeNodeName(n));
-  // (not a landmark: its variant spans the whole landmark, its usual view shows it best)
-  if (picked && !landmark) {
+  if (picked) {
     group.updateMatrixWorld(true);
     const box = new THREE.Box3();
     group.traverse((o) => picked.includes(o.name) && box.expandByObject(o));
-    // The piece's own shell hidden around them (a tube's walls and roof hid Fantasy Fest's
-    // dragon and gold sign): the variant alone on the tracks
-    objs.forEach((obj, i) => {
-      if (!obj || !parts[i][3]) return;
-      const inside = new Set();
-      obj.traverse((o) => picked.includes(o.name) && o.traverse((c) => inside.add(c)));
-      obj.traverse((o) => o.isMesh && !inside.has(o) && (o.visible = false));
-    });
+    // Only what the variant adds: the piece's shell (a tube's walls and roof hid Fantasy
+    // Fest's dragon and gold sign), the tracks and entrances hidden
+    const inside = new Set();
+    group.traverse((o) => picked.includes(o.name) && o.traverse((c) => inside.add(c)));
+    const track = (o) => (Array.isArray(o.material) ? o.material : [o.material]).every((m) => /track/i.test(m?.name ?? ''));
+    group.traverse((o) => o.isMesh && (!inside.has(o) || track(o)) && (o.visible = false));
+    box.makeEmpty();
+    group.traverse((o) => o.isMesh && o.visible && !o.userData.particles && box.expandByObject(o));
     if (!box.isEmpty()) {
       const center = box.getCenter(new THREE.Vector3());
       const size = box.getSize(new THREE.Vector3());
       const r = Math.max(size.x, size.y, size.z, 40);
-      cam.position.set(center.x + r * 0.45, center.y + r * 0.6, center.z - r * 0.95);
+      // (close: the box fills the card)
+      cam.position.set(center.x + r * 0.32, center.y + r * 0.42, center.z - r * 0.7);
       cam.lookAt(center);
       cam.far = Math.max(3000, r * 6);
       cam.updateProjectionMatrix();

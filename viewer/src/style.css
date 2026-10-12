@@ -896,6 +896,121 @@ body.studio #view {
   white-space: normal;
   overflow-wrap: anywhere;
 }
+/* A section card with types: a › tab on its right edge unfolds them after it */
+.chunk-card-wrap {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+}
+.chunk-card-wrap .chunk-card {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.chunk-fold {
+  flex: none;
+  width: 22px;
+  padding: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  font-size: 16px;
+}
+.chunk-fold.open {
+  background: var(--accent);
+  color: #111;
+}
+/* A strip chunk's ▾: opens its edit bar under the strip */
+.chunk-edit {
+  position: absolute;
+  bottom: 3px;
+  right: 3px;
+  padding: 1px 7px;
+  line-height: 16px;
+  font-size: 13px;
+}
+/* (a chunk without − n +: the ▾ is its whole bottom edge) */
+.chunk-edit.wide {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 2px 0;
+  border: 0;
+  border-top: 1px solid var(--panel-border);
+  border-radius: 0;
+}
+.chunk-item.wide-edit {
+  padding-bottom: 21px;
+}
+.chunk-edit.open {
+  background: var(--accent);
+  color: #111;
+}
+.chunk-item.editing {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+/* One chunk's pieces (or sides) side by side, a row of picture tiles each */
+.chunk-editbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px;
+  max-height: 168px;
+  overflow-y: auto;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.25);
+}
+.chunk-editbar.hidden {
+  display: none;
+}
+.chunk-edit-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.chunk-edit-head button {
+  padding: 2px 10px;
+}
+.chunk-edit-rows {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+.chunk-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.chunk-edit-title {
+  font-size: 11px;
+  color: var(--muted, #aab);
+}
+.chunk-edit-tiles {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  max-width: calc(100vw - 120px);
+}
+.chunk-tile {
+  flex: none;
+  width: 60px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 6px;
+  text-align: left;
+}
+.chunk-tile .chunk-thumb {
+  width: 60px;
+  height: 52px;
+}
+.chunk-tile .chunk-name {
+  padding: 1px 3px;
+  font-size: 9px;
+}
+.chunk-tile.active {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
 .chunk-strip.hidden,
 .chunk-palette.hidden {
   display: none;

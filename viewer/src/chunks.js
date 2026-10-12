@@ -34,6 +34,8 @@ export function createChunkDeck(root, ctx) {
   let shown = false;
   let group = null; // the bottom bar's open group
   let drag = null; // { card } from the bar, or { index } from the strip
+  const expanded = new Set(); // base cards showing their types in the bar
+  let editing = null; // the strip chunk whose edit bar is open (its index)
 
   const cardsById = () => new Map(ctx.groups().flatMap((g) => g.cards).map((c) => [c.id, c]));
   const cardIds = (e) =>
@@ -102,6 +104,7 @@ export function createChunkDeck(root, ctx) {
   const scroller = el('div', { class: 'chunk-scroller' }, items, marker);
   const summary = el('span', { class: 'chunk-summary' });
   const warnings = el('div', { class: 'chunk-warnings' });
+  const editBar = el('div', { class: 'chunk-editbar hidden' }); // one chunk's pieces or sides (renderEditBar)
   const strip = el(
     'div',
     { class: 'chunk-strip hidden' },
@@ -115,6 +118,7 @@ export function createChunkDeck(root, ctx) {
       el('button', { class: 'danger', title: 'Remove every chunk of your map', onclick: () => (ctx.plan() ?? []).length && confirm('Remove every chunk of your map?') && ctx.setPlan([]) }, '🗑 Remove all'),
     ),
     scroller,
+    editBar,
     warnings,
   );
 
@@ -130,7 +134,7 @@ export function createChunkDeck(root, ctx) {
         const at = z;
         z += length;
         const own = issuesAt(i);
-        const remove = el('button', { class: 'chunk-remove', title: 'Remove', onclick: (ev) => (ev.stopPropagation(), ctx.setPlan(plan.filter((_, k) => k !== i))) }, '×');
+        const remove = el('button', { class: 'chunk-remove', title: 'Remove', onclick: (ev) => (ev.stopPropagation(), (editing = null), ctx.setPlan(plan.filter((_, k) => k !== i))) }, '×');
         const body =
           e.type === 'buildings'
             ? ['left', 'right'].map((side) => {
@@ -139,6 +143,10 @@ export function createChunkDeck(root, ctx) {
                 return el('div', { class: `chunk-half chunk-${side}`, 'data-side': side, title: card?.label ?? '' }, thumb(card), el('span', { class: 'chunk-name' }, shortName(card, e[side])));
               })
             : [thumb(cards.get(cardIds(e)[0])), el('span', { class: 'chunk-name' }, cards.get(cardIds(e)[0])?.label ?? e.slot ?? 'Gate'), ...(e.type === 'section' ? [lengthControl(e, i, plan, cards.get(cardIds(e)[0]))].filter(Boolean) : [])];
+        // (no − n + to sit beside: the ▾ takes the card's whole bottom)
+        const wide = !(e.type === 'section' && cards.get(cardIds(e)[0])?.adjustable !== false);
+        const editable = e.type === 'buildings' || e.type === 'gate' || (e.type === 'section' && (ctx.pieceOptions?.(e) ?? []).length);
+        const edit = editable ? el('button', { class: `chunk-edit ${wide ? 'wide' : ''} ${editing === i ? 'open' : ''}`, title: editing === i ? 'Close its edit bar' : 'Edit this chunk', onclick: (ev) => (ev.stopPropagation(), (editing = editing === i ? null : i), renderStrip()) }, editing === i ? '▴' : '▾') : null;
         const item = el(
           'div',
           {
@@ -157,11 +165,15 @@ export function createChunkDeck(root, ctx) {
           ...body,
           own.length ? el('span', { class: 'chunk-badge' }, '⚠') : null,
           remove,
+          edit,
         );
+        if (editing === i) item.classList.add('editing');
+        if (edit && wide) item.classList.add('wide-edit');
         return item;
       }),
       ...(plan.length ? [] : [el('div', { class: 'chunk-empty' }, 'Drag chunks here from the bar below')]),
     );
+    renderEditBar(plan, cards);
     summary.textContent = `${plan.length} chunk${plan.length === 1 ? '' : 's'} · ${Math.round(z)} units${issues.length ? ` · ⚠ ${issues.length}` : ''}`;
     warnings.replaceChildren(
       ...issues.slice(0, 3).map((w) => el('div', { class: 'chunk-warning' }, `⚠ Chunk ${w.index + 1}: ${w.message}`)),
@@ -185,6 +197,56 @@ export function createChunkDeck(root, ctx) {
       el('button', { title: 'Shorter', disabled: n <= 1, onclick: set(n - 1) }, '−'),
       el('span', { class: 'chunk-count' }, String(n)),
       el('button', { title: 'Longer', disabled: n >= ctx.maxLength, onclick: set(n + 1) }, '+'),
+    );
+  }
+
+  // ---- the edit bar under the strip: one chunk's pieces (types) or sides
+
+  /** A row of picture tiles: [{ label, card (its picture), active, pick() }]. */
+  function tileRow(title, tiles) {
+    return el(
+      'div',
+      { class: 'chunk-edit-row' },
+      el('span', { class: 'chunk-edit-title' }, title),
+      el('div', { class: 'chunk-edit-tiles' }, ...tiles.map((t) => el('button', { class: `chunk-tile ${t.active ? 'active' : ''}`, title: t.label, onclick: t.pick }, thumb(t.card), el('span', { class: 'chunk-name' }, t.label)))),
+    );
+  }
+
+  function renderEditBar(plan, cards) {
+    const e = editing != null ? plan[editing] : null;
+    if (!e) editing = null;
+    editBar.classList.toggle('hidden', !e);
+    if (!e) return editBar.replaceChildren();
+    const i = editing;
+    const set = (patch) => ctx.setPlan(plan.map((c, k) => (k === i ? { ...c, ...patch } : c)));
+    const all = [...cards.values()];
+    const rows = [];
+    if (e.type === 'buildings') {
+      // Either side, any height (ads go on the right)
+      for (const side of ['left', 'right']) {
+        const options = all.filter((c) => c.side === side);
+        rows.push(tileRow(side === 'left' ? 'Left side' : 'Right side', options.map((c) => ({ label: c.label, card: c, active: e[side]?.slot === c.slot && e[side]?.prefab === c.prefab, pick: () => set({ [side]: { slot: c.slot, prefab: c.prefab }, ...(side === 'right' ? { awaiting: undefined } : {}) }) }))));
+      }
+    } else if (e.type === 'gate') {
+      const options = all.filter((c) => c.type === 'gate');
+      rows.push(tileRow('Wall', options.map((c) => ({ label: c.label, card: c, active: c.wall === e.wall, pick: () => set({ wall: c.wall }) }))));
+    } else if (e.type === 'section') {
+      // Each piece: random, or one of its types (their pictures: the bar's type cards)
+      const base = cards.get(`section|${e.kind}`);
+      for (const o of ctx.pieceOptions?.(e) ?? []) {
+        const pick = (value) => () => set({ pieceVariants: { ...(e.pieceVariants ?? {}), [o.part]: value ? { [o.group]: value } : null } });
+        rows.push(
+          tileRow(o.label, [
+            { label: 'Random', card: base, active: !o.value, pick: pick('') },
+            ...o.options.map((opt) => ({ label: opt.label, card: cards.get(`section|${e.kind}|${o.group}=${opt.value}`) ?? base, active: o.value === opt.value, pick: pick(opt.value) })),
+          ]),
+        );
+      }
+    }
+    const name = e.type === 'buildings' ? 'Buildings' : e.type === 'gate' ? 'Gate' : cards.get(`section|${e.kind}`)?.label ?? 'Chunk';
+    editBar.replaceChildren(
+      el('div', { class: 'chunk-edit-head' }, el('strong', {}, `${name} · chunk ${i + 1}`), el('span', { class: 'studio-sep' }), el('button', { title: 'Close', onclick: () => ((editing = null), renderStrip()) }, 'Done')),
+      el('div', { class: 'chunk-edit-rows' }, ...rows),
     );
   }
 
@@ -238,6 +300,7 @@ export function createChunkDeck(root, ctx) {
   scroller.addEventListener('drop', (ev) => {
     if (!drag) return;
     ev.preventDefault();
+    editing = null; // (the chunks move: its bar would edit another)
     const target = dropTarget(ev);
     const plan = [...(ctx.plan() ?? [])];
     if (drag.card && target.replace != null) {
@@ -303,30 +366,40 @@ export function createChunkDeck(root, ctx) {
     );
     let cards = groups.find((g) => g.group === group)?.cards ?? [];
     if (group === 'Buildings') cards = awaiting ? [...cards.filter((c) => c.side === 'right'), ...ads] : cards.filter((c) => c.side === 'left');
-    cardsRow.replaceChildren(
-      ...cards.map((card) =>
-        el(
-          'button',
-          {
-            class: 'chunk-card',
-            draggable: 'true',
-            title: `${card.label} (${card.prefab})`,
-            onclick: () => {
-              const end = card.side !== 'right' || awaitingIndex() < 0;
-              placeCard(card);
-              if (end) requestAnimationFrame(() => (scroller.scrollLeft = scroller.scrollWidth));
-            },
-            ondragstart: (ev) => {
-              drag = { card };
-              ev.dataTransfer.effectAllowed = 'copy';
-              ev.dataTransfer.setData('text/plain', card.id);
-            },
-            ondragend: () => endDrag(),
+    // A section's types stay folded under its card (random) until opened
+    const typesOf = (card) => cards.filter((c) => c.base === card.id);
+    const cardButton = (card, shown = card) =>
+      el(
+        'button',
+        {
+          class: 'chunk-card',
+          draggable: 'true',
+          title: `${shown.label} (${shown.prefab})`,
+          onclick: () => {
+            const end = shown.side !== 'right' || awaitingIndex() < 0;
+            placeCard(shown);
+            if (end) requestAnimationFrame(() => (scroller.scrollLeft = scroller.scrollWidth));
           },
-          thumb(card),
-          el('span', { class: 'chunk-name' }, card.label),
-        ),
-      ),
+          ondragstart: (ev) => {
+            drag = { card: shown };
+            ev.dataTransfer.effectAllowed = 'copy';
+            ev.dataTransfer.setData('text/plain', shown.id);
+          },
+          ondragend: () => endDrag(),
+        },
+        thumb(shown),
+        el('span', { class: 'chunk-name' }, shown.label),
+      );
+    cardsRow.replaceChildren(
+      ...cards.flatMap((card) => {
+        if (card.base) return expanded.has(card.base) ? [cardButton(card)] : [];
+        const types = typesOf(card);
+        if (!types.length) return [cardButton(card)];
+        // A › tab on its right edge unfolds its types after it (the cards beyond move along)
+        const open = expanded.has(card.id);
+        const fold = el('button', { class: `chunk-fold ${open ? 'open' : ''}`, title: open ? 'Fold its types' : `Its ${types.length} types`, onclick: () => (open ? expanded.delete(card.id) : expanded.add(card.id), renderBar()) }, open ? '‹' : '›');
+        return [el('div', { class: 'chunk-card-wrap' }, cardButton(card), fold)];
+      }),
     );
   }
 
