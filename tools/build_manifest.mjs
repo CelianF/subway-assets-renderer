@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { createHash } from 'node:crypto';
 import { versionFromName } from './version_name.mjs';
+import { IMPORT_VERSION } from './import_version.mjs';
 
 const GUID_RE = /guid: ([0-9a-f]{32})/;
 const GUID_RE_G = /guid: ([0-9a-f]{32})/g;
@@ -3679,6 +3680,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const version = bundleVersion || nameVersion ? [null, bundleVersion || nameVersion] : null;
   const categories = ['boundary', 'track', 'special', 'obstacle', 'train', 'prop', 'other'];
   const manifest = {
+    importVersion: IMPORT_VERSION, // (the viewer asks maps built by an older importer to re-import)
     source: { name: sourceName || path.basename(root), gameVersion: version ? version[1].trim() : null },
     world: { laneWidth: 20.0, lanes: 3, cellDepth: 11.25, cellHeight: 14.0 },
     themes: Object.fromEntries(Object.entries(themes).map(([theme, slots]) => [

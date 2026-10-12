@@ -13,6 +13,7 @@ import { createUI } from './ui.js';
 import { createTime, createTimeDeck } from './time.js';
 import { createCameraDeck } from './cameras.js';
 import { createChunkDeck } from './chunks.js';
+import { IMPORT_VERSION } from '../../tools/import_version.mjs';
 import { addCredit } from './credit.js';
 import { attachParticles, updateParticles, setWeather, setWeatherVisible, setWeatherCover } from './particles.js';
 
@@ -147,6 +148,33 @@ if (seasonName && new URLSearchParams(location.search).get('season') === '0') {
 const envList = await (await fetch('/api/envs')).json().catch(() => []);
 const envInfo = envList.find((e) => e.id === ENV_ID) ?? { id: ENV_ID, theme: manifest.theme };
 document.title = `${envInfo.theme} · Subway Viewer`;
+showImportNotice();
+
+/**
+ * A map built by an older importer (no stamp: from before stamps) misses fixes that need a
+ * re-import to show: said once per map (again after the next importer version).
+ */
+function showImportNotice() {
+  if ((manifest.importVersion ?? 0) >= IMPORT_VERSION || params.has('shot')) return;
+  const key = `import-notice:${ENV_ID}`;
+  try {
+    if (Number(localStorage.getItem(key)) >= IMPORT_VERSION) return;
+    localStorage.setItem(key, String(IMPORT_VERSION));
+  } catch {
+    // not kept: shown each time, still dismissable
+  }
+  const apk = envInfo.source ? ` (${envInfo.source})` : '';
+  const box = document.createElement('div');
+  box.className = 'import-notice';
+  box.innerHTML = `<strong>Imported with an older version</strong>
+    <p>This map was built before some import fixes, so parts of it may look wrong or be missing. Re-import its APK${apk.replace(/[<>&]/g, '')} from the home page to get them.</p>`;
+  const ok = document.createElement('button');
+  ok.className = 'primary';
+  ok.textContent = 'Got it';
+  ok.onclick = () => box.remove();
+  box.append(ok);
+  document.body.append(box);
+}
 const materials = new MaterialLibrary(manifest, DATA);
 
 /**

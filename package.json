@@ -30,6 +30,7 @@
       "server/**",
       "tools/build_manifest.mjs",
       "tools/version_name.mjs",
+      "tools/import_version.mjs",
       "viewer/dist/**"
     ],
     "extraResources": [

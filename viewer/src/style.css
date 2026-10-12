@@ -1068,3 +1068,25 @@ body.studio #view {
     background: rgba(255, 204, 51, 0.18);
   }
 }
+
+/* Once per map: built by an older importer, re-import its APK */
+.import-notice {
+  position: fixed;
+  top: 76px;
+  left: 50%;
+  z-index: 50;
+  width: min(420px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  padding: 14px 16px;
+  border: 1px solid var(--panel-border);
+  border-left: 4px solid #ff9a3c;
+  border-radius: 10px;
+  background: var(--panel, rgba(20, 24, 32, 0.95));
+  color: var(--text);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+}
+.import-notice p {
+  margin: 6px 0 10px;
+  line-height: 1.4;
+}
