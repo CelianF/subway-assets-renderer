@@ -134,6 +134,7 @@ export function chunkKind(e) {
   if (e.type === 'buildings') return 'buildings';
   if (e.type === 'gate') return 'gate';
   if (e.type === 'section') return e.kind;
+  if (e.slot === 'boundary_PrePortal_Left') return 'start';
   return e.slot?.match(/^boundary_(station|tube|pillars|epic)/)?.[1] ?? 'other';
 }
 
@@ -159,7 +160,9 @@ function sectionPieces(slots, e) {
     const slot = def.parts[i];
     const own = e.prefabs?.[PARTS[i]];
     const prefab = slots[slot]?.includes(own) ? own : slots[slot]?.[0];
-    return slot && prefab ? [{ type: 'piece', slot, prefab }] : [];
+    // (the chosen variant on the section's main piece: a landmark's start, every tube piece)
+    const main = def.parts[0] ? 0 : 1;
+    return slot && prefab ? [{ type: 'piece', slot, prefab, ...(i === main && e.variants ? { variants: e.variants } : {}) }] : [];
   };
   return [...piece(0), ...Array.from({ length: sectionLength(e) }, () => piece(1)).flat(), ...piece(2)];
 }
@@ -220,6 +223,9 @@ export function chunkCards(manifest, themeName, gen = null) {
   const real = (slot) => (slots[slot] ?? []).filter((n) => manifest.prefabs[n]?.bbox);
   const numbered = (names, label) => names.map((prefab, i) => ({ prefab, label: names.length > 1 ? `${label} ${i + 1}` : label }));
   const groups = [];
+  // A special start the run opens with (Cosmic Crossroads' Subway City, before the portal)
+  const starts = real('boundary_PrePortal_Left').map((prefab) => ({ id: `boundary_PrePortal_Left|${prefab}`, type: 'piece', slot: 'boundary_PrePortal_Left', prefab, label: 'Run start' }));
+  if (starts.length) groups.push({ group: 'Start', cards: starts });
   const buildings = [];
   for (const height of ['low', 'medium', 'high']) {
     for (const side of ['left', 'right']) {
@@ -241,6 +247,24 @@ export function chunkCards(manifest, themeName, gen = null) {
       const start = manifest.prefabs[real(main)[0]];
       return { id: `section|${kind}`, type: 'section', kind, length: def.length, adjustable: !def.fixed, prefab: real(main)[0], label: def.label };
     });
+  // Each section once per variant of its main piece's random groups (Cosmic Crossroads'
+  // landmarks: the galaxy, the meteors, the pink monster; Fantasy Fest's tube dragon): the
+  // plain card leaves them to the seed
+  // (without the city's prefix: "FantasyFest_Tube_extra_02" -> "Tube extra 02")
+  const nice = (t) => t.replace(new RegExp(`^(${themeName}|SubwayCity)_`, 'i'), '').replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z0-9])/g, '$1 $2').trim();
+  const variantCards = new Map(); // base card -> its variant cards, laid right after it
+  for (const card of [...sections]) {
+    const def = SECTIONS[card.kind];
+    const part = def.parts[0] ? 0 : 1;
+    const groupsOf = Object.entries(manifest.prefabs[card.prefab]?.randomizers ?? {})
+      .map(([g, e]) => [g, Object.keys((e && typeof e === 'object' && e.weights) || {})])
+      .filter(([, kids]) => kids.length > 1);
+    if (!groupsOf.length) continue;
+    // (the biggest group: the others stay to the seed)
+    const [group, kids] = groupsOf.sort((a, b) => b[1].length - a[1].length)[0];
+    variantCards.set(card, kids.map((child) => ({ ...card, id: `section|${card.kind}|${group}=${child}`, variants: { [group]: child }, variantPart: PARTS[part], label: `${card.label}: ${nice(child)}` })));
+  }
+  sections.splice(0, sections.length, ...sections.flatMap((c) => [c, ...(variantCards.get(c) ?? [])]));
   if (sections.length) groups.push({ group: 'Sections', cards: sections });
   if (has('boundary_gate') && has('track_gates')) {
     const walls = GATE_WALLS.filter(has);
@@ -272,9 +296,12 @@ export function chunkLength(manifest, e) {
 export function checkPlan(plan) {
   const out = [];
   const warn = (index, message) => out.push({ index, message });
-  if (plan.length && chunkKind(plan[0]) !== 'buildings') warn(0, 'The game always opens a run with buildings');
+  // (a special start opens the run itself: Cosmic Crossroads' Subway City)
+  const first = plan.findIndex((e) => chunkKind(e) !== 'start');
+  plan.forEach((e, i) => chunkKind(e) === 'start' && i > 0 && warn(i, 'The run start only opens the run'));
+  if (first >= 0 && chunkKind(plan[first]) !== 'buildings') warn(first, 'The game always opens a run with buildings');
   plan.forEach((e, i) => {
-    if (i === 0) return;
+    if (i <= first || chunkKind(plan[i - 1]) === 'start') return;
     const [kind, prev] = [chunkKind(e), chunkKind(plan[i - 1])];
     if (kind === 'buildings' || prev === 'buildings') return;
     const [name, prevName] = [KIND_NAMES[kind] ?? kind, KIND_NAMES[prev] ?? prev];
@@ -1090,7 +1117,9 @@ export function generateLayout(
   // theme leaves empty, then Chunk_PrePortal, 80 cells whose left slot is the whole start piece)
   // (Chunk mode: the start piece is in the plan, laid with the rest)
   let prePortalAt = null;
-  if (has('boundary_PrePortal_Left') && !modeRun && !gen.showcase) {
+  // (a hand-laid plan opens in Subway City only if its first chunk is the start)
+  const planStart = !gen.plan?.length || chunkKind(gen.plan[0]) === 'start';
+  if (has('boundary_PrePortal_Left') && !modeRun && !gen.showcase && planStart) {
     addRun('left', 'boundary_PrePortalIntro_Left', z, z + SEGMENT);
     addRun('right', 'boundary_PrePortalIntro_Left', z, z + SEGMENT);
     z += SEGMENT;
@@ -1146,7 +1175,7 @@ export function generateLayout(
       } else if (e.type === 'piece' && has(e.slot)) {
         const prefab = exact(e.slot, e.prefab);
         const before = items.length;
-        items.push({ prefab, slot: e.slot, layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(placeRng() * 2 ** 31) });
+        items.push({ prefab, slot: e.slot, layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(placeRng() * 2 ** 31), ...(e.variants ? { variants: e.variants } : {}) });
         z += slotLength(manifest, e.slot, manifest.prefabs[prefab]);
         addRun('left', e.slot, z0, z);
         addRun('right', e.slot, z0, z);

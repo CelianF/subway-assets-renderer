@@ -593,13 +593,15 @@ class Emitter {
       pts.push([x, y, z, 0]);
       for (let j = 0; j < c; j++) pts.push([tr.pos[h + j * 3], tr.pos[h + j * 3 + 1], tr.pos[h + j * 3 + 2], this.time - tr.time[base + j]]);
       const lt = this.age[i] / this.life[i];
+      // Size affects Width (manifests from before it was kept: off, as they drew)
+      const widthScale = td.sizeWidth ? this.size0[i] * (this.def.sizeOverLife ? sample(this.def.sizeOverLife, lt, this.rand[i * 2]) : 1) : 1;
       sampleColor(td.colorOverLife, lt, this.rand[i * 2], life);
       if (td.inheritColor) this.color(i, lt, pcol, col);
       for (let j = 0; j < K; j++) {
         const q = pts[Math.min(j, pts.length - 1)];
         const prev = j + 1 < pts.length ? pts[j + 1] : pts.length > 1 ? [2 * q[0] - pts[pts.length - 2][0], 2 * q[1] - pts[pts.length - 2][1], 2 * q[2] - pts[pts.length - 2][2]] : q;
         const u = Math.min(q[3] / Math.max(tr.life[i], 1e-3), 1);
-        const w = j < pts.length && pts.length > 1 ? sample(td.width, u, this.rand[i * 2 + 1]) : 0;
+        const w = j < pts.length && pts.length > 1 ? sample(td.width, u, this.rand[i * 2 + 1]) * widthScale : 0;
         sampleColor(td.colorOverTrail, u, this.rand[i * 2 + 1], col);
         col.multiply(life);
         if (td.inheritColor) col.multiply(pcol);

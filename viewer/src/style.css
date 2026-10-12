@@ -810,9 +810,8 @@ body.studio #view {
   font-size: 11px;
   line-height: 1.3;
   color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .chunk-badge {
   position: absolute;
@@ -893,6 +892,9 @@ body.studio #view {
 .chunk-card .chunk-name {
   padding: 4px 6px;
   font-size: 12px;
+  /* the whole name, on as many lines as it takes ("Landmark: Monster Epic") */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .chunk-strip.hidden,
 .chunk-palette.hidden {
@@ -901,6 +903,10 @@ body.studio #view {
 .chunk-half .chunk-name {
   font-size: 10px;
   text-align: center;
+  /* (a building side's short tag: H2, M1…) */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* A section's length: − n + under its name */
 .chunk-length {

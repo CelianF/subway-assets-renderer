@@ -38,7 +38,7 @@ export function createChunkDeck(root, ctx) {
   const cardsById = () => new Map(ctx.groups().flatMap((g) => g.cards).map((c) => [c.id, c]));
   const cardIds = (e) =>
     e.type === 'buildings' ? ['left', 'right'].map((side) => e[side] && `${e[side].slot}|${e[side].prefab}`)
-    : e.type === 'section' ? [`section|${e.kind}`]
+    : e.type === 'section' ? [`section|${e.kind}${e.variants ? `|${Object.entries(e.variants).map(([g, c]) => `${g}=${c}`).join(',')}` : ''}`]
     : [e.type === 'gate' ? `gate|${e.wall}` : `${e.slot}|${e.prefab}`];
 
   /** A thumbnail <img>, filled in when its card is rendered. */
@@ -69,7 +69,7 @@ export function createChunkDeck(root, ctx) {
    */
   function chunkOf(card) {
     if (card.type === 'gate') return { type: 'gate', wall: card.wall };
-    if (card.type === 'section') return { type: 'section', kind: card.kind, length: card.length };
+    if (card.type === 'section') return { type: 'section', kind: card.kind, length: card.length, ...(card.variants ? { variants: card.variants } : {}) };
     if (card.type === 'piece') return { type: 'piece', slot: card.slot, prefab: card.prefab };
     const side = { slot: card.slot, prefab: card.prefab };
     if (card.side === 'left') return { type: 'buildings', left: side, awaiting: true };

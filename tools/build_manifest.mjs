@@ -239,6 +239,16 @@ function parseThemeConfig(file, guidIndex) {
       offset: num(layer.match(/\n {4}Offset: \{x: [^,]+, y: [^,]+, z: ([\d.e-]+)\}/)?.[1] ?? '0'),
     };
   }).filter((l) => l.fill.length || l.singles.length);
+  // The gradient reads the vertex colors, which the glb scrambles on a compressed mesh (3.14
+  // Fantasy Fest's clouds and city came out in streaks): decoded from the asset, per prefab
+  for (const l of layers) {
+    if (l.colorMode !== 1 && l.colorMode !== 2) continue;
+    for (const name of l.singles) {
+      const file = [...guidIndex.values()].find((f) => f.endsWith(`/${name}.prefab`));
+      const meshes = file ? decodedSkylineMeshes(file, guidIndex) : {};
+      if (Object.keys(meshes).length) (l.meshes ??= {})[name] = meshes;
+    }
+  }
   if (layers.length) {
     const limits = text.match(/\n {2}Limits: \{x: ([\d.e-]+), y: ([\d.e-]+)\}/);
     out.skylineLayers = { distance: number('DistanceFromPlayer') ?? 1000, spacing: 5, limits: limits ? [num(limits[1]), num(limits[2])] : [-350, 750], layers };
@@ -253,11 +263,14 @@ function parseThemeConfig(file, guidIndex) {
       gradientB: color('GradientB'),
       colorMode: Number(text.match(/BackgroundLayer:[\s\S]*?\n {4}ColorMode: (\d+)/)?.[1] ?? 1), // 0 tint, 1 gradient, 2 vertex colors
     };
-    // Vertex colors (3.60 Ireland): the glb lost them (compressed mesh), decoded from the asset
-    if (out.background.colorMode === 2) {
-      const meshes = [...read(guidIndex.get(bg[1])).matchAll(/MeshFilter:[\s\S]*?m_Mesh: \{fileID: \d+, guid: (\w+)/g)].map(([, g]) => guidIndex.get(g));
-      const mesh = meshes.length === 1 && meshes[0] && existsSync(meshes[0]) ? compressedMesh(read(meshes[0])) : null;
-      if (mesh?.colors) out.background.mesh = mesh;
+    // Vertex colors (3.60 Ireland): the glb lost them (compressed mesh), decoded from the asset.
+    // The gradient mixes by their red too (Multi Skyline: GradientB→A; 3.68 Seoul)
+    if (out.background.colorMode === 1 || out.background.colorMode === 2) {
+      const meshes = decodedSkylineMeshes(guidIndex.get(bg[1]), guidIndex);
+      const list = Object.values(meshes);
+      // (one mesh: `mesh`, as older viewers read it; several: by node)
+      if (list.length === 1) out.background.mesh = list[0];
+      else if (list.length) out.background.meshes = meshes;
     }
   }
   return out;
@@ -279,6 +292,26 @@ function unpackBits(hex, count, bits) {
       if (bit === 8) (byte++, (bit = 0));
     }
     out[i] = x;
+  }
+  return out;
+}
+
+/**
+ * A skyline prefab's compressed meshes that carry vertex colors, decoded, by node name: the
+ * glb scrambles their colors, which Multi Skyline's gradient and vertex modes read.
+ */
+function decodedSkylineMeshes(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map(docs.filter((d) => d.kind === '1').map((d) => [d.fid, d.doc.match(/m_Name: (.*)/)?.[1].trim() ?? '']));
+  const out = {};
+  for (const { doc, kind } of docs) {
+    if (kind !== '33') continue;
+    const node = names.get(doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1]);
+    const asset = guidIndex.get(doc.match(/m_Mesh: \{fileID: \d+, guid: (\w+)/)?.[1]);
+    if (!node || !asset || !existsSync(asset)) continue;
+    const text = read(asset);
+    const mesh = /m_MeshCompression: [1-9]/.test(text) ? compressedMesh(text) : null;
+    if (mesh?.colors) out[node] = mesh;
   }
   return out;
 }
@@ -2782,6 +2815,9 @@ function parseParticles(file, guidIndex) {
         colorOverLife: minMaxGradient(trail.colorOverLifetime),
         colorOverTrail: minMaxGradient(trail.colorOverTrail),
         inheritColor: trail.inheritParticleColor === 1,
+        // (the width times the particle's size, Unity's default: 3.68 Cosmic Crossroads'
+        // meteors, 0.05-0.7 in size, drew trails 25 wide)
+        sizeWidth: (trail.sizeAffectsWidth ?? 1) === 1,
         material: trailGuid && guidIndex.has(trailGuid) ? stem(guidIndex.get(trailGuid)) : null,
       } } : {}),
       // Noise (3.12 Copenhagen's rockets wobble as they climb): a smooth push, units/s

@@ -333,7 +333,11 @@ function applyRandomizers(obj, randomizers, seed, prefabName = '', forced = null
   const rng = mulberry32(seed);
   const table = sanitizedTable(Object.entries(randomizers));
   const groups = [];
-  obj.traverse((o) => nodeKey(table, o.name) && groups.push(o));
+  // A node named like one of the groups' children is that child, not the group again with a
+  // loader's duplicate suffix: 3.68 Cosmic Crossroads' tube group "Random" picks between
+  // "Random_01".."Random_03", which were emptied as copies of it (their asteroids lost)
+  const childNames = new Set(Object.values(randomizers).flatMap((e) => Object.keys((e && typeof e === 'object' && e.weights) || {})).map((k) => THREE.PropertyBinding.sanitizeNodeName(k)));
+  obj.traverse((o) => nodeKey(table, o.name) && (o.name === nodeKey(table, o.name) || !childNames.has(o.name)) && groups.push(o));
   for (const group of groups) {
     const children = [...group.children];
     const groupName = Object.keys(randomizers).find((k) => THREE.PropertyBinding.sanitizeNodeName(k) === nodeKey(table, group.name)) ?? group.name;
@@ -2083,7 +2087,7 @@ function applyThemeLook() {
 
 /**
  * BackgroundLayer: a skyline silhouette kept at a fixed distance ahead of the camera,
- * unaffected by fog. ColorMode 0: flat tint; 1: the config's vertical gradient; 2: the
+ * unaffected by fog. ColorMode 0: flat tint; 1: the config's gradient, by the vertex red; 2: the
  * mesh's vertex colors (decoded by the builder: the glb lost them). Older manifests have
  * no mode: gradient, lightly tinted.
  */
@@ -2105,7 +2109,7 @@ async function loadSkyline(bg) {
       ...globals, // fog color: a faded skyline melts into the haze
     },
     defines: { COLOR_MODE: bg.colorMode ?? -1 },
-    vertexColors: bg.colorMode === 2 && !!bg.mesh,
+    vertexColors: (bg.colorMode === 1 || bg.colorMode === 2) && !!(bg.mesh || bg.meshes),
     vertexShader: `varying float vY; varying vec3 vColor; void main() { vY = position.y;
       #ifdef USE_COLOR
         vColor = color.rgb;
@@ -2117,8 +2121,10 @@ async function loadSkyline(bg) {
       void main() { float t = clamp((vY - uRange.x) / max(uRange.y - uRange.x, 1.0), 0.0, 1.0);
       #if COLOR_MODE == 0
         vec3 c = uTint;
+      #elif COLOR_MODE == 1 && defined(USE_COLOR)
+        vec3 c = mix(uB, uA, vColor.r); // Multi Skyline: by the vertex red
       #elif COLOR_MODE == 1
-        vec3 c = mix(uB, uA, t);
+        vec3 c = mix(uB, uA, t); // (manifests without the decoded mesh)
       #elif COLOR_MODE == 2
         vec3 c = vColor;
       #else
@@ -2160,6 +2166,10 @@ async function loadSkyline(bg) {
     if (o.isMesh) {
       const mats = Array.isArray(o.material) ? o.material : [o.material];
       if (mats.every(isSkyline) && geometry) o.geometry = geometry;
+      else if (mats.every(isSkyline) && bg.meshes) {
+        const decoded = decodedMesh(bg.meshes, o.name);
+        if (decoded) o.geometry = decodedGeometry(decoded);
+      }
       // Vertex color mode without a decoded mesh: the glb's own colors
       const skylineMat = mat.vertexColors || !o.geometry.attributes.color || bg.colorMode !== 2 ? mat : vertexColored;
       const out = mats.map((m) => (isSkyline(m) ? skylineMat : own(m)));
@@ -2195,6 +2205,21 @@ async function loadSkyline(bg) {
  * farthest first. Fill objects repeat across the view; single objects (monuments) stand
  * once each within the skyline limits.
  */
+/** A node's decoded mesh from { node name: mesh } (glb names are sanitized). */
+function decodedMesh(meshes, name) {
+  if (meshes.positions) return meshes; // (one mesh, not by node)
+  return Object.entries(meshes).find(([n]) => THREE.PropertyBinding.sanitizeNodeName(n) === name || THREE.PropertyBinding.sanitizeNodeName(n) === name.replace(/_\d+$/, ''))?.[1] ?? null;
+}
+
+/** A mesh the builder decoded from a compressed asset ({ positions, colors, indices }). */
+function decodedGeometry(mesh) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(mesh.positions, 3));
+  if (mesh.colors) geometry.setAttribute('color', new THREE.Float32BufferAttribute(mesh.colors, 4));
+  geometry.setIndex(mesh.indices);
+  return geometry;
+}
+
 async function loadSkylineLayers(cfg) {
   const layers = [...cfg.layers].sort((a, b) => a.index - b.index);
   const maxIndex = Math.max(...layers.map((l) => l.index));
@@ -2265,6 +2290,8 @@ async function loadSkylineLayers(cfg) {
         else if (modeMat) {
           // (only Multi Skyline meshes take the layer's color; the glow keeps its own)
           const mats = Array.isArray(o.material) ? o.material : [o.material];
+          const decoded = layer.meshes?.[name] && decodedMesh(layer.meshes[name], o.name);
+          if (decoded && mats.every(isSkyline)) o.geometry = decodedGeometry(decoded);
           const out = mats.map((m) => (isSkyline(m) ? modeMat : own(m)));
           o.material = out.length === 1 ? out[0] : out;
           // In Unity queue order within the layer: the glow (3109) adds its light over the
@@ -2995,12 +3022,13 @@ async function renderChunkThumbnail(card) {
   const slots = Object.assign({}, ...Object.values(manifest.themes[state.theme]));
   const parts = []; // [prefab, trackType, [x, y, z]]
   // A section: its start, one middle and its end, one after the other
-  const pieces = card.type === 'section' ? sectionPiecesOf(manifest, state.theme, { kind: card.kind, length: 1 }, state.gen) : null;
+  // (a variant card: that variant on its main piece)
+  const pieces = card.type === 'section' ? sectionPiecesOf(manifest, state.theme, { kind: card.kind, length: 1, ...(card.variants ? { variants: card.variants } : {}) }, state.gen) : null;
   const length = pieces ? chunkLength(manifest, { type: 'section', kind: card.kind, length: 1 }) : chunkLength(manifest, card.type === 'gate' ? { type: 'gate' } : card.type === 'piece' ? card : { type: 'buildings' });
   if (pieces) {
     let pz = 0;
     for (const p of pieces) {
-      parts.push([p.prefab, null, [0, 0, pz]]);
+      parts.push([p.prefab, null, [0, 0, pz], p.variants]);
       const info = manifest.boundaries?.[state.theme]?.trackInfos?.[p.slot];
       const pieceLength = chunkLength(manifest, p);
       if (slots.track_track?.[0] && info?.SpawnTracks !== false) {
@@ -3027,7 +3055,7 @@ async function renderChunkThumbnail(card) {
     }
   }
   const group = new THREE.Scene();
-  const objs = await Promise.all(parts.map(([name, trackType]) => instantiate(name, trackType, 'environment', 1, null, null, null, 0, null, null, { particles: false })));
+  const objs = await Promise.all(parts.map(([name, trackType, , variants]) => instantiate(name, trackType, 'environment', 1, null, null, null, 0, variants ?? null, null, { particles: false })));
   objs.forEach((obj, i) => {
     if (!obj) return;
     obj.position.set(...parts[i][2]);
@@ -3042,6 +3070,32 @@ async function renderChunkThumbnail(card) {
   const landmark = card.kind === 'epic' || /^boundary_epic_/.test(card.slot ?? '');
   cam.position.set(10 * sideX, landmark ? 110 : 50, landmark ? -90 : -24);
   cam.lookAt(30 * sideX, landmark ? 30 : 6, landmark ? reach * 0.8 : reach * 0.5);
+  // A variant card: framed on what the variant adds (the tube's props sit inside it, out of
+  // sight from its entrance), from behind and above
+  const picked = card.variants && Object.values(card.variants).map((n) => THREE.PropertyBinding.sanitizeNodeName(n));
+  // (not a landmark: its variant spans the whole landmark, its usual view shows it best)
+  if (picked && !landmark) {
+    group.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    group.traverse((o) => picked.includes(o.name) && box.expandByObject(o));
+    // The piece's own shell hidden around them (a tube's walls and roof hid Fantasy Fest's
+    // dragon and gold sign): the variant alone on the tracks
+    objs.forEach((obj, i) => {
+      if (!obj || !parts[i][3]) return;
+      const inside = new Set();
+      obj.traverse((o) => picked.includes(o.name) && o.traverse((c) => inside.add(c)));
+      obj.traverse((o) => o.isMesh && !inside.has(o) && (o.visible = false));
+    });
+    if (!box.isEmpty()) {
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const r = Math.max(size.x, size.y, size.z, 40);
+      cam.position.set(center.x + r * 0.45, center.y + r * 0.6, center.z - r * 0.95);
+      cam.lookAt(center);
+      cam.far = Math.max(3000, r * 6);
+      cam.updateProjectionMatrix();
+    }
+  }
   const target = floatDepthTarget(CARD_SIZE, CARD_SIZE);
   const fogOn = globals.uFogOn.value;
   const res = globals.uResolution.value.clone();
