@@ -758,6 +758,67 @@ function updateMotion(mo, dt, time) {
 }
 
 /**
+ * SkyboxColorModifier triggers (3.19 Haunted Hood's landmark): passing one fades the sky's
+ * gradient and the fog to its colors over its duration; the last one passed holds (the
+ * landmark's exit puts the theme's back). Before any, and after a jump: set at once.
+ */
+const skyTriggers = new Set(); // { node, root, top, bottom, fog, duration }
+let skyBase = null; // { top, bottom, fog } THREE.Colors: the theme's
+const skyState = { passed: undefined, z: 0, from: null, to: null, t: 1, duration: 1 };
+function registerSkyTriggers(obj, list) {
+  const sane = (n) => THREE.PropertyBinding.sanitizeNodeName(n);
+  for (const t of list) {
+    let node = null;
+    obj.traverse((o) => (node ??= o.name === sane(t.node) ? o : null));
+    if (!node) continue; // (its variant wasn't picked)
+    const color = (c) => new THREE.Color(c[0], c[1], c[2]);
+    skyTriggers.add({ node, root: obj, top: color(t.top), bottom: color(t.bottom), fog: color(t.fog ?? t.bottom), duration: t.duration });
+  }
+}
+function updateSkyTriggers(dt) {
+  if (!skyBase) return;
+  // Same lifetime rule as the mixers: gone once its piece left the scene
+  for (const t of skyTriggers) {
+    if (t.root.parent) t.attached = true;
+    else if (t.attached || (t.loadWait = (t.loadWait ?? 0) + dt) > 60) skyTriggers.delete(t);
+  }
+  // (maps without any: the theme's look stays as applyThemeLook set it)
+  if (!skyTriggers.size && !skyState.passed && !skyState.to) return;
+  const off = state.inspect || studio?.active;
+  const z = camera.position.z;
+  const at = new THREE.Vector3();
+  let passed = null;
+  let passedZ = -Infinity;
+  if (!off) {
+    for (const t of skyTriggers) {
+      if (!t.attached || !t.node.parent) continue;
+      const tz = t.node.getWorldPosition(at).z;
+      if (tz <= z && tz > passedZ) (passed = t), (passedZ = tz);
+    }
+  }
+  const look = (t) => (t ? { top: t.top, bottom: t.bottom, fog: t.fog } : skyBase);
+  const uniforms = sky.material.uniforms;
+  const current = () => ({ top: uniforms.uTop.value.clone(), bottom: uniforms.uBottom.value.clone(), fog: globals.uFogColor.value.clone() });
+  if (passed !== skyState.passed) {
+    // Run on past it: a fade from where the sky is now; a jump (or going back): at once
+    const ran = skyState.passed !== undefined && z >= skyState.z && z - skyState.z < 200;
+    skyState.from = ran ? current() : look(passed);
+    skyState.to = look(passed);
+    skyState.t = ran ? 0 : 1;
+    skyState.duration = Math.max(passed?.duration ?? 2, 1e-3);
+    skyState.passed = passed;
+  }
+  skyState.z = z;
+  if (!skyState.to) return;
+  skyState.t = Math.min(1, skyState.t + dt / skyState.duration);
+  const k = skyState.t;
+  uniforms.uTop.value.copy(skyState.from.top).lerp(skyState.to.top, k);
+  uniforms.uBottom.value.copy(skyState.from.bottom).lerp(skyState.to.bottom, k);
+  globals.uFogColor.value.copy(skyState.from.fog).lerp(skyState.to.fog, k);
+  if (k >= 1 && !passed) skyState.to = null; // back to the theme's: nothing left to write
+}
+
+/**
  * TriggeredEffect groups (3.67 Fantasy Fest's tube dragon: jaw, smoke and confetti): the
  * game fires them together as the runner comes by. Here they fire together over and over,
  * on one clock as long as the longest member (a clip played once, a system's whole life).
@@ -1113,6 +1174,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
     const emitters = await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
     if (prefab.triggers) applyTriggers(obj, prefab.triggers, emitters, (n) => nodeKey(table, n));
   }
+  if (prefab.skyColors) registerSkyTriggers(obj, prefab.skyColors);
   if (signalSeed != null) await applySignalColor(obj, signalSeed, signalColor);
   // (after the materials are set: the run's own moving trains)
   if (/_Train_Moving_/i.test(name)) attachTrainBlinkers(obj, true);
@@ -2075,6 +2137,9 @@ function applyThemeLook() {
   const fogRGB = cfg.fog?.color?.slice(0, 3);
   const skyCfg = cfg.sky?.top || cfg.sky?.bottom || !fogRGB ? cfg.sky : { top: fogRGB, bottom: fogRGB, power: 1 };
   sky.setColors(skyCfg, skyCfg?.texture ? dataUrl(skyCfg.texture) : null);
+  // (the theme's own look: what sky color triggers fade from and back to)
+  skyBase = { top: sky.material.uniforms.uTop.value.clone(), bottom: sky.material.uniforms.uBottom.value.clone(), fog: globals.uFogColor.value.clone() };
+  skyState.passed = undefined;
   if (skylineTheme !== state.theme) {
     skylineTheme = state.theme;
     skylineGroup.clear();
@@ -2267,7 +2332,8 @@ async function loadSkylineLayers(cfg) {
       side: THREE.DoubleSide,
     });
     const isSkyline = (m) => !manifest.materials[m.name] || /Skyline/.test(manifest.materials[m.name].shader);
-    const distance = cfg.distance + (maxIndex - layer.index) * 150 - (layer.offset ?? 0);
+    // (≤ 1.43's silhouettes hold their distance in the prefab: 900 ahead, the layer at the camera)
+    const distance = layer.classic ? 0 : cfg.distance + (maxIndex - layer.index) * 150 - (layer.offset ?? 0);
     // Where the game has the layer: its objects keep their size and place on screen here
     const near = distance / (cfg.distance - layer.index * (cfg.spacing ?? 5) + (layer.offset ?? 0));
     const own = (m) => {
@@ -2307,8 +2373,22 @@ async function loadSkylineLayers(cfg) {
         obj.scale.set(...(prefab.rootScale ?? [1, 1, 1])).multiplyScalar(near);
       }
       group.add(obj);
-      return prefab;
+      return obj;
     };
+    // ≤ 1.43 EnvironmentBackground: its slots take the list in turn from a random start (an
+    // empty prefab leaves a gap); a monument shows alone at the left limit. Each model scaled
+    // by startScale + x × scaleFactor (MoveGameObject), the game's left being +x here
+    if (layer.classic) {
+      const { cycle, slots, pick } = layer.classic;
+      let index = Math.floor(rng() * Math.max(cycle.length - 1, 1));
+      for (const x of slots) {
+        if (!pick) index = index === cycle.length - 1 ? 0 : index + 1;
+        const m = cycle[index];
+        const obj = await place(m.name, -x);
+        const model = obj?.children[0] ?? obj;
+        model?.scale.multiplyScalar(m.start + x * m.factor);
+      }
+    }
     // Fill: side by side across a wide span, each tile one of the fill prefabs
     const span = 4000;
     for (let x = -span; x < span; ) {
@@ -3263,6 +3343,7 @@ renderer.setAnimationLoop(() => {
   updateMeshAnimations(now);
   updateTrainBlinkers(now);
   updateAnimators(dt);
+  updateSkyTriggers(dt);
   placeFollowEffects();
   updateParticles(dt, studio.active ? studio.camera : camera);
   if (orbit.enabled) orbit.update();

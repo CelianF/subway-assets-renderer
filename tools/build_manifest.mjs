@@ -2468,9 +2468,24 @@ function parseClassic(root, project, guidIndex, log) {
       const layers = [];
       const fill = refs('backgroundPrefabs');
       const singles = refs('monumentPrefabs');
-      if (fill.length) layers.push({ name: 'Back', fill, singles: [], tint, index: 1, offset: 0 });
-      if (singles.length) layers.push({ name: 'Front', fill: [], singles, tint, index: 2, offset: 0 });
-      if (layers.length) look.skylineLayers = { distance: 1000, spacing: 5, limits: [-350, 750], layers };
+      // EnvironmentBackground (≤ 1.43): three background slots (leftLimit × 0.33, 0, rightLimit
+      // × 0.5) taking the list in turn from a random start (an empty prefab is a gap), one
+      // monument at the left limit; each MoveGameObject scales its model by startScale + x ×
+      // scaleFactor; the meshes sit 900 ahead in their prefabs, the background at the camera.
+      // Tiled side by side at full size, 1.43 Greece's Parthenon filled the sky
+      const ordered = (key) => [...(skin.split(`\n    ${key}:`)[1]?.split(/\n {4}\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => guidIndex.get(g)).filter((p) => p?.endsWith('.prefab'));
+      const mover = (file) => {
+        const t = read(file);
+        return { name: stem(file), start: Number(t.match(/\n {2}startScale: ([\d.e-]+)/)?.[1] ?? 1), factor: Number(t.match(/\n {2}scaleFactor: ([\d.e-]+)/)?.[1] ?? 0) };
+      };
+      const bgScene = docs.find((d) => d.kind === '114' && /\n {2}leftLimit: /.test(d.doc))?.doc ?? '';
+      const limits = [Number(bgScene.match(/\n {2}leftLimit: ([\d.e-]+)/)?.[1] ?? -350), Number(bgScene.match(/\n {2}rightLimit: ([\d.e-]+)/)?.[1] ?? 750)];
+      const cycle = ordered('backgroundPrefabs').map(mover);
+      const monuments = ordered('monumentPrefabs').map(mover);
+      if (cycle.length > 2) layers.push({ name: 'Back', fill: [], singles: [], tint, index: 1, offset: 0, classic: { cycle, slots: [limits[0] * 0.33, 0, limits[1] * 0.5] } });
+      else if (fill.length) layers.push({ name: 'Back', fill, singles: [], tint, index: 1, offset: 0 });
+      if (monuments.length) layers.push({ name: 'Front', fill: [], singles: [], tint, index: 2, offset: 0, classic: { cycle: monuments, slots: [limits[0]], pick: true } });
+      if (layers.length) look.skylineLayers = { distance: 1000, spacing: 5, limits, layers, ...(layers.some((l) => l.classic) ? { classic: true } : {}) };
       return look;
     };
     if (skin) Object.assign(config, skinLook(skin));
@@ -2701,6 +2716,30 @@ function parseTriggerGroups(file) {
     if (group.animations.length + group.particles.length) groups.push(group);
   }
   return groups;
+}
+
+/**
+ * 3.x SkyboxColorModifier: a runner trigger that fades the sky gradient and the fog to its
+ * colors over `duration` s (3.19 Haunted Hood's landmark darkens the sky, its lightning
+ * flashes it, its exit restores it): [{ node, top, bottom, fog, duration }].
+ */
+function parseSkyColorTriggers(file) {
+  const docs = yamlDocs(read(file));
+  const names = new Map(docs.filter((d) => d.kind === '1').map((d) => [d.fid, d.doc.match(/m_Name: (.*)/)?.[1].trim() ?? '']));
+  const rgb = (doc, key) => {
+    const m = doc.match(new RegExp(`\\n {2}${key}: \\{r: ([\\d.e-]+), g: ([\\d.e-]+), b: ([\\d.e-]+)`));
+    return m ? m.slice(1, 4).map(Number) : null;
+  };
+  return docs
+    .filter((d) => d.kind === '114' && /\n {2}_targetTopColor: /.test(d.doc))
+    .map(({ doc }) => ({
+      node: names.get(doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1]),
+      top: rgb(doc, '_targetTopColor'),
+      bottom: rgb(doc, '_targetBottomColor'),
+      fog: rgb(doc, '_targetFogColor'),
+      duration: Number(doc.match(/\n {2}_duration: ([\d.e-]+)/)?.[1] ?? 1),
+    }))
+    .filter((t) => t.node && t.top && t.bottom);
 }
 
 function parseParticles(file, guidIndex) {
@@ -3317,7 +3356,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.effects ?? []).map((e) => e.prefab)));
   // 1.x: skyline layers, and the cars / short pieces composites are built from
   const composites = new Map(Object.values(legacy).flatMap((t) => Object.entries(t.composites)));
-  transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => [...(c.skylineLayers?.layers ?? []), ...(c.plain?.skylineLayers?.layers ?? [])].flatMap((l) => [...l.fill, ...l.singles])));
+  transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => [...(c.skylineLayers?.layers ?? []), ...(c.plain?.skylineLayers?.layers ?? [])].flatMap((l) => [...l.fill, ...l.singles, ...(l.classic?.cycle.map((m) => m.name) ?? [])])));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.distantObjects?.objects ?? []).flatMap((d) => d.prefabs ?? [d.prefab])));
   transitionPrefabs.push([...composites.values()].flatMap((parts) => parts.map((p) => p.prefab)));
   const classicNames = new Set([...(classic?.chunks ?? []), ...(classic?.pieces ?? [])].map((c) => c.name));
@@ -3531,6 +3570,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     if (Object.keys(particles).length) info.particles = particles;
     const triggers = parseTriggerGroups(prefabPath);
     if (triggers.length) info.triggers = triggers;
+    const skyColors = parseSkyColorTriggers(prefabPath);
+    if (skyColors.length) info.skyColors = skyColors;
     // Shape scaling: the spawned copy keeps its root scale, which stretches the shape and its
     // directions, not the particles (1.98 Atlanta's barbecue smoke rises as a column)
     if (shapeScaled && particles[name]) particles[name].shape.scale = rootScale;
@@ -3695,7 +3736,7 @@ function splitByTheme(manifest, staging, out, log) {
     for (const n of modePrefabs(manifest.modes)) names.add(n);
     if (config.background) names.add(config.background.prefab);
     for (const e of config.effects ?? []) names.add(e.prefab);
-    for (const l of [...(config.skylineLayers?.layers ?? []), ...(config.plain?.skylineLayers?.layers ?? [])]) for (const n of [...l.fill, ...l.singles]) names.add(n);
+    for (const l of [...(config.skylineLayers?.layers ?? []), ...(config.plain?.skylineLayers?.layers ?? [])]) for (const n of [...l.fill, ...l.singles, ...(l.classic?.cycle.map((m) => m.name) ?? [])]) names.add(n);
     for (const d of config.distantObjects?.objects ?? []) for (const n of d.prefabs ?? [d.prefab]) names.add(n);
     for (const n of [...names]) for (const part of manifest.prefabs[n]?.parts ?? []) names.add(part.prefab);
     for (const queue = [...names]; queue.length; ) {
