@@ -876,6 +876,12 @@ export function generateLayout(
   // Nothing enabled (or available): plain buildings
   if (!sectionTypes.length) sectionTypes.push({ name: 'buildings', weight: 1, build: buildings });
   const buildingsType = sectionTypes.find((t) => t.name === 'buildings');
+  // An ad slot holding pieces of its own (a campaign), not the regular right-hand buildings
+  const regularRight = new Set(['low', 'medium', 'high'].flatMap((h) => slots[`boundary_${h}_right`] ?? []));
+  const campaignSlot = (slot) => (slots[slot] ?? []).some((n) => manifest.prefabs[n]?.bbox && !regularRight.has(n));
+  let sponsoredOpening = !modeRun && !gen.showcase && !gen.plan?.length && !has('boundary_PrePortal_Left')
+    ? ['boundary_sponsored_right_front', 'boundary_sponsored_right_back'].filter((s) => has(s) && campaignSlot(s))
+    : [];
 
   function buildings(count = null) {
     if (gen.showcase) return showcaseBuildings();
@@ -888,12 +894,18 @@ export function generateLayout(
     // One height for the whole stretch: the game's route chunks set the building height
     // (EnvironmentKind density) for all their blocks, so it changes only between chunks,
     // never segment by segment (low, high, low...)
-    const height = pick(rng, heights);
-    for (let i = 0; i < n; i++) {
+    let height = pick(rng, heights);
+    // A campaign's own ad pieces open the run (2.37 Subway City's Burger King: the
+    // WeightedScheduler's only section before z 200 is Section_Sponsored, high buildings on
+    // the left facing the parking lot and the store)
+    const opening = sponsoredOpening;
+    sponsoredOpening = [];
+    if (opening.length && heights.includes('high')) height = 'high';
+    for (let i = 0; i < Math.max(n, opening.length); i++) {
       // Ad slots replace a right-hand building now and then (in exports without an
       // active campaign they point at regular buildings)
-      const sponsored = ['boundary_sponsored_right_front', 'boundary_sponsored_right_back'].filter(has);
-      const right = sponsored.length && rng() < 0.15 ? pick(rng, sponsored) : `boundary_${height}_right`;
+      const sponsored = ['boundary_sponsored_right_front', 'boundary_sponsored_right_back'].filter((s) => has(s) && !campaignSlot(s));
+      const right = opening[i] ?? (sponsored.length && rng() < 0.15 ? pick(rng, sponsored) : `boundary_${height}_right`);
       const leftPrefab = placeAllowed(`boundary_${height}_left`, usePieces);
       const rightPrefab = right.startsWith('boundary_sponsored') ? place(right, [0, 0, z]) : placeAllowed(right, usePieces);
       placed.push({ type: 'buildings', left: { slot: `boundary_${height}_left`, prefab: leftPrefab }, right: { slot: right, prefab: rightPrefab } });

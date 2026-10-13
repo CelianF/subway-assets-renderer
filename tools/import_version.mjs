@@ -5,4 +5,6 @@
 //
 // 1 (2026-10-12): first stamp (skyline mesh decoding, classic skylines, sky color triggers,
 //   trail widths, trigger groups)
-export const IMPORT_VERSION = 1;
+// 2 (2026-10-13): CoppaObjectSwitcher's kids' object hidden (2.37 Subway City's Burger King
+//   store was under a plain building)
+export const IMPORT_VERSION = 2;

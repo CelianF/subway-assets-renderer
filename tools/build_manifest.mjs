@@ -821,6 +821,24 @@ function disabledRenderers(file) {
 }
 
 /**
+ * Names of the GameObjects a CoppaObjectSwitcher keeps for children (`_underAge`): the game
+ * shows `_aboveAge` instead to players old enough for ads (2.37 Subway City's sponsored
+ * piece: the Burger King store, its plain building for kids). Both are exported, drawn on
+ * top of each other, and the plain one, taller, hid the store.
+ */
+function coppaHidden(file) {
+  const text = read(file);
+  if (!text.includes('_underAge:')) return [];
+  const docs = yamlDocs(text);
+  const names = new Map(docs.filter((d) => d.kind === '1').map((d) => [d.fid, d.doc.match(/m_Name: (.*)/)?.[1].trim() ?? '']));
+  return docs.flatMap(({ doc }) => {
+    const above = doc.match(/\n {2}_aboveAge: \{fileID: (\d+)/)?.[1];
+    const under = doc.match(/\n {2}_underAge: \{fileID: (\d+)/)?.[1];
+    return above && above !== '0' && under && under !== '0' && names.get(under) ? [names.get(under)] : [];
+  });
+}
+
+/**
  * What a pickup's script picks at runtime: one of its _randomModels (Trick or Treat's two
  * candies), the letter mesh of a hunt letter (_letterMeshes, A to Z, on _letterMeshFilter),
  * the Pride coin's color (_meshVariants on _filter_LOD0: red, orange … purple, the next one
@@ -3471,8 +3489,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       for (const src of meshes.filter(Boolean)) copyIfNewer(src, path.join(outMesh, path.basename(src)));
       if (meshes.every(Boolean)) info[key] = { node: script[key].node, meshes: meshes.map((src) => `mesh/${path.basename(src)}`) };
     }
-    // (pickups: the renderers they start with off, too)
-    const lodHidden = sortedStrings(new Set([...parseLodGroups(prefabPath), ...(pickups.includes(name) ? disabledRenderers(prefabPath) : [])]));
+    // (pickups: the renderers they start with off, too; and the kids' side of an ad)
+    const lodHidden = sortedStrings(new Set([...parseLodGroups(prefabPath), ...(pickups.includes(name) ? disabledRenderers(prefabPath) : []), ...coppaHidden(prefabPath)]));
     if (lodHidden.length) info.lodHidden = lodHidden;
     const skinned = parseSkinnedMeshes(prefabPath, guidIndex).filter((sk) => {
       const src = meshGlbs.get(`${sk.mesh}.glb`);
