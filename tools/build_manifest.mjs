@@ -839,6 +839,23 @@ function coppaHidden(file) {
 }
 
 /**
+ * Names of the GameObjects a QualityToggle keeps for devices without its feature
+ * (`_unsupported`): the game shows `_supported` where the device handles it (1.61 Havana's
+ * FX_train_ani1/2 hold `train_standard` and a low `train_low`, both exported and drawn).
+ */
+function qualityHidden(file) {
+  const text = read(file);
+  if (!text.includes('_unsupported:')) return [];
+  const docs = yamlDocs(text);
+  const names = new Map(docs.filter((d) => d.kind === '1').map((d) => [d.fid, d.doc.match(/m_Name: (.*)/)?.[1].trim() ?? '']));
+  return docs.flatMap(({ doc }) => {
+    const supported = doc.match(/\n {2}_supported: \{fileID: (\d+)/)?.[1];
+    const unsupported = doc.match(/\n {2}_unsupported: \{fileID: (\d+)/)?.[1];
+    return supported && supported !== '0' && unsupported && unsupported !== '0' && names.get(unsupported) ? [names.get(unsupported)] : [];
+  });
+}
+
+/**
  * What a pickup's script picks at runtime: one of its _randomModels (Trick or Treat's two
  * candies), the letter mesh of a hunt letter (_letterMeshes, A to Z, on _letterMeshFilter),
  * the Pride coin's color (_meshVariants on _filter_LOD0: red, orange … purple, the next one
@@ -1215,7 +1232,14 @@ function parseRandomizers(file, guidIndex) {
     const distance = kind === 'DistanceRequiredChildRandomizer' ? [[filler('_uniqueFiller'), 1], [filler('_fallbackFiller'), 2]].filter(([n]) => n) : [];
     const kids = (childrenOf.get(go[1]) ?? []).filter((fid) => names.has(fid));
     const weights = distance.length ? distance : weighted.length ? weighted.map(([, fid, w]) => [names.get(fid), num(w)]) : kids.map((fid) => [names.get(fid), 1]);
-    out[names.get(go[1])] = weights.length ? { probability, weights: Object.fromEntries(weights) } : probability;
+    // Groups sharing a name (3.65 Sydney's tube: a "random_fish" in each variant, only the
+    // first with the shark) are one entry here, read by child name: merge their children,
+    // or the last group's list leaves the others' children (the shark) weighing nothing
+    const name = names.get(go[1]);
+    const previous = out[name];
+    if (previous && typeof previous === 'object' && weights.length) {
+      out[name] = { probability: Math.max(previous.probability, probability), weights: { ...Object.fromEntries(weights), ...previous.weights } };
+    } else out[name] = weights.length ? { probability, weights: Object.fromEntries(weights) } : probability;
   }
   return out;
 }
@@ -3490,7 +3514,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       if (meshes.every(Boolean)) info[key] = { node: script[key].node, meshes: meshes.map((src) => `mesh/${path.basename(src)}`) };
     }
     // (pickups: the renderers they start with off, too; and the kids' side of an ad)
-    const lodHidden = sortedStrings(new Set([...parseLodGroups(prefabPath), ...(pickups.includes(name) ? disabledRenderers(prefabPath) : []), ...coppaHidden(prefabPath)]));
+    const lodHidden = sortedStrings(new Set([...parseLodGroups(prefabPath), ...(pickups.includes(name) ? disabledRenderers(prefabPath) : []), ...coppaHidden(prefabPath), ...qualityHidden(prefabPath)]));
     if (lodHidden.length) info.lodHidden = lodHidden;
     const skinned = parseSkinnedMeshes(prefabPath, guidIndex).filter((sk) => {
       const src = meshGlbs.get(`${sk.mesh}.glb`);

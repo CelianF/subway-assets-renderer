@@ -7,4 +7,8 @@
 //   trail widths, trigger groups)
 // 2 (2026-10-13): CoppaObjectSwitcher's kids' object hidden (2.37 Subway City's Burger King
 //   store was under a plain building)
-export const IMPORT_VERSION = 2;
+// 3 (2026-10-14): same-named random groups merged (3.65 Sydney's tube lost its shark: the last
+//   "random_fish" group's list replaced the first, which held it)
+// 4 (2026-10-14): QualityToggle's low-end alternate hidden (1.61 Havana's FX_train_ani1/2 drew
+//   train_standard and train_low together)
+export const IMPORT_VERSION = 4;
