@@ -196,6 +196,10 @@ varying float vColorA; // RGBA vertex colors: their alpha fades transparent piec
 attribute vec2 uv1;
 varying vec2 vUv1;
 #endif
+#ifdef FLAG
+attribute vec2 uv1;
+uniform vec4 uFlag; // _AmplitudeX, _AmplitudeY, _FrequenceyX, _FrequenceyY
+#endif
 #ifdef ALPHA_TEX
 varying vec2 vUvRaw;
 #endif
@@ -237,6 +241,19 @@ void main() {
 #include <morphinstance_vertex>
 #include <morphtarget_vertex>
     p = transformed;
+  }
+#endif
+#ifdef FLAG
+  // 1.x Bend/Flag (from its compiled code): the second UV set is the vertex's place on the flag
+  // (x: along it, y: its distance from the pole), which weights the sway; _Time.y, seconds.
+  // A mesh without that set reads 0 and stays flat (1.61 Havana's extra_4/7 flags: no UV2).
+  // The glb flips V and mirrors X: undone for the numbers. (No import carries one to check against.)
+  {
+    vec2 local = vec2(uv1.x, 1.0 - uv1.y);
+    float phaseZ = 0.01 * (p.z);
+    float offX = sin(-uTime * (uFlag.z + 0.0001 * local.x) + local.y * 0.7 + phaseZ) * uFlag.x * local.y;
+    float offY = sin(uTime * uFlag.w + local.y * 0.1 + phaseZ) * uFlag.y * local.y;
+    p += vec3(-offX, offY, 0.0);
   }
 #endif
 #ifdef WAVE
@@ -839,6 +856,7 @@ const LEGACY_SHADERS = [
   // VertexWaveGradient (2.x tulips): grey petals gradient-mapped from _Color to _Color2
   [/VertexWaveGradient/i, { _HasGradient: 1 }],
   [/VertexWave$/i, { _HasTint: 1 }],
+  [/^Bend\/Flag$/, { _HasTint: 1 }],
 ];
 
 // 1.x "Custom/Distorted/*" (Distorted = curved world). The export keeps property blocks
@@ -942,8 +960,10 @@ function translateLegacy(def) {
   for (const [re, flags] of LEGACY_SHADERS) if (re.test(def.shader)) ruled = !!Object.assign(floats, flags);
   if (floats._ColorMultiplier != null) Object.assign(floats, { _HasMultiplier: 1, _Multiplier: floats._ColorMultiplier });
   // Bend/UVScroll scrolls by _Time.y (seconds), the Combined shader by _Time.x (seconds / 20):
-  // 2.11 Space Station's lane glow is 0.12 there, 2.4 in 3.70's Combined copy
-  if (/^Bend\/UVScroll$/.test(def.shader) && def.colors?._ScrollSpeed) {
+  // 2.11 Space Station's lane glow is 0.12 there, 2.4 in 3.70's Combined copy. 1.x
+  // "UV Scroll (Screen)/Simple" and "/Advanced" use _Time.yy too (1.90 Havana's waterfall and
+  // fountain crept at a twentieth of the game's speed)
+  if (/^Bend\/(UVScroll|UV Scroll \(Screen\)\/\w+)$/.test(def.shader) && def.colors?._ScrollSpeed) {
     return { ...def, floats, renderQueue: def.renderQueue > 0 ? def.renderQueue : floats._DstMode ? 3000 : 2000, colors: { ...def.colors, _ScrollSpeed: def.colors._ScrollSpeed.map((v) => v * 20) } };
   }
   // Legacy transparent queues were left at -1 (shader default)
@@ -1088,6 +1108,7 @@ export class MaterialLibrary {
     if (/MeshNearPlayer$/.test(def.shader)) defines.NEAR_PLAYER = '';
     if (/PlayerSnowPlow$|Texture Indentation$/.test(def.shader)) defines.SNOW_PLOW = '';
     if (wave) defines.WAVE = '';
+    if (def.shader === 'Bend/Flag') defines.FLAG = '';
     // 1.x Bend/Wave (Vertex Color Control) compiles to the same wave as 2.x (1.65 Amsterdam's tulips)
     // (and 3.x SYBO/Bend/Legacy/VertexWave: the same compiled formula, checked on 3.12)
     const wave2x = def.shader === 'SYBO/Bend/VertexWave' || /^Bend\/Wave \(Vertex Color Control|^SYBO\/Bend\/Legacy\/VertexWave/.test(def.shader);
@@ -1138,6 +1159,7 @@ export class MaterialLibrary {
         uWaveExtra: { value: new THREE.Vector3(f._OffsetScale ?? 0, f._VertexColorWeight ?? 1, f._IgnoreVertexColor ? 1 : 0) },
         uWaveParams: { value: new THREE.Vector3(f._Frequency ?? 1, f._Speed ?? 1, f._WaveHeight ?? 0) },
         uWaveScales: { value: new THREE.Vector3(...(c._SpeedScales?.slice(0, 3).some((v) => v) ? c._SpeedScales.slice(0, 3) : [1, 1, 1])) },
+        uFlag: { value: new THREE.Vector4(f._AmplitudeX ?? 0, f._AmplitudeY ?? 0, f._FrequenceyX ?? 0, f._FrequenceyY ?? 0) },
         uWaterWave: { value: new THREE.Vector4(f._AmplitudeX ?? 0, f._AmplitudeZ ?? 0, f._FrequenceyX ?? 1, f._FrequenceyZ ?? 1) },
         uWaterSpeed: { value: new THREE.Vector2(f._SpeedX ?? 1, f._SpeedZ ?? 1) },
         uUvWobble: { value: new THREE.Vector4(f._xDistortionAplitude ?? 0, f._xDistortionFrequency ?? 0, f._yDistortionAplitude ?? 0, f._yDistortionFrequency ?? 0) },
@@ -1153,6 +1175,8 @@ export class MaterialLibrary {
     // (red) is 0; three's ShaderMaterial would hand it white (1.104 Dubai's aquarium fish,
     // still in game, swam about)
     if (wave) mat.defaultAttributeValues = { ...mat.defaultAttributeValues, color: [0, 0, 0] };
+    // (a flag mesh without the second UV set reads 0 there: V is flipped, so 0 is (0, 1))
+    if (def.shader === 'Bend/Flag') mat.defaultAttributeValues = { ...mat.defaultAttributeValues, uv1: [0, 1] };
     if (fadeMode === 1 && /glass/i.test(name)) {
       mat.userData.glass = true;
       mat.userData.baseAlpha = tint.w;
