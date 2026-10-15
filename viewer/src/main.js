@@ -3340,7 +3340,7 @@ if (params.get('z')) {
   camera.lookAt(orbit.target);
 }
 setControlMode(state.controls);
-window.__viewer = { time, motions, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild, unruledShaders };
+window.__viewer = { time, motions, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild, unruledShaders, instantiate, manifest };
 if (state.obstacleMode === 'studio' && state.studio.some((it) => ['coins', 'coinArc', 'pickup'].includes(it.type))) await ensurePickups();
 await rebuild();
 
