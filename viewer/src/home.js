@@ -83,11 +83,21 @@ function renderEnvs() {
           group.length > 1
             ? el('a', { class: 'button', href: `/api/export?ids=${group.map(({ env }) => encodeURIComponent(env.id)).join(',')}&name=${encodeURIComponent(city)}`, download: '', title: `Download one .subwaymap file with ${group.length === 2 ? 'both' : `all ${group.length}`} ${city} maps` }, 'Share city')
             : null,
+          // Every map of the city shown at once (the search narrows it too)
+          group.length > 1 ? el('button', { class: 'danger', title: `Delete ${group.length === 2 ? 'both' : `all ${group.length}`} ${city} maps`, onclick: () => deleteCity(city, group.map(({ env }) => env)) }, 'Delete city') : null,
         ),
         el('div', { class: 'grid' }, ...group.map(({ env }) => envTile(env))),
       ),
     ),
   );
+}
+
+/** Deletes every map of a city shown on the page, after one confirmation. */
+async function deleteCity(city, envs) {
+  const list = envs.map((e) => `  ${prettyTheme(e.theme)} v${e.gameVersion}${e.copy ? ` (${e.note ?? `copy ${e.copy}`})` : ''}`).join('\n');
+  if (!confirm(`Delete all ${envs.length} ${city} maps? This removes their files.\n\n${list}`)) return;
+  for (const env of envs) await fetch(`/api/envs/${encodeURIComponent(env.id)}`, { method: 'DELETE' });
+  loadEnvs();
 }
 
 /** An environment's tile: preview, name, version, open / share / delete. */
@@ -114,7 +124,7 @@ function envTile(env) {
       el(
         'div',
         { class: 'env-actions' },
-        el('button', { class: 'primary', onclick: open }, 'Open'),
+        el('button', { class: 'go', onclick: open }, 'Open'),
         el('a', { class: 'button', href: `/api/envs/${encodeURIComponent(env.id)}/export`, download: '', title: 'Download a .subwaymap file to share this map' }, 'Share'),
         el(
           'button',
@@ -199,25 +209,29 @@ function handleFiles(files) {
 }
 
 /**
- * "This map already exists" dialog: one choice per map (ignore / keep both / replace),
- * with buttons to apply a choice to all; "Keep both" asks for a note to tell the copies
- * apart. Resolves to { choices: { envId: policy }, notes: { envId: text } }.
+ * "This map already exists" dialog: one choice per map (ignore / keep both / replace,
+ * the recommended one and the default), with buttons to apply a choice to all; "Keep both"
+ * asks for a note to tell the copies apart. One dialog at a time: a second caller waits for
+ * the first to close. Resolves to { choices: { envId: policy }, notes: { envId: text } }.
  */
-let conflictOpen = false;
-function askConflicts(conflicts) {
-  if (conflictOpen) return new Promise(() => {}); // a poll tick while the dialog is up
-  conflictOpen = true;
+let conflictTurn = Promise.resolve();
+function askConflicts(conflicts, source = null) {
+  const turn = conflictTurn.then(() => conflictDialog(conflicts, source));
+  conflictTurn = turn.catch(() => {});
+  return turn;
+}
+function conflictDialog(conflicts, source) {
   return new Promise((resolve) => {
-    const choices = Object.fromEntries(conflicts.map((c) => [c.id, 'keep']));
+    const choices = Object.fromEntries(conflicts.map((c) => [c.id, 'replace']));
     const notes = {};
     const POLICIES = [
       ['skip', 'Ignore', 'Keep the existing map, drop the new one'],
       ['keep', 'Keep both', 'Save the new one as a copy next to it'],
-      ['replace', 'Replace', 'Overwrite the existing map'],
+      ['replace', 'Replace', 'Recommended: overwrite the existing map with the new import'],
     ];
     const rows = conflicts.map((c) => {
       const buttons = POLICIES.map(([policy, label, title]) =>
-        el('button', { class: `choice ${policy === 'replace' ? 'danger' : ''}`, 'data-policy': policy, title, onclick: () => set(c.id, policy) }, label),
+        el('button', { class: `choice ${policy === 'replace' ? 'recommended' : ''}`, 'data-policy': policy, title, onclick: () => set(c.id, policy) }, label),
       );
       const date = c.existingDate ? new Date(c.existingDate).toLocaleDateString() : '';
       const noteInput = el('input', {
@@ -259,10 +273,11 @@ function askConflicts(conflicts) {
         'div',
         { class: 'modal' },
         el('h3', {}, conflicts.length === 1 ? 'This map already exists' : `${conflicts.length} maps already exist`),
-        el('p', { class: 'muted' }, 'Same map and same game version. Small variants of a city (e.g. an event skin) are separate maps and never collide.'),
+        source ? el('p', {}, `From ${source}`) : null,
+        el('p', { class: 'muted' }, 'Same map and same game version. Small variants of a city (e.g. an event skin) are separate maps and never collide. Replace (recommended) keeps the map up to date with this version of the app.'),
         ...rows.map((r) => r.node),
         conflicts.length > 1
-          ? el('div', { class: 'conflict-all' }, el('span', { class: 'muted' }, 'All:'), ...POLICIES.map(([policy, label]) => el('button', { onclick: () => conflicts.forEach((c) => set(c.id, policy)) }, label)))
+          ? el('div', { class: 'conflict-all' }, el('span', { class: 'muted' }, 'All:'), ...POLICIES.map(([policy, label]) => el('button', { class: policy === 'replace' ? 'recommended' : '', onclick: () => conflicts.forEach((c) => set(c.id, policy)) }, label)))
           : null,
         el(
           'div',
@@ -273,7 +288,6 @@ function askConflicts(conflicts) {
               class: 'primary',
               onclick: () => {
                 overlay.remove();
-                conflictOpen = false;
                 resolve({ choices, notes });
               },
             },
@@ -282,7 +296,7 @@ function askConflicts(conflicts) {
         ),
       ),
     );
-    conflicts.forEach((c) => set(c.id, 'keep'));
+    conflicts.forEach((c) => set(c.id, 'replace'));
     document.body.append(overlay);
   });
 }
@@ -346,32 +360,36 @@ async function removeJob(id) {
 }
 
 /**
- * Follows the server queue until it is empty: progress card for the running job, conflict
- * dialog when it asks, final result when it ends, and the waiting list. One loop at a time.
+ * Follows the server queue until it is empty: progress card for the job extracting, a
+ * conflict dialog for each job that asks (the queue goes on behind it), the result of each
+ * job that ends, and the waiting list. One loop at a time.
  */
 let watching = false;
+const asked = new Set(); // jobs whose conflict dialog is up or answered
 async function watchJobs() {
   if (watching) return;
   watching = true;
   $('job').classList.remove('failed');
   let current = null; // id of the job shown in the progress card
+  let seen = new Set(); // jobs past the queue last tick: their result shows once they leave
   try {
     for (;;) {
       const list = await (await fetch('/api/jobs')).json().catch(() => []);
-      const active = list.find((j) => j.status === 'running' || j.status === 'conflict');
+      const running = list.find((j) => j.status === 'running') ?? list.find((j) => j.status === 'installing');
+      const waiting = list.filter((j) => j.status === 'conflict');
       queued = list.filter((j) => j.status === 'queued');
       renderQueue();
-      // The job shown so far left the active list: show how it ended
-      if (current && current !== active?.id) {
-        await showResult(current);
-        current = null;
-      }
-      if (active) {
-        if (current !== active.id) $('job').classList.remove('failed');
-        current = active.id;
-        await showProgress(active.id);
-      }
-      if (!active && !queued.length && !uploads.length) break;
+      for (const job of waiting) if (!asked.has(job.id)) resolveConflict(job.id);
+      // Jobs that left the list since last tick: show how they ended
+      const now = new Set(list.filter((j) => j.status !== 'queued').map((j) => j.id));
+      for (const id of seen) if (!now.has(id)) await showResult(id);
+      seen = now;
+      if (running) {
+        if (current !== running.id) $('job').classList.remove('failed');
+        current = running.id;
+        await showProgress(running.id);
+      } else if (waiting.length) showJob(`${waiting.length === 1 ? waiting[0].source : `${waiting.length} packages`}: some maps already exist, waiting for your choice`, null);
+      if (!list.length && !uploads.length) break;
       await new Promise((r) => setTimeout(r, 1000));
     }
   } finally {
@@ -380,18 +398,24 @@ async function watchJobs() {
   }
 }
 
+/** Asks what to do with a job's maps that already exist, then lets it install them. */
+async function resolveConflict(jobId) {
+  asked.add(jobId);
+  const res = await fetch(`/api/jobs/${jobId}`);
+  if (!res.ok) return; // server restarted: the job is gone
+  const job = await res.json();
+  if (job.status !== 'conflict') return;
+  const { choices, notes } = await askConflicts(job.conflicts, job.source);
+  await fetch(`/api/jobs/${jobId}/resolve`, { method: 'POST', body: JSON.stringify({ choices, notes }) });
+}
+
 async function showProgress(jobId) {
   const res = await fetch(`/api/jobs/${jobId}`);
   if (!res.ok) return; // server restarted: the job is gone
   const job = await res.json();
-  if (job.status === 'conflict') {
-    showJob(`${job.source}: some maps already exist`, null);
-    const { choices, notes } = await askConflicts(job.conflicts);
-    await fetch(`/api/jobs/${jobId}/resolve`, { method: 'POST', body: JSON.stringify({ choices, notes }) });
-    return;
-  }
+  // (the server's progress follows the extraction's own counts; older servers: by stage)
   const step = Math.max(0, STAGE_ORDER.indexOf(job.stage));
-  showJob(`${job.source}: ${job.label ?? job.stage}`, 0.1 + (0.9 * step) / (STAGE_ORDER.length - 1), job.log.join('\n'));
+  showJob(`${job.source}: ${job.label ?? job.stage}`, job.progress ?? 0.1 + (0.9 * step) / (STAGE_ORDER.length - 1), job.log.join('\n'));
 }
 
 async function showResult(jobId) {

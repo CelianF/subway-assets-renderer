@@ -311,10 +311,23 @@ async function unwrapSinglePackage(apkPath) {
   return unwrapSinglePackage(inner); // a zip in a zip
 }
 
-/** Starts the oldest queued job unless one is already running (one extraction at a time). */
+/**
+ * Share of a job's time each stage takes, for the progress bar (an extraction's own counts
+ * move it within a stage): the mean of a 1.35 APK (load 3 s, project 33, content 15, build 2)
+ * and a 3.41 one (16, 30, 20, 10). A cloud map's download comes first (its own percentage).
+ */
+const STAGE_WEIGHTS = { download: 0.15, load: 0.13, 'export-project': 0.5, 'export-content': 0.27, build: 0.085, install: 0.015 };
+// Milestones of the ripper's load stage (no count there): [line start, share of the stage]
+const LOAD_STEPS = [['[Info] Import: Collecting game files', 0.15], ['[Info] Import: Finished reading files', 0.6], ['[Info] Processing: Main Asset Pairing', 0.75], ['[Info] Processing: Finished processing', 1]];
+const BUILD_LINES = 22; // lines the manifest builder logs for a typical package (19-23)
+
+/**
+ * Starts the oldest queued job unless one is already running (one extraction at a time). A
+ * job waiting for a conflict choice holds only its built maps: the queue goes on meanwhile.
+ */
 function startNextJob() {
   const all = [...jobs.values()];
-  if (all.some((j) => j.status === 'running' || j.status === 'conflict')) return;
+  if (all.some((j) => j.status === 'running')) return;
   const next = all.find((j) => j.status === 'queued');
   if (next) runJob(next, next.apkPath, next.source).finally(startNextJob);
 }
@@ -328,16 +341,31 @@ async function runJob(job, apkPath, sourceName) {
     job.log.push(line);
     if (job.log.length > 400) job.log.shift();
   };
+  // Progress over the stages this job goes through: never backwards
+  const order = [...(job.remote ? ['download'] : []), 'load', 'export-project', 'export-content', 'build', 'install'];
+  const total = order.reduce((n, s) => n + STAGE_WEIGHTS[s], 0);
+  job.progress = 0;
+  const progress = (stage, f) => {
+    const i = order.indexOf(stage);
+    if (i < 0) return;
+    const before = order.slice(0, i).reduce((n, s) => n + STAGE_WEIGHTS[s], 0);
+    job.progress = Math.max(job.progress, (before + STAGE_WEIGHTS[stage] * Math.min(Math.max(f, 0), 1)) / total);
+  };
   const setStage = (s) => {
     job.stage = s;
     job.label = STAGES[s] ?? s;
+    if (s === 'done') job.progress = 1;
+    else progress(s, 0);
   };
   setStage(job.remote ? 'download' : 'load');
   try {
     if (job.remote) {
       // A map the game downloads: its bundle from SYBO + the shared bundles kept from its APK
       const { version, id } = job.remote;
-      apkPath = await prepareRemoteMap(REMOTE, version, id, dir, (f, bytes) => (job.label = `${STAGES.download} (${f != null ? `${Math.round(f * 100)}%` : `${(bytes / 1048576).toFixed(1)} MB`})`));
+      apkPath = await prepareRemoteMap(REMOTE, version, id, dir, (f, bytes) => {
+        job.label = `${STAGES.download} (${f != null ? `${Math.round(f * 100)}%` : `${(bytes / 1048576).toFixed(1)} MB`})`;
+        if (f != null) progress('download', f);
+      });
       sourceName = `SYBO download ${version}`; // the builder reads the game version from the name
       setStage('load');
     } else {
@@ -364,12 +392,22 @@ async function runJob(job, apkPath, sourceName) {
       if (m) setStage(m[1] === 'done' ? 'build' : m[1]); // the job is done only after the build
       else if (line.startsWith('@@error')) job.error = line.slice(8);
       else if (line.startsWith('@@warning')) job.warning = line.slice(10);
-      else log(line);
+      else {
+        log(line);
+        // "ExportProgress: (321/1059) Exporting …": both export stages count their assets
+        const count = line.match(/ExportProgress: \((\d+)\/(\d+)\)/);
+        if (count) progress(job.stage, Number(count[1]) / Number(count[2]));
+        else if (job.stage === 'load') for (const [start, f] of LOAD_STEPS) if (line.startsWith(start)) progress('load', f);
+      }
     });
     await rm(apkPath, { recursive: true, force: true });
 
     setStage('build');
-    await buildManifest({ exportDir, out: splitDir, split: true, sourceName }, log);
+    let built = 0;
+    await buildManifest({ exportDir, out: splitDir, split: true, sourceName }, (line) => {
+      log(line);
+      progress('build', Math.min(++built / BUILD_LINES, 0.95));
+    });
     await rm(exportDir, { recursive: true, force: true }); // ~2 GB of intermediate files
 
     const maps = [];
@@ -388,8 +426,9 @@ async function runJob(job, apkPath, sourceName) {
       job.status = 'conflict';
       job.conflicts = conflicts;
       job.label = 'Waiting for your choice';
+      startNextJob(); // the next package extracts while this one waits
       ({ choices, notes } = await new Promise((resolve) => (job.resolve = resolve)));
-      job.status = 'running';
+      job.status = 'installing'; // (not 'running': that would hold the queue again)
       delete job.conflicts;
     }
 
@@ -558,7 +597,7 @@ export async function handle(req, res) {
       const kit = await latestKit(REMOTE);
       if (!kit) return sendJson(res, 200, { version: null, maps: [] }), true;
       const installed = new Set((await listEnvs()).map((e) => e.theme.toLowerCase().replace(/^\d+\.\d+_/, '')));
-      const pending = new Set([...jobs.values()].filter((j) => j.remote && ['queued', 'running', 'conflict'].includes(j.status)).map((j) => j.remote.id));
+      const pending = new Set([...jobs.values()].filter((j) => j.remote && ['queued', 'running', 'conflict', 'installing'].includes(j.status)).map((j) => j.remote.id));
       const maps = kit.maps.map((m) => ({ id: m.id, installed: installed.has(m.id), pending: pending.has(m.id) }));
       sendJson(res, 200, { version: kit.version, maps });
       return true;
@@ -576,9 +615,9 @@ export async function handle(req, res) {
       sendJson(res, 202, { jobId: id });
       return true;
     }
-    // GET /api/jobs  (running job first, then the queue in order)
+    // GET /api/jobs  (jobs in queue order: running, waiting for a choice, installing, queued)
     if (parts[1] === 'jobs' && parts.length === 2 && req.method === 'GET') {
-      const active = [...jobs.values()].filter((j) => j.status === 'running' || j.status === 'conflict' || j.status === 'queued');
+      const active = [...jobs.values()].filter((j) => ['running', 'conflict', 'installing', 'queued'].includes(j.status));
       sendJson(res, 200, active.map((j) => ({ id: j.id, source: j.source, status: j.status, stage: j.stage })));
       return true;
     }

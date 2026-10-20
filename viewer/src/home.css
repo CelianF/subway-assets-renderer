@@ -7,6 +7,8 @@
   --accent: #ffcc33;
   --accent-ink: #1a1a1a;
   --danger: #ff6b6b;
+  --ok: #4cd97b;
+  --ok-ink: #0f1a12;
 }
 
 * {
@@ -211,13 +213,12 @@ button.danger {
 .city-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   margin: 0 0 10px;
 }
 .city-name {
   font-size: 15px;
-  margin: 0;
+  margin: 0 auto 0 0; /* Share city and Delete city side by side on the right */
 }
 .city-name small {
   color: var(--muted);
@@ -379,9 +380,19 @@ button.danger {
   color: var(--accent-ink);
   border-color: transparent;
 }
-.choice.danger.active {
-  background: var(--danger);
-  color: #fff;
+/* Replace: the recommended choice, in green */
+button.go {
+  background: var(--ok);
+  color: var(--ok-ink);
+  border-color: transparent;
+  font-weight: 600;
+}
+button.recommended {
+  color: var(--ok);
+}
+.choice.recommended.active {
+  background: var(--ok);
+  color: var(--ok-ink);
 }
 .conflict-all {
   display: flex;
