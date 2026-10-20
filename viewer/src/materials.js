@@ -950,12 +950,16 @@ function translateLegacy(def) {
   // the same glow texture: added on, tinted, growing in over its _Falloff distance (a guess:
   // coins glow from afar, the haze would cover them up close)
   if (def.shader === 'SYBO/Bend/Specials/Coin Glow') return { ...def, floats: { ...def.floats, FADE_MODE: 2, _SrcMode: 1, _DstMode: 1, _HasTint: 1, _ZWrite: 0 } };
-  // 1.x water, and 2.x Bend/UVWave (2.5 Bali, 1.100 San Francisco): the same shader renamed,
-  // same properties (2.x moves the texture per vertex; both share the tuned look below)
-  if (/^Bend\/Wave \(UV Distorted\)|^(SYBO\/)?Bend\/UVWave$/.test(def.shader)) {
+  // 1.x water, and 2.x Bend/UVWave (2.5 Bali, 1.100 San Francisco) / SYBO/Bend/Legacy/UVWave
+  // (2.36, 3.38 Iceland, checked compiled): the same shader renamed, same properties (2.x moves
+  // the texture per vertex; both share the tuned look below)
+  if (/^Bend\/Wave \(UV Distorted\)|^(SYBO\/)?Bend\/(Legacy\/)?UVWave$/.test(def.shader)) {
     // 1.x water: scrolling, UV-wobbled texture on a gently swelling surface
     return { ...def, floats: { ...def.floats, _HasScroll: 1, _WaterWave: 1 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
   }
+  // 1.x Bend/Wave (1.60 Iceland's sea), as compiled: the same world-space swell (two sines,
+  // seconds) on a still texture × _Color, no scroll or UV distortion
+  if (def.shader === 'Bend/Wave') return { ...def, floats: { ...def.floats, _WaterSwell: 1 }, renderQueue: def.renderQueue > 0 ? def.renderQueue : 2000 };
   if (!/^(SYBO\/)?Bend\//.test(def.shader) || /Combined|Specials|Common\/ScreenMask|Legacy\/VertexWave/.test(def.shader)) return def;
   const floats = { ...def.floats };
   // 1.x tulips (1.65 Amsterdam): grey petals gradient-mapped from _Color1 to _Color2 (its
@@ -1102,6 +1106,7 @@ export class MaterialLibrary {
     if (defines.REFLECTIONS !== undefined && cubeStrip) defines.CUBE_STRIP = '';
     if (defines.CUBE_STRIP !== undefined && f._DistortedReflect) defines.DISTORTED_REFLECT = '';
     if (f._WaterWave) Object.assign(defines, { WATER_WAVE: '', UV_WOBBLE: '' });
+    if (f._WaterSwell) defines.WATER_WAVE = '';
     // SYBO/Bend/Specials/Water (Ireland's river and sea): the texture scrolls by
     // _TextureScrollSpeed, rippled by a scrolling _DisplaceTex, always tinted by _Color
     const water = def.shader === 'SYBO/Bend/Specials/Water';

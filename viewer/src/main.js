@@ -2070,27 +2070,30 @@ function coveredRanges(items) {
   return ranges;
 }
 
-/** The theme's largest looping box of snow (2.27 North Pole: around the start train only). */
 /**
- * What falls along the whole run: the theme's start-train snow (a big looping box), else
- * its start-train leaves (Vancouver: a 3-unit sphere above the bag, 1-2 s lives), spread
- * over a box around the camera like the snow and living long enough to drift into view.
+ * What falls along the whole run: the theme's start-train snow (a big looping box: 2.27 North
+ * Pole), else its start-train leaves (Vancouver: a 3-unit sphere above the bag, 1-2 s lives),
+ * spread over a box around the camera like the snow and living long enough to drift into view.
  */
 function themeWeather() {
   let best = null;
   let volume = 0;
   let leaves = null;
-  // Leaves only from the start train or the intro: others fall where their piece stands
-  // (1.98 Atlanta's trees, 2.5 Bali's landmark)
+  // Snow and leaves only from the start train or the intro: others fall where their piece
+  // stands (1.98 Atlanta's trees, 2.5 Bali's landmark, every Iceland's landmark snow)
   const slots = Object.assign({}, ...Object.values(manifest.themes?.[state.theme] ?? {}));
   const startFx = new Set([...(slots.prop_train_start ?? []), ...Object.keys(manifest.prefabs).filter((n) => manifest.prefabs[n].chunk?.intro)]);
+  // 1.x pieces hold their effects through placeholders (a separate `snow` prefab)
+  for (const n of [...startFx]) {
+    for (const ph of Object.values(manifest.prefabs[n]?.placeholders ?? {})) for (const o of ph.prefabs ?? []) startFx.add(o.name);
+  }
   for (const [prefab, p] of Object.entries(manifest.prefabs)) {
     for (const [name, def] of Object.entries(p.particles ?? {})) {
-      if (!def.loop) continue;
+      if (!def.loop || !startFx.has(prefab)) continue;
       if (/snow/i.test(name) && def.shape?.type === 5) {
         const v = def.shape.box.reduce((a, b) => a * b, 1);
         if (v > volume) [best, volume] = [def, v];
-      } else if (/lea(f|ves)|petal|blossom/i.test(name) && startFx.has(prefab)) leaves ??= def;
+      } else if (/lea(f|ves)|petal|blossom/i.test(name)) leaves ??= def;
     }
   }
   if (best || !leaves) return best;

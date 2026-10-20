@@ -359,7 +359,7 @@ export function particleLook(materials, name, renderMode = 0) {
   let blend;
   // Blend factors when the material has them (Combined, Bend/Particle Effect…), else from the name
   if (f._SrcMode != null && f._DstMode != null) blend = [f._SrcMode, f._DstMode];
-  else if (/Premultipl/i.test(shader)) blend = [1, 10];
+  else if (/Premultipl|Premultimpl|^Bend\/Particle \(Additive, Alpha Darkening\)$/i.test(shader)) blend = [1, 10]; // ("Premultimplied": the game's spelling, 1.85)
   else if (/Additive/i.test(shader)) blend = [/Premul/i.test(shader) ? 1 : 5, 1];
   else if (/Multiply/i.test(shader)) blend = [2, 0];
   else blend = [5, 10];
@@ -390,6 +390,15 @@ export function particleLook(materials, name, renderMode = 0) {
   else if (distorted === 'Additive') tint = [...main.slice(0, 3).map((v) => v * cm), 1];
   else if (distorted) tint = main;
   if (distorted && /^Additive( \((fog )?falloff\))?$/.test(distorted)) flat = true;
+  // 1.x Bend/Particle (Additive, Alpha Darkening) (1.60) and Bend/Additive, Premultimplied Alpha
+  // Darkening (1.85, 1.117: the same math), compiled code: Blend One
+  // OneMinusSrcAlpha, rgb = texture × particle color × _ColorMultiplier × _TintColor.rgb, alpha ×
+  // _TintColor.a undoubled ("A reduces background"): 1.60 Iceland's lava glow has alpha 0, a pure
+  // add. Read as SrcAlpha/One with the tint doubled, alpha 0 drew nothing
+  if (/^Bend\/(Particle \(Additive, Alpha Darkening\)|Additive, Premultimplied Alpha Darkening)$/.test(shader)) {
+    const t = c._TintColor ?? [1, 1, 1, 1];
+    tint = [...t.slice(0, 3).map((v) => v * cm), t[3] ?? 1];
+  }
   // Combined without VERTEX_COLORS: meshes cut from the city atlas ignore the particle
   // color (3.60 Ireland seagulls: dark grey start color, Sydney's fish: red). The rest keep
   // it, their tints and fades live there: billboards (cloud Space Station's purple fog),
