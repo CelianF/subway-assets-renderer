@@ -1,18 +1,20 @@
 # Subway Assets Renderer
 
-Environment viewer for Subway Surfers maps. Upload an APK, and each map it contains becomes an environment you can explore: the city laid out as a run, with trains, obstacles and signal lights as toggleable layers.
+Explore Subway Surfers maps in 3D. Drop in an APK and each city it contains becomes an environment you can fly through, from the early 1.x versions to the latest world tour stops: the city laid out as a run, with trains, obstacles, coins and signal lights as toggleable layers, animated skylines, water, particles and lighting rebuilt from the game's own data. Reshuffle the run, lay your own map chunk by chunk, take screenshots up to 4K, and share maps as single files.
 
 No game assets are included in this repo. Everything is extracted locally from your own game package.
 
-![Flying through London](docs/screenshots/viewer.png)
+![Flying through Transylvania (3.70)](docs/screenshots/viewer.png)
 
-| Home: your maps | Generation |
+| Main menu: your maps, grouped by city | Generation |
 |---|---|
-| ![Home page with one card per map](docs/screenshots/home.png) | ![Generation panel: seed, sections, building pieces](docs/screenshots/generation.png) |
-| **Rendering** | **Studio** |
-| ![Rendering panel: fog and skyline](docs/screenshots/rendering.png) | ![Studio: top view of the run with placement tools](docs/screenshots/studio.png) |
-| **Settings** | **Controls (H)** |
-| ![Settings menu: camera and screenshot options](docs/screenshots/settings.png) | ![Keyboard and mouse controls](docs/screenshots/help.png) |
+| ![Main menu with maps grouped by city, search and Share city](docs/screenshots/home.png) | ![Generation panel: seed, sections, pieces](docs/screenshots/generation.png) |
+| **View** | **Studio** |
+| ![View panel: fog, skyline, particles and glass](docs/screenshots/rendering.png) | ![Studio: top view of the run with placement tools](docs/screenshots/studio.png) |
+| **Chunks** | **Time** |
+| ![Chunks: your own map piece by piece](docs/screenshots/chunks.png) | ![Time deck: freeze, slow motion and frame stepping](docs/screenshots/time.png) |
+| **Cameras** | **Screenshot options** |
+| ![Cameras: saved camera spots to jump back to](docs/screenshots/cameras.png) | ![Screenshot menu: resolution up to 4K and transparent background](docs/screenshots/screenshot.png) |
 
 ## Download
 
@@ -47,12 +49,13 @@ The app keeps its maps in a "Subway Assets Renderer" folder: `~/Library/Applicat
 
 ## Using it
 
-1. **Home page**: drop one or more `.apk` files (APKPure `.zip` and `.xapk` work too). They queue and extract one after the other, a few minutes each; waiting ones can be removed from the queue. Each map becomes an environment card with Open and Delete.
+1. **Home page**: maps are grouped by city, with a search box; *Share city* and *Delete city* act on a whole city. Drop one or more `.apk` files (APKPure `.zip` and `.xapk` work too). They queue and extract one after the other, a few minutes each; waiting ones can be removed from the queue. Each map becomes an environment card with Open and Delete.
+   Maps imported by an older version of the app are told once to re-import their APK to pick up importer fixes.
    If a map with the same name and game version is already installed, a dialog asks per map: **Ignore** (keep the existing one), **Keep both** (the new one is saved as a copy, with an optional note shown on its card, e.g. "Pride event") or **Replace**. Variants of a city (e.g. an event skin) are separate maps and never collide.
    **Import map** lists the cities the game downloads instead of shipping them in the APK (London, Brawl Stars… 72 in 3.70). Importing one downloads its single bundle from SYBO's server and extracts it with the shared bundles kept from the newest imported APK (`remote/<version>/` in the data folder, ~20 MB).
 2. **Sharing**: *Share* on a card downloads a `.subwaymap` file. Drop it on someone else's home page to install the map, with no APK or extraction needed. A `.subwaymap` is a plain zip of the environment folder plus a `subwaymap.json` header.
 3. **Viewer**: fly around the map. *← Environments* goes back to pick another map.
-   - Drag to look, WASD to move, Space/Shift for up/down, Ctrl to sprint, −/= for fly speed, mouse wheel for field of view. **1 / 2 / 3** open Generation, View and Studio, **Esc** closes them, **Tab** hides the interface, P takes a screenshot (▾ next to it: resolution, transparency), G opens the gallery, H shows help (add `?debug=true` to the URL for the piece browser, B).
+   - Drag to look, WASD to move, Space/Shift for up/down, Ctrl to sprint (x8), −/= for fly speed, mouse wheel for field of view. **1 / 2 / 3** open Generation, View and Studio, **4 / T** opens Time (freeze, slow motion, frame stepping), **5 / C** Cameras (save up to 20 camera spots per map), **6** Chunks, **Esc** closes them, **Tab** hides the interface, P takes a screenshot (▾ next to it: resolution, transparency), G opens the gallery, H shows help (add `?debug=true` to the URL for the piece browser, B).
    - **Generation** (bottom bar, or click the seed in the header): seed, sections, game mode and skin, trains from another map, which section types, landmark and building pieces. **View**: camera (field of view, fly speed, cutaway), fog, skyline, particles, bend and materials.
    - **Studio**: a top view of the run with placement spots. Draw trains from a start cell to an end cell (the longest train that fits is used), drop obstacles, power boxes, pillars and signal lights, or remove them. **Pickups** places the game's coins (drag a line along a track, regular or close; or a jump arc; gold, green, red or Pride coins), power-ups, Mystery Boxes, keys, hunt letters (any letter), the season token (the season's hunt token or the season point) and the event modes' own (Trick or Treat's candies and stinky fish, the race's board charges and boxes); they float over the roof of a parked train like in the game. It can start from the auto-generated run. Placements are saved per map in the browser.
      Pickups come with maps imported from now on; maps imported before borrow them from any map that has them, so importing one APK again is enough.
@@ -80,3 +83,15 @@ APK ──tools/ripper (headless AssetRipper)──▶ Unity project + glb expor
 - **Prefab runtime behaviour**, emulated by the viewer: `RandomChildRandomizer` (one variant per group), `LODGroup` (LOD0 only), TrackController (per-type rail meshes).
 - **Shaders**: `SYBO/Bend/*` keep only their property blocks in the export and are reimplemented in `viewer/src/materials.js`. The math is done in gamma space, like the Unity project.
 - **Layout**: route generation is stripped from the export, so `viewer/src/layout.js` generates plausible runs. Obstacles can also follow the game's 30 chase chunks.
+
+## Classic and recent cities
+
+Maps from game versions 1.x to 3.x are supported. Older versions use different route, skyline and shader systems than recent ones, so the importer and viewer carry rules for each generation (classic skyline layers and sky gradients, 1.x transitions and placeholders, Unity 5 particle formats, legacy water and waves). If a city looks wrong or incomplete, open an issue with the game version.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+[GNU AGPL-3.0](LICENSE). If you distribute a modified version, or let people use one over a network, you must publish your source under the same license. The game's assets and name belong to SYBO and are not part of this project. [AssetRipper](https://github.com/AssetRipper/AssetRipper) (the `third_party` submodule) is GPL-3.0.
