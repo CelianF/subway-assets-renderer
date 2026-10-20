@@ -1549,6 +1549,78 @@ function parseBuiltinMeshes(file, guidIndex) {
   return out;
 }
 
+/**
+ * Renderers with more materials than their mesh has submeshes: Unity draws each extra material
+ * as another pass over the last submesh (2.12 Journey to the East's trains: one submesh,
+ * `trains` then `trains_glass`, a Bend/Displace Reflection layer over the whole body, which the
+ * glb drops). [{ path, materials }] (the extra ones), active and enabled renderers only.
+ */
+function parseExtraPasses(file, guidIndex) {
+  const docs = yamlDocs(read(file));
+  const names = new Map();
+  const active = new Map();
+  const transformOf = new Map();
+  const goOfTransform = new Map();
+  const fatherOf = new Map();
+  const childrenOf = new Map();
+  const meshOf = new Map(); // GameObject -> mesh asset path
+  for (const { doc, kind, fid } of docs) {
+    if (kind === '1') {
+      names.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
+      active.set(fid, !/m_IsActive: 0/.test(doc));
+    }
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    if (kind === '4' || kind === '224') {
+      transformOf.set(go, fid);
+      goOfTransform.set(fid, go);
+      fatherOf.set(fid, doc.match(/m_Father: \{fileID: (\d+)/)?.[1]);
+      childrenOf.set(fid, [...(doc.split('m_Children:')[1]?.split('m_Father')[0] ?? '').matchAll(/fileID: (\d+)/g)].map(([, t]) => t));
+    }
+    if (kind === '33') {
+      const g = doc.match(/m_Mesh: \{fileID: \d+, guid: (\w+)/)?.[1];
+      if (g && guidIndex.has(g)) meshOf.set(go, guidIndex.get(g));
+    }
+  }
+  const pathOf = (go) => {
+    const parts = [];
+    for (let t = transformOf.get(go); t && fatherOf.get(t) && fatherOf.get(t) !== '0'; t = fatherOf.get(t)) {
+      const name = names.get(goOfTransform.get(t));
+      const same = (childrenOf.get(fatherOf.get(t)) ?? []).filter((c) => names.get(goOfTransform.get(c)) === name);
+      parts.unshift(`${name}#${Math.max(0, same.indexOf(t))}`);
+    }
+    return parts.join('/');
+  };
+  const visible = (go) => {
+    for (let t = transformOf.get(go); t && fatherOf.get(t) && fatherOf.get(t) !== '0'; t = fatherOf.get(t)) if (active.get(goOfTransform.get(t)) === false) return false;
+    return true;
+  };
+  const subMeshes = (meshFile) => {
+    if (!meshFile.endsWith('.asset')) return null; // (inside a model file: unknown)
+    const block = read(meshFile).split('\n  m_SubMeshes:')[1]?.split(/\n {2}\w/)[0] ?? '';
+    const n = (block.match(/firstByte:/g) ?? []).length;
+    return n || null;
+  };
+  const out = [];
+  for (const { doc, kind } of docs) {
+    if (kind !== '23' || /\n {2}m_Enabled: 0/.test(doc)) continue;
+    const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+    const mats = [...(doc.split('m_Materials:')[1]?.split(/\n {2}\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => guidIndex.get(g)).filter((p) => p?.endsWith('.mat')).map(stem);
+    const mesh = meshOf.get(go);
+    const n = mesh && subMeshes(mesh);
+    if (!n || mats.length <= n || !visible(go)) continue;
+    // (an extra pass repeating the last material, or a copy of it under another name, redraws
+    // the same pixels: 2.12's cargo trains, and its `trains_glass`, the `trains` material again)
+    const matFile = (m) => [...guidIndex.values()].find((p) => p.endsWith(`${path.sep}${m}.mat`));
+    const look = (m) => {
+      const f = matFile(m);
+      return f ? read(f).replace(/\n {2}m_(Name|CustomRenderQueue|LightmapFlags|DoubleSidedGI|EnableInstancingVariants):.*/g, '') : m;
+    };
+    const extra = mats.slice(n).filter((m) => m !== mats[n - 1] && look(m) !== look(mats[n - 1]));
+    if (extra.length) out.push({ path: pathOf(go), materials: extra });
+  }
+  return out;
+}
+
 function parseMotions(file, guidIndex) {
   const docs = yamlDocs(read(file));
   const names = new Map();
@@ -3622,6 +3694,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     }
     const motions = parseMotions(prefabPath, guidIndex);
     if (motions.length) info.motions = motions;
+    const passes = parseExtraPasses(prefabPath, guidIndex);
+    if (passes.length) {
+      info.extraPasses = passes;
+      info.materials = sortedStrings(new Set([...(info.materials ?? []), ...passes.flatMap((x) => x.materials)]));
+    }
     const builtins = parseBuiltinMeshes(prefabPath, guidIndex);
     if (builtins.length) {
       info.builtinMeshes = builtins;

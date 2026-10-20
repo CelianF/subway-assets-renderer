@@ -24,4 +24,6 @@
 //   waterfall spray, 1.60 Iceland's lava glow, geysers, snow and splashes)
 // 9 (2026-10-20): classic skylines' layer offset read from EnvironmentBackground (1.56+ at
 //   camera + 900: 1.56 Las Vegas' silhouettes were drawn at half their distance)
-export const IMPORT_VERSION = 9;
+// 10 (2026-10-20): extra material passes (renderers with more materials than submeshes:
+//   2.12 Journey to the East's train glass reflection layer was dropped)
+export const IMPORT_VERSION = 10;

@@ -702,6 +702,36 @@ const BUILTIN_GEOMETRY = {
   capsule: () => new THREE.CapsuleGeometry(0.5, 1, 8, 16),
 };
 const builtinGeometries = new Map();
+/**
+ * A renderer's materials past its submeshes: Unity draws each as one more pass over the last
+ * submesh (2.12 Journey to the East's train glass, a reflection layer over the whole body).
+ * A copy of that submesh per extra material, drawn after it.
+ */
+function addExtraPasses(obj, list) {
+  for (const x of list) {
+    // ('' = the prefab's own renderer: its root node, the glb scene's only child)
+    const node = x.path ? nodeByPath(obj, x.path) : obj.children.length === 1 ? obj.children[0] : obj;
+    if (!node) continue; // its variant wasn't picked
+    // The submeshes (the node's mesh, or its primitives), each with the cutaway's floor/upper
+    // halves: the last submesh is every piece of it
+    const isPart = (o) => o.isMesh && !o.userData.extraPass;
+    const subs = isPart(node) ? [node] : node.children.filter(isPart);
+    const last = subs[subs.length - 1];
+    if (!last) continue;
+    const pieces = [last, ...last.children.filter((c) => isPart(c) && /_upper$/.test(c.name))];
+    for (const piece of pieces) {
+      for (const [i, name] of x.materials.entries()) {
+        // Named like the glb's materials, so the library swaps in the real one below
+        const mesh = new THREE.Mesh(piece.geometry, new THREE.MeshBasicMaterial({ name }));
+        mesh.name = `${piece.name}_pass${i + 1}`;
+        mesh.userData.extraPass = true;
+        mesh.renderOrder = piece.renderOrder + 1 + i;
+        piece.add(mesh);
+      }
+    }
+  }
+}
+
 function addBuiltinMeshes(obj, list) {
   for (const b of list) {
     const node = nodeByPath(obj, b.path);
@@ -1217,6 +1247,7 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   else if (prefab.spinners) applyMotions(obj, prefab.spinners.map((sp) => ({ type: 'spin', ...sp })), variantSeed); // 0.1.7 manifests
   if (prefab.trails) applyTrails(obj, prefab.trails);
   if (prefab.builtinMeshes) addBuiltinMeshes(obj, prefab.builtinMeshes);
+  if (prefab.extraPasses) addExtraPasses(obj, prefab.extraPasses);
   obj.traverse((o) => {
     if (!o.isMesh) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
