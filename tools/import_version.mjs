@@ -22,4 +22,6 @@
 // 8 (2026-10-20): Unity 5.x packed particle colors ({ rgba: int }) decoded: they all came out
 //   opaque white (1.56 Las Vegas' cyan fountain spray fading out at the top, 1.45 Kenya's
 //   waterfall spray, 1.60 Iceland's lava glow, geysers, snow and splashes)
-export const IMPORT_VERSION = 8;
+// 9 (2026-10-20): classic skylines' layer offset read from EnvironmentBackground (1.56+ at
+//   camera + 900: 1.56 Las Vegas' silhouettes were drawn at half their distance)
+export const IMPORT_VERSION = 9;

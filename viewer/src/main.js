@@ -2400,7 +2400,9 @@ async function loadSkylineLayers(cfg) {
     });
     const isSkyline = (m) => !manifest.materials[m.name] || /Skyline/.test(manifest.materials[m.name].shader);
     // (≤ 1.43's silhouettes hold their distance in the prefab: 900 ahead, the layer at the camera)
-    const distance = layer.classic ? 0 : cfg.distance + (maxIndex - layer.index) * 150 - (layer.offset ?? 0);
+    // (classic: EnvironmentBackground's layer, at the camera ≤ 1.45, camera + 900 from 1.56;
+    // imports before `layerZ` was read keep it at the camera)
+    const distance = layer.classic ? cfg.layerZ ?? 0 : cfg.distance + (maxIndex - layer.index) * 150 - (layer.offset ?? 0);
     // Where the game has the layer: its objects keep their size and place on screen here
     const near = distance / (cfg.distance - layer.index * (cfg.spacing ?? 5) + (layer.offset ?? 0));
     const own = (m) => {
@@ -2458,7 +2460,7 @@ async function loadSkylineLayers(cfg) {
       for (const name of new Set(layer.classic.cycle.filter(fixed).map((m) => m.name))) {
         const obj = await place(name, -cfg.limits[0], 0, true);
         if (!obj) continue;
-        obj.position.z = 900;
+        obj.position.z = cfg.layerZ == null ? 900 : 0; // (at its layer: older imports hold the layer at the camera)
         obj.scale.set(...(manifest.prefabs[name].rootScale ?? [1, 1, 1]));
         obj.traverse((o) => o.isMesh && (o.renderOrder -= 10)); // behind the silhouettes
       }

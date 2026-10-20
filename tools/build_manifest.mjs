@@ -971,6 +971,32 @@ const legacyKind = (type, density) => LEGACY_ENVIRONMENT_KINDS[type === 1 ? `1/$
 const LEGACY_TRAIN_CARS = { Cargo: ['cargo', 'cargo'], Standard: ['standard', 'standard_front'], Subway: ['sub', 'sub_front'] };
 const LEGACY_TRAINS = [['static', [1, 2, 3, 5]], ['moving', [3, 5]]];
 
+/**
+ * Where 1.x EnvironmentBackground keeps its layer: at the camera (≤ 1.45: 1.33 Las Vegas, 1.45
+ * Kenya) or ahead of it (1.56 Las Vegas, 1.60 Iceland: camera + 900), read from its Update().
+ * The classic silhouettes hold their own distance (~900) inside the models on top of it: put
+ * at the camera, 1.56's skyline was drawn at half its distance.
+ */
+const layerZCache = new Map();
+function classicLayerZ(fromFile) {
+  const assets = fromFile.includes(`${path.sep}Assets${path.sep}`) ? fromFile.slice(0, fromFile.indexOf(`${path.sep}Assets${path.sep}`) + 7) : fromFile;
+  if (layerZCache.has(assets)) return layerZCache.get(assets);
+  let z = 0;
+  const walk = (dir) => {
+    if (!existsSync(dir)) return null;
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { const f = walk(p); if (f) return f; } else if (e.name === 'EnvironmentBackground.cs') return p;
+    }
+    return null;
+  };
+  const cs = walk(path.join(assets, 'Scripts', 'Assembly-CSharp'));
+  const m = cs && read(cs).match(/position\s*=\s*new Vector3\(0f,\s*0f,\s*\w+(?:\.transform)?\.position\.z\s*\+\s*([\d.]+)f\)/);
+  if (m) z = Number(m[1]);
+  layerZCache.set(assets, z);
+  return z;
+}
+
 function parseLegacyTheme(file, guidIndex) {
   const text = read(file);
   const name = text.match(/\n {2}m_Name: (.*)/)[1].trim();
@@ -1171,7 +1197,7 @@ function parseLegacyTheme(file, guidIndex) {
       spacing: number('LayerSpacing', bgText) ?? 5,
       limits: [number('SkylineLeftLimit', bgText) ?? -350, number('SkylineRightLimit', bgText) ?? 750],
       layers,
-      ...(layers.some((l) => l.classic) ? { classic: true } : {}),
+      ...(layers.some((l) => l.classic) ? { classic: true, layerZ: classicLayerZ(file) } : {}),
     };
   }
   // `_baseIgnoredEnvironmentKinds`: sections the game lays no ground or track under, their
@@ -2577,7 +2603,7 @@ function parseClassic(root, project, guidIndex, log) {
       if (cycle.length > 2) layers.push({ name: 'Back', fill: [], singles: [], tint, index: 1, offset: 0, classic: { cycle, slots: [limits[0] * 0.33, 0, limits[1] * 0.5] } });
       else if (fill.length) layers.push({ name: 'Back', fill, singles: [], tint, index: 1, offset: 0 });
       if (monuments.length) layers.push({ name: 'Front', fill: [], singles: [], tint, index: 2, offset: 0, classic: { cycle: monuments, slots: [limits[0]], pick: true } });
-      if (layers.length) look.skylineLayers = { distance: 1000, spacing: 5, limits, layers, ...(layers.some((l) => l.classic) ? { classic: true } : {}) };
+      if (layers.length) look.skylineLayers = { distance: 1000, spacing: 5, limits, layers, ...(layers.some((l) => l.classic) ? { classic: true, layerZ: classicLayerZ(path.join(project, 'Scripts')) } : {}) };
       return look;
     };
     if (skin) Object.assign(config, skinLook(skin));
