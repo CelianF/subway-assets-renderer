@@ -1338,10 +1338,11 @@ function placeMovingTrains(obj) {
 }
 
 /**
- * 2.x+ MovingTrainBlinker: a moving train's lights blink as the runner comes within its
- * trigger (the 200 before the train's meeting point): the lights' color × the config's curve,
- * `loops` times over `duration` each (2.13: on-off-on-off, 0.55 s, 5 times). Each train gets
- * its own lights material (the shared uniforms stay shared).
+ * 2.x+ MovingTrainBlinker: a moving train's lights blink, the lights' color × the config's
+ * curve over `duration` (2.13: on-off-on-off, 0.55 s). The game blinks `loops` times when the
+ * runner comes within its trigger (the 200 before the meeting point); the viewer loops it,
+ * so the blinking shows wherever the camera is, each train from when it was laid. Each train
+ * gets its own lights material (the shared uniforms stay shared).
  */
 const trainBlinkers = new Set(); // { node, mats: [{ mat, base }], cfg, start }
 function attachTrainBlinkers(obj, whole = false) {
@@ -1353,7 +1354,8 @@ function attachTrainBlinkers(obj, whole = false) {
     o.traverse((m) => {
       if (!m.isMesh) return;
       const own = [].concat(m.material).map((mat) => {
-        if (!/Train_lights$/i.test(mat.name ?? '') || !mat.uniforms?.uColor) return mat;
+        // ("<City>_Train_lights"; 3.x Hollywood's is "Hollywood_trains_lights")
+        if (!/Trains?_lights$/i.test(mat.name ?? '') || !mat.uniforms?.uColor) return mat;
         const copy = mat.clone();
         copy.uniforms = { ...mat.uniforms, uColor: { value: mat.uniforms.uColor.value.clone() } };
         copy.userData.blink = true;
@@ -1370,9 +1372,7 @@ function curveAt(keys, t) {
   for (let i = 1; i < keys.length; i++) if (t <= keys[i][0]) return keys[i - 1][1] + ((keys[i][1] - keys[i - 1][1]) * (t - keys[i - 1][0])) / Math.max(keys[i][0] - keys[i - 1][0], 1e-6);
   return keys[keys.length - 1][1];
 }
-const tmpBlink = new THREE.Vector3();
 function updateTrainBlinkers(now) {
-  const runner = camera.position.z + 33; // the game camera rides 33 behind the runner
   for (const b of trainBlinkers) {
     let root = b.node;
     while (root.parent) root = root.parent;
@@ -1380,12 +1380,8 @@ function updateTrainBlinkers(now) {
       trainBlinkers.delete(b);
       continue;
     }
-    const anchor = b.node.getWorldPosition(tmpBlink).z;
-    const inside = runner >= anchor - b.cfg.trigger && runner <= anchor;
-    if (inside && b.start == null) b.start = now;
-    if (runner < anchor - b.cfg.trigger) b.start = null; // back before the trigger: again next time
-    const t = b.start == null ? Infinity : now - b.start;
-    const v = t < b.cfg.duration * b.cfg.loops ? curveAt(b.cfg.curve, (t % b.cfg.duration) / b.cfg.duration) : 1;
+    b.start ??= now;
+    const v = curveAt(b.cfg.curve, ((now - b.start) % b.cfg.duration) / b.cfg.duration);
     for (const { mat, base } of b.mats) mat.uniforms.uColor.value.copy(base).multiplyScalar(v).setW(base.w);
   }
 }
