@@ -1019,10 +1019,28 @@ export async function attachParticles(root, particles, materials, nodeKey, meshG
   root.traverse((o) => {
     const key = nodeKey(o.name);
     if (!key) return;
+    const def = particles[key];
+    // By the parents the systems sit under (3.57 Hollywood's tunnel fires: one system name
+    // for both, in "Hollywood_Fire" and "Hollywood_Fire (1)" holders)
+    if (def.parents) {
+      // ('' = the prefab's root; glb names are sanitized, duplicates suffixed "_1")
+      const parent = !o.parent || o.parent === root ? '' : o.parent.name;
+      const same = (n) => [parent, parent.replace(/_\d+$/, '')].includes(THREE.PropertyBinding.sanitizeNodeName(n));
+      if (def.parents.some(same)) nodes.push([o, def]);
+      return;
+    }
     // A system inside a same-named holder: the holder doesn't get a copy
-    let nested = 0;
-    for (let p = o.parent; p; p = p.parent) if (nodeKey(p.name) === key) nested++;
-    if (nested === (particles[key].nested ?? 0)) nodes.push([o, particles[key]]);
+    if (def.nested != null) {
+      let nested = 0;
+      for (let p = o.parent; p; p = p.parent) if (nodeKey(p.name) === key) nested++;
+      if (nested === def.nested) nodes.push([o, def]);
+      return;
+    }
+    // (imported before parents were kept, `nested` lost to a same-named system: a node
+    // holding a same-named one is a holder)
+    let holder = false;
+    o.traverse((c) => (holder ||= c !== o && nodeKey(c.name) === key));
+    if (!holder) nodes.push([o, def]);
   });
   const made = [];
   for (const [node, def] of nodes) {

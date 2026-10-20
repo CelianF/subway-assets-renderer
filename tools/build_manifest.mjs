@@ -2836,6 +2836,7 @@ function parseParticles(file, guidIndex) {
     return n;
   };
   const out = {};
+  const parents = new Map(); // system name -> names of its systems' parents (same-named systems share an entry)
   for (const { doc, kind } of docs) {
     if (kind !== '198') continue;
     const go = goOf(doc);
@@ -2962,7 +2963,14 @@ function parseParticles(file, guidIndex) {
     // the node with as many same-named ancestors gets it (the holder isn't rotated upright)
     const nested = sameNamedAbove(go);
     if (nested) out[names.get(go)].nested = nested;
+    const father = fatherOf.get(go);
+    parents.set(names.get(go), new Set([...(parents.get(names.get(go)) ?? []), father ? names.get(father) ?? '' : '']));
   }
+  // Two same-named systems share one entry, and `nested` counts for the last one only: 3.57
+  // Hollywood's tunnel fires sit in "Hollywood_Fire" and "Hollywood_Fire (1)" holders, and the
+  // first holder took the system, on the track at the piece's origin. Their parents' names
+  // tell the viewer which nodes hold them
+  for (const [name, set] of parents) if (out[name]) out[name].parents = [...set];
   return out;
 }
 
