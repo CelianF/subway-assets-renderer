@@ -11,7 +11,26 @@ function splitTheme(t) {
   let base = t.replace(/^\d+(?:\.\d+)+_/, '');
   const tags = [];
   for (let m; (m = base.match(/^(.*?[A-Za-z])[_\s-]?(\d{4}|HD|v?\d+(?:\.\d+)+)$/)); base = m[1]) tags.unshift(m[2]);
-  return { name: base.replace(/_/g, ' ').replace(/([a-z])([A-Z0-9])/g, '$1 $2'), tags };
+  return { name: canonicalCity(base.replace(/_/g, ' ').replace(/([a-z])([A-Z0-9])/g, '$1 $2')), tags };
+}
+/**
+ * A known city whatever its spacing and case ("Lasvegas" from a mirror's 1.33 APK, "LasVegas",
+ * "las vegas" → "Las Vegas"): its canonical spelling, then the rest of the name (an event word).
+ */
+function canonicalCity(name) {
+  const compact = (s) => s.replace(/[\s_-]+/g, '').toLowerCase();
+  const n = compact(name);
+  const known = [...new Set([...CITY_WORDS, ...Object.values(REMOTE_NAMES)])].sort((a, b) => b.length - a.length);
+  for (const k of known) {
+    const kc = compact(k);
+    if (!n.startsWith(kc)) continue;
+    // Drop the city's letters (spaces anywhere) from the front of the name, keep the rest as is
+    let i = 0;
+    for (let seen = 0; i < name.length && seen < kc.length; i++) if (!/[\s_-]/.test(name[i])) seen++;
+    const rest = name.slice(i).trim();
+    return rest ? `${k} ${rest.replace(/^\w/, (c) => c.toUpperCase())}` : k;
+  }
+  return name;
 }
 const prettyTheme = (t) => splitTheme(t).name;
 const themeTags = (t) => splitTheme(t).tags.join(' ');
@@ -39,7 +58,7 @@ function el(tag, attrs = {}, ...children) {
 // ---------------------------------------------------------------- environments
 
 // Cities named in more than one word, and event names that belong to another city's group
-const CITY_WORDS = ['New York', 'San Francisco', 'Buenos Aires', 'Las Vegas', 'St Petersburg', 'Mexico City', 'Subway City', 'Hong Kong', 'Little Rock', 'Space Station', 'Brawl Stars', 'Haunted Hood', 'Lunar New Year', 'The North Pole', 'Underwater World', 'Venice Beach', 'Cosmic Crossroads', 'Fantasy Fest', 'Winter Xtreme', 'journey To The East'];
+const CITY_WORDS = ['New York', 'San Francisco', 'Buenos Aires', 'Las Vegas', 'St Petersburg', 'Mexico City', 'Subway City', 'Hong Kong', 'Little Rock', 'Space Station', 'Brawl Stars', 'Haunted Hood', 'Lunar New Year', 'The North Pole', 'Underwater World', 'Venice Beach', 'Cosmic Crossroads', 'Fantasy Fest', 'Winter Xtreme', 'Journey to the East'];
 const CITY_ALIASES = { 'Aloha Hawaii': 'Hawaii' };
 /** The city a map belongs to ("Vancouver Autumn", "Amsterdam Old" → Vancouver, Amsterdam): the tiles' order. */
 function cityOf(theme) {
