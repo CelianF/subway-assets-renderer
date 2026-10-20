@@ -1072,13 +1072,28 @@ function parseLegacyTheme(file, guidIndex) {
   });
   // Before the layered skyline (1.55): background silhouettes and monuments in one color,
   // the sky gradient under _fogGradient*, and fog distances fixed in the shaders
-  if (!layers.length) {
+  const preLayered = !layers.length;
+  if (preLayered) {
     const refs = (key) => [...new Set([...(text.split(`\n  ${key}:`)[1]?.split(/\n {2}\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => prefabName(g)).filter(Boolean))];
     const tint = color('_fogSilhouetteColor');
     const fill = refs('_backgroundPrefabs');
     const singles = refs('_monumentPrefabs');
-    if (fill.length) layers.push({ name: 'Back', fill, singles: [], tint, index: 1, offset: 0 });
-    if (singles.length) layers.push({ name: 'Front', fill: [], singles, tint, index: 2, offset: 0 });
+    // Still EnvironmentBackground (1.49 Hawaii), as ≤ 1.43's skins: three slots taking the list
+    // in turn (mountain, town, mountain), one monument at the left limit, each MoveGameObject
+    // scaled by startScale + x × scaleFactor. Tiled at random, 1.49's mountains never gave
+    // way to the town
+    const ordered = (key) => [...(text.split(`\n  ${key}:`)[1]?.split(/\n {2}\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => guidIndex.get(g)).filter((p) => p?.endsWith('.prefab'));
+    const mover = (file) => {
+      const t = read(file);
+      return { name: stem(file), start: num(t.match(/\n {2}startScale: ([\d.e-]+)/)?.[1] ?? '1'), factor: num(t.match(/\n {2}scaleFactor: ([\d.e-]+)/)?.[1] ?? '0'), speed: num(t.match(/\n {2}vector: \{x: ([\d.e-]+)/)?.[1] ?? '0') };
+    };
+    const cycle = ordered('_backgroundPrefabs').map(mover);
+    const monuments = ordered('_monumentPrefabs').map(mover);
+    const limits = [-350, 750]; // (the scene's EnvironmentBackground, 1.35-1.49)
+    if (cycle.length > 2) layers.push({ name: 'Back', fill: [], singles: [], tint, index: 1, offset: 0, classic: { cycle, slots: [limits[0] * 0.33, 0, limits[1] * 0.5] } });
+    else if (fill.length) layers.push({ name: 'Back', fill, singles: [], tint, index: 1, offset: 0 });
+    if (monuments.length) layers.push({ name: 'Front', fill: [], singles: [], tint, index: 2, offset: 0, classic: { cycle: monuments, slots: [limits[0]], pick: true } });
+    else if (singles.length) layers.push({ name: 'Front', fill: [], singles, tint, index: 2, offset: 0 });
   }
   const config = {
     fog: { color: color('_fogColor'), start: number('_fogStartDistance') ?? 428, end: number('_fogEndDistance') ?? 784 },
@@ -1088,6 +1103,11 @@ function parseLegacyTheme(file, guidIndex) {
       power: 1,
     },
   };
+  // Custom/Sky (≤ 1.54): the gradient starts at _fogGradientOffset in clip-space y (0.5: the
+  // bottom color fills the sky up to the top quarter of the screen); as a full-screen ramp,
+  // 1.49 Hawaii's pink horizon sat behind the track and only the blue showed
+  const skyOffset = number('_fogGradientOffset');
+  if (skyOffset != null && preLayered) config.sky.offset = skyOffset;
   // Distant scenery (1.65 Amsterdam's hedges, trees, windmills: DistantEnvironmentController):
   // objects spawned beside the run on some kinds of stretch, drawn smaller and nearer than
   // they are (the viewer projects them), in their own longer fog
@@ -1146,6 +1166,7 @@ function parseLegacyTheme(file, guidIndex) {
       spacing: number('LayerSpacing', bgText) ?? 5,
       limits: [number('SkylineLeftLimit', bgText) ?? -350, number('SkylineRightLimit', bgText) ?? 750],
       layers,
+      ...(layers.some((l) => l.classic) ? { classic: true } : {}),
     };
   }
   return { name, slots, composites, roles, themedOf, transitions, config, trackInfos: { ...LEGACY_TRACK_INFOS } };
@@ -2507,11 +2528,15 @@ function parseClassic(root, project, guidIndex, log) {
       // No gradient before 1.55: the sky plane sits past the fog's end, so it shows the fog color
       const fogRGB = look.fog.color?.slice(0, 3) ?? null;
       look.sky = { top: rgba('fogGradientTop')?.slice(0, 3) ?? fogRGB, bottom: rgba('fogGradientBottom')?.slice(0, 3) ?? fogRGB, power: 1 };
+      // (Custom/Sky: the gradient from fogGradientOffset up, in clip-space y; 1.35 Hawaii's
+      // pink horizon)
+      const skyOffset = Number(skin.match(/\n {4}fogGradientOffset: ([\d.e-]+)/)?.[1]);
+      if (rgba('fogGradientTop') && Number.isFinite(skyOffset)) look.sky.offset = skyOffset;
       const tint = rgba('fogSilhouetteColor');
       const layers = [];
       const fill = refs('backgroundPrefabs');
       const singles = refs('monumentPrefabs');
-      // EnvironmentBackground (≤ 1.43): three background slots (leftLimit × 0.33, 0, rightLimit
+      // EnvironmentBackground (≤ 1.49): three background slots (leftLimit × 0.33, 0, rightLimit
       // × 0.5) taking the list in turn from a random start (an empty prefab is a gap), one
       // monument at the left limit; each MoveGameObject scales its model by startScale + x ×
       // scaleFactor; the meshes sit 900 ahead in their prefabs, the background at the camera.
@@ -2519,7 +2544,7 @@ function parseClassic(root, project, guidIndex, log) {
       const ordered = (key) => [...(skin.split(`\n    ${key}:`)[1]?.split(/\n {4}\w/)[0] ?? '').matchAll(GUID_RE_G)].map(([, g]) => guidIndex.get(g)).filter((p) => p?.endsWith('.prefab'));
       const mover = (file) => {
         const t = read(file);
-        return { name: stem(file), start: Number(t.match(/\n {2}startScale: ([\d.e-]+)/)?.[1] ?? 1), factor: Number(t.match(/\n {2}scaleFactor: ([\d.e-]+)/)?.[1] ?? 0) };
+        return { name: stem(file), start: Number(t.match(/\n {2}startScale: ([\d.e-]+)/)?.[1] ?? 1), factor: Number(t.match(/\n {2}scaleFactor: ([\d.e-]+)/)?.[1] ?? 0), speed: Number(t.match(/\n {2}vector: \{x: ([\d.e-]+)/)?.[1] ?? 0) };
       };
       const bgScene = docs.find((d) => d.kind === '114' && /\n {2}leftLimit: /.test(d.doc))?.doc ?? '';
       const limits = [Number(bgScene.match(/\n {2}leftLimit: ([\d.e-]+)/)?.[1] ?? -350), Number(bgScene.match(/\n {2}rightLimit: ([\d.e-]+)/)?.[1] ?? 750)];

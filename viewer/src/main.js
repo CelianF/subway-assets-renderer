@@ -6,7 +6,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, unruledShaders, setBendDegrees, globals, setFog, createSky, setTrackCuts, setChallengeRunners, setChallengeRunner, MAX_ALT_ZONES, setReversedDepth, texturesReady, zoneClipped, makeZoneUniforms } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs, chunkCards, chunkLength, checkPlan, normalizePlan, sectionPiecesOf, variantLabel, mainRandomGroup, MAX_SECTION_LENGTH } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs, chunkCards, chunkLength, checkPlan, normalizePlan, sectionPiecesOf, variantLabel, mainRandomGroup, prefabVariants, MAX_SECTION_LENGTH } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
@@ -376,7 +376,8 @@ function applyRandomizers(obj, randomizers, seed, prefabName = '', forced = null
       // Showcase: this variant (by name)
       const want = THREE.PropertyBinding.sanitizeNodeName(forced[groupName]);
       keep = children.find((c) => c.name === want || c.name.replace(/_\d+$/, '') === want) ?? null;
-    } else if (rng() < probability) {
+    } else if (rng() < probability || state.gen.showcase) {
+      // (showcase: groups it can't force, on/off ones like 40% graffiti, always keep a child)
       if (weights) {
         // WeightedChildRandomizer: by the weight of each child (by name)
         // (the exact name first: "event_04" isn't "event" + a loader's duplicate suffix, which
@@ -1995,12 +1996,14 @@ function trainTheme() {
 function inspectLayout(names) {
   if (state.inspectTogether) return names.map((prefab) => ({ prefab, layer: 'environment', pos: [0, 0, 0], variantSeed: state.seed }));
   let x = 0;
-  return names.map((prefab) => {
+  // Showcase: one copy per variant of each piece, side by side (3.41 Aloha Hawaii's torch is
+  // only in high_02_left's second variant, which the fixed seed never showed)
+  return names.flatMap((prefab) => (state.gen.showcase ? prefabVariants(manifest, prefab) : [null]).map((variants) => {
     const bb = manifest.prefabs[prefab]?.bbox ?? [[-50, 0, 0], [50, 0, 0]];
     const pos = [x - bb[0][0], 0, 0];
     x += bb[1][0] - bb[0][0] + 20;
-    return { prefab, layer: 'environment', pos, variantSeed: state.seed };
-  });
+    return { prefab, layer: 'environment', pos, variantSeed: state.seed, ...(variants ? { variants } : {}) };
+  }));
 }
 
 /** Orbit camera around the inspected pieces. */
@@ -2406,16 +2409,34 @@ async function loadSkylineLayers(cfg) {
     // ≤ 1.43 EnvironmentBackground: its slots take the list in turn from a random start (an
     // empty prefab leaves a gap); a monument shows alone at the left limit. Each model scaled
     // by startScale + x × scaleFactor (MoveGameObject), the game's left being +x here
+    // The silhouettes then slide right with the run (MoveGameObject: vector.x × camera speed);
+    // every 2 s, one past the right limit goes back to the left limit, hidden, and the next in
+    // the list shows (1.49 Hawaii: mountains, then the town, in turn)
     if (layer.classic) {
       const { cycle, slots, pick } = layer.classic;
-      let index = Math.floor(rng() * Math.max(cycle.length - 1, 1));
-      for (const x of slots) {
-        if (!pick) index = index === cycle.length - 1 ? 0 : index + 1;
-        const m = cycle[index];
-        const obj = await place(m.name, -x);
-        const model = obj?.children[0] ?? obj;
-        model?.scale.multiplyScalar(m.start + x * m.factor);
+      const entries = [];
+      for (const m of cycle) {
+        // (an empty prefab keeps its turn as a gap: 1.35 Hawaii's Monument3)
+        const obj = (await place(m.name, -cfg.limits[0])) ?? new THREE.Object3D();
+        const model = obj.children[0] ?? obj;
+        entries.push({ obj, model, m, rest: model.scale.clone(), x: cfg.limits[0] });
       }
+      const show = (e, on, x = e.x) => {
+        e.on = on;
+        e.x = x;
+        e.obj.visible = on;
+        e.obj.position.x = -x;
+        e.model.scale.copy(e.rest).multiplyScalar(Math.max(e.m.start + x * e.m.factor, 0));
+      };
+      for (const e of entries) show(e, false);
+      let next = Math.floor(rng() * Math.max(entries.length - 1, 1));
+      for (const x of slots) {
+        if (!entries.length) break;
+        if (!pick) next = next === entries.length - 1 ? 0 : next + 1;
+        show(entries[next], true, x);
+      }
+      // (the game goes on from the last placed one: it shows again, already there)
+      group.userData.classic = { entries, next, show, limits: cfg.limits, wait: 0 };
     }
     // Fill: side by side across a wide span, each tile one of the fill prefabs
     const span = 4000;
@@ -2445,9 +2466,31 @@ async function loadSkylineLayers(cfg) {
   }
 }
 
+let skylineLast = null; // { z, t }: the camera's speed along the run moves classic silhouettes
 function updateSkyline() {
   updateDistantObjects();
-  for (const obj of skylineGroup.children) obj.position.set(0, 0, camera.position.z + obj.userData.distance * state.skylineDistance);
+  const now = performance.now() / 1000;
+  const dt = skylineLast ? Math.min(now - skylineLast.t, 0.1) : 0;
+  const speed = dt > 0 ? Math.max(camera.position.z - skylineLast.z, 0) / dt : 0;
+  skylineLast = { z: camera.position.z, t: now };
+  for (const obj of skylineGroup.children) {
+    obj.position.set(0, 0, camera.position.z + obj.userData.distance * state.skylineDistance);
+    const classic = obj.userData.classic;
+    if (!classic?.entries.length) continue;
+    // (only shown ones move: the game's hidden objects don't update)
+    if (speed > 0) for (const e of classic.entries) if (e.on) classic.show(e, true, e.x + (e.m.speed ?? 0.1) * speed * dt);
+    if ((classic.wait += dt) < 2) continue;
+    classic.wait = 0;
+    for (const e of classic.entries) {
+      if (e.x <= classic.limits[1]) continue;
+      classic.show(e, false, classic.limits[0]);
+      e.model.scale.setScalar(0);
+      const n = classic.entries[classic.next];
+      classic.show(n, true, n === e ? classic.limits[0] : n.x);
+      if (n === e) e.model.scale.setScalar(0); // (MoveGameObject rescales it on its next move)
+      classic.next = classic.next === classic.entries.length - 1 ? 0 : classic.next + 1;
+    }
+  }
 }
 
 /** Hides the geometry islands (buildings, train cars, …) the camera is inside. */
@@ -3292,7 +3335,7 @@ const debugMenu = createSettings(
             {
               type: 'toggle',
               label: 'Show everything',
-              title: 'No randomness: every building piece, section and landmark variant once, one after the other',
+              title: 'No randomness: every building piece, section and landmark variant once, one after the other; viewed pieces show every variant side by side',
               obj: state.gen,
               key: 'showcase',
               // A debug mode for going through maps: stays on from one map to the next

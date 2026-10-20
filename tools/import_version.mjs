@@ -11,4 +11,7 @@
 //   "random_fish" group's list replaced the first, which held it)
 // 4 (2026-10-14): QualityToggle's low-end alternate hidden (1.61 Havana's FX_train_ani1/2 drew
 //   train_standard and train_low together)
-export const IMPORT_VERSION = 4;
+// 5 (2026-10-20): ≤ 1.54 sky gradient offset (1.35/1.49 Hawaii's pink horizon was off screen);
+//   1.44-1.54 skylines laid in EnvironmentBackground's slots, with each mover's speed (1.49
+//   Hawaii's mountains and town never took turns)
+export const IMPORT_VERSION = 5;

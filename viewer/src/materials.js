@@ -571,7 +571,11 @@ ${CUT_MAIN}
   c *= uColor;
 #endif
 #ifdef USE_COLOR
+#ifdef ADD_COLOR
+  c.rgb += vColor;
+#else
   c.rgb *= vColor;
+#endif
 #endif
 #if defined(USE_COLOR_ALPHA) && FADE_MODE == 1
   c.a *= vColorA;
@@ -730,12 +734,15 @@ uniform vec3 uBottom;
 uniform float uPower;
 uniform sampler2D uMap;
 uniform vec2 uMapRange; // texel centers at the bottom and top: no repeat bleed
+uniform float uOffset; // ≤ 1.54 Custom/Sky: where the ramp starts in clip-space y (-1 = off)
 varying float vY;
 void main() {
   float y = clamp(vY, 0.0, 1.0);
   // TEXTURE_ENABLED: screen-space vertical gradient texture (flipY off: Unity's v = 1 - ours)
   vec3 t = texture2D(uMap, vec2(0.5, 1.0 - mix(uMapRange.x, uMapRange.y, y))).rgb;
-  gl_FragColor = vec4(t * mix(uBottom, uTop, pow(y, uPower)), 1.0);
+  // Custom/Sky: clamp((clipY - offset) / (1 - offset)); offset -1 is the plain screen ramp
+  float k = uOffset > -1.0 ? clamp((y * 2.0 - 1.0 - uOffset) / (1.0 - uOffset), 0.0, 1.0) : y;
+  gl_FragColor = vec4(t * mix(uBottom, uTop, pow(k, uPower)), 1.0);
 }
 `;
 
@@ -750,6 +757,7 @@ export function createSky() {
       uPower: { value: 3 },
       uMap: { value: WHITE },
       uMapRange: { value: new THREE.Vector2(0, 1) },
+      uOffset: { value: -1 },
     },
     depthTest: false,
     depthWrite: false,
@@ -758,7 +766,8 @@ export function createSky() {
   sky.frustumCulled = false;
   sky.renderOrder = -10000;
   /** @param textureUrl the sky's gradient texture (resolved url), if it has one */
-  sky.setColors = ({ top, bottom, power } = {}, textureUrl = null) => {
+  sky.setColors = ({ top, bottom, power, offset } = {}, textureUrl = null) => {
+    mat.uniforms.uOffset.value = offset ?? -1;
     if (top) mat.uniforms.uTop.value.setRGB(top[0], top[1], top[2]);
     if (bottom) mat.uniforms.uBottom.value.setRGB(bottom[0], bottom[1], bottom[2]);
     if (power) mat.uniforms.uPower.value = power;
@@ -962,8 +971,9 @@ function translateLegacy(def) {
   // Bend/UVScroll scrolls by _Time.y (seconds), the Combined shader by _Time.x (seconds / 20):
   // 2.11 Space Station's lane glow is 0.12 there, 2.4 in 3.70's Combined copy. 1.x
   // "UV Scroll (Screen)/Simple" and "/Advanced" use _Time.yy too (1.90 Havana's waterfall and
-  // fountain crept at a twentieth of the game's speed)
-  if (/^Bend\/(UVScroll|UV Scroll \(Screen\)\/\w+)$/.test(def.shader) && def.colors?._ScrollSpeed) {
+  // fountain crept at a twentieth of the game's speed), and "UV Lava Scroll" (1.70 Hawaii's
+  // volcano lava lay still)
+  if (/^Bend\/(UVScroll|UV Lava Scroll|UV Scroll \(Screen\)\/\w+)$/.test(def.shader) && def.colors?._ScrollSpeed) {
     return { ...def, floats, renderQueue: def.renderQueue > 0 ? def.renderQueue : floats._DstMode ? 3000 : 2000, colors: { ...def.colors, _ScrollSpeed: def.colors._ScrollSpeed.map((v) => v * 20) } };
   }
   // Legacy transparent queues were left at -1 (shader default)
@@ -1114,6 +1124,9 @@ export class MaterialLibrary {
     const wave2x = def.shader === 'SYBO/Bend/VertexWave' || /^Bend\/Wave \(Vertex Color Control|^SYBO\/Bend\/Legacy\/VertexWave/.test(def.shader);
     if (wave2x) defines.WAVE_2X = '';
     if (def.shader === 'SYBO/Bend/Specials/Coin Glow') defines.DISTANCE_FADE = '';
+    // 1.x Bend/UV Lava Scroll as compiled: texture + vertex color (the glow at the lava's edges)
+    const addColor = def.shader === 'Bend/UV Lava Scroll';
+    if (addColor) defines.ADD_COLOR = '';
 
     const tint = color4(c._Color);
     const mat = new THREE.ShaderMaterial({
@@ -1122,7 +1135,7 @@ export class MaterialLibrary {
       clipping: true,
       vertexShader: COMBINED_VERTEX,
       fragmentShader: COMBINED_FRAGMENT,
-      vertexColors: on('_HasVertexColors', 'VERTEX_COLORS_ENABLED'),
+      vertexColors: addColor || on('_HasVertexColors', 'VERTEX_COLORS_ENABLED'),
       uniforms: {
         ...globals,
         uMap: { value: this.tex(def, '_MainTex') ?? WHITE },
