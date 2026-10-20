@@ -938,6 +938,8 @@ class Emitter {
       // World up in the emitter's frame (3.60 Ireland seagull emitters are turned 90° on X)
       const up = this.gravityLocal ? this.gravityLocal.clone().negate().normalize() : new THREE.Vector3(0, 1, 0);
       const byVelocity = d.render.alignment === 4;
+      const spinQ = new THREE.Quaternion();
+      const euler = new THREE.Euler(0, 0, 0, 'YXZ');
       const counts = this.parts.map(() => 0);
       const total = this.parts.reduce((n, p) => n + p.weight, 0);
       for (let i = 0; i < this.count; i++) {
@@ -957,6 +959,10 @@ class Emitter {
           // lasers); meshes modeled standing up (rising balloons) keep their top that way
           if (part.upright) q.setFromUnitVectors(UP, axis.normalize());
           else q.setFromRotationMatrix(facing.lookAt(axis, zero, up));
+          // then turned by its start rotation in that frame (Z, then X, then Y): 3.57
+          // Hollywood's lasers are flat ribbons turned ±90° about their path; unturned they
+          // lay flat and showed edge-on, thin
+          if (this.rot[i] || this.tilt[i * 2] || this.tilt[i * 2 + 1]) q.multiply(spinQ.setFromEuler(euler.set(this.tilt[i * 2], this.tilt[i * 2 + 1], this.rot[i])));
         } else {
           axis.fromArray(this.axis, i * 3);
           q.setFromAxisAngle(axis, this.rot[i]);
