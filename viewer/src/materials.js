@@ -589,7 +589,11 @@ ${CUT_MAIN}
   vec3 refl = texture2D(uRefTex, n.xy * 0.5 + 0.5).rgb;
 #endif
 #ifdef ALTERNATE
+#ifdef CUBE_STRIP
+  refl = mix(refl, sampleCubeStrip(uAltRef, reflect(viewDir, normalize(vNormalW))), altRatio());
+#else
   refl = mix(refl, texture2D(uAltRef, n.xy * 0.5 + 0.5).rgb, altRatio());
+#endif
 #endif
 #ifdef DISTORTED_REFLECT
   // 1.x "Unlit with overlay and Reflection": faint head-on, strong at grazing angles, and
@@ -1094,7 +1098,10 @@ export class MaterialLibrary {
     if (on('_HasFogMultiplier', 'FOG_MULTIPLIER_ENABLED')) defines.FOG_MULTIPLIER = '';
     const refTex = this.tex(def, '_RefCube');
     if (on('_HasReflections', 'REFLECTIONS_ENABLED') && refTex) defines.REFLECTIONS = '';
-    if (defines.REFLECTIONS !== undefined && def.textures._RefCube?.cubeStrip) defines.CUBE_STRIP = '';
+    // SYBO/Bend/Combined's _RefCube is a cubemap (declared Cube), exported as a 1:6 strip: read
+    // as a matcap by the view normal, 3.57 Hollywood's green train windscreen smeared the strip
+    const cubeStrip = def.textures._RefCube?.cubeStrip || /^SYBO\/Bend\/Combined$/.test(def.shader);
+    if (defines.REFLECTIONS !== undefined && cubeStrip) defines.CUBE_STRIP = '';
     if (defines.CUBE_STRIP !== undefined && f._DistortedReflect) defines.DISTORTED_REFLECT = '';
     if (f._WaterWave) Object.assign(defines, { WATER_WAVE: '', UV_WOBBLE: '' });
     // SYBO/Bend/Specials/Water (Ireland's river and sea): the texture scrolls by
