@@ -404,6 +404,7 @@ varying vec2 vUvRaw;
 uniform float uMultiplier;
 uniform sampler2D uRefTex;
 uniform vec4 uRefColor;
+uniform vec3 uRefDir; // SYBO/Bend/Combined's _RefDir, in viewer space (x mirrored)
 uniform vec4 uRimColor;
 uniform float uRimPower;
 uniform float uRimAmount;
@@ -581,14 +582,22 @@ ${CUT_MAIN}
 #ifdef REFLECTIONS
 #ifdef CUBE_STRIP
   vec3 viewDir = normalize(vWorld - cameraPosition);
-  vec3 refl = sampleCubeStrip(uRefTex, reflect(viewDir, normalize(vNormalW)));
+#ifdef REF_DIR
+  // SYBO/Bend/Combined, compiled code of 3.35: the view direction mirrored across the
+  // material's fixed _RefDir plane, NOT the mesh normal (one look over a whole pane; by the
+  // normal, 3.57 Hollywood's and 3.35 Istanbul's angled windscreen panes each bent it into streaks)
+  vec3 refDir = reflect(viewDir, uRefDir);
+#else
+  vec3 refDir = reflect(viewDir, normalize(vNormalW));
+#endif
+  vec3 refl = sampleCubeStrip(uRefTex, refDir);
 #else
   vec3 n = normalize(vNormalV);
   vec3 refl = texture2D(uRefTex, n.xy * 0.5 + 0.5).rgb;
 #endif
 #ifdef ALTERNATE
 #ifdef CUBE_STRIP
-  refl = mix(refl, sampleCubeStrip(uAltRef, reflect(viewDir, normalize(vNormalW))), altRatio());
+  refl = mix(refl, sampleCubeStrip(uAltRef, refDir), altRatio());
 #else
   refl = mix(refl, texture2D(uAltRef, n.xy * 0.5 + 0.5).rgb, altRatio());
 #endif
@@ -597,6 +606,9 @@ ${CUT_MAIN}
   // 1.x "Unlit with overlay and Reflection": faint head-on, strong at grazing angles, and
   // scaled by the texture's brightness (dark paint barely reflects)
   c.rgb += refl * uRefColor.rgb * (1.0 - clamp(-dot(viewDir, normalize(vNormalW)), 0.0, 1.0)) * 0.495 * (base.r + base.g + base.b);
+#elif defined(REF_DIR)
+  // (Combined: added, × _RefColor × the texture's brightness, (r + g + b) × 0.495)
+  c.rgb += refl * uRefColor.rgb * 0.495 * (base.r + base.g + base.b);
 #else
   c.rgb += refl * uRefColor.rgb * uRefColor.a;
 #endif
@@ -1104,6 +1116,7 @@ export class MaterialLibrary {
     // as a matcap by the view normal, 3.57 Hollywood's green train windscreen smeared the strip
     const cubeStrip = def.textures._RefCube?.cubeStrip || /^SYBO\/Bend\/Combined$/.test(def.shader);
     if (defines.REFLECTIONS !== undefined && cubeStrip) defines.CUBE_STRIP = '';
+    if (defines.CUBE_STRIP !== undefined && /^SYBO\/Bend\/Combined$/.test(def.shader)) defines.REF_DIR = '';
     if (defines.CUBE_STRIP !== undefined && f._DistortedReflect) defines.DISTORTED_REFLECT = '';
     if (f._WaterWave) Object.assign(defines, { WATER_WAVE: '', UV_WOBBLE: '' });
     if (f._WaterSwell) defines.WATER_WAVE = '';
@@ -1163,6 +1176,7 @@ export class MaterialLibrary {
         uDisplaceStrength: { value: f._DisplaceStrength ?? 0 },
         uRefTex: { value: refTex ?? WHITE },
         uRefColor: { value: color4(c._RefColor, [1, 1, 1, 0]) },
+        uRefDir: { value: new THREE.Vector3(-(c._RefDir?.[0] ?? 1), c._RefDir?.[1] ?? 0, c._RefDir?.[2] ?? 0) },
         uRimColor: { value: color4(c._RimColor) },
         uRimPower: { value: f._RimPower ?? 2.75 },
         uRimAmount: { value: f._RimAmount ?? 1.5 },
