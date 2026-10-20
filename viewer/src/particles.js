@@ -366,16 +366,36 @@ export function particleLook(materials, name, renderMode = 0) {
   const [src, dst] = blend;
   const fadeMode = src === 2 ? 3 : dst === 1 ? 2 : src === 1 && dst === 10 ? 4 : 1;
   // Legacy particle shaders double _TintColor (0.5 grey = unchanged)
-  let tint = c._TintColor ? c._TintColor.map((v) => v * 2) : c._MainColor && /Additive/i.test(shader) ? [...c._MainColor.slice(0, 3), 1] : c._Color ?? [1, 1, 1, 1];
+  // and so does 2.x SYBO/Bend/Particles AlphaBlended its _Color (2.16 Houston's smoke at 0.5:
+  // half as opaque and never white at the top)
+  let tint = c._TintColor ? c._TintColor.map((v) => v * 2) : c._MainColor && /Additive/i.test(shader) ? [...c._MainColor.slice(0, 3), 1] : c._Color && /Bend\/Particles AlphaBlended$/.test(shader) ? c._Color.map((v) => v * 2) : c._Color ?? [1, 1, 1, 1];
   // Combined's color multiplier (3.12 Copenhagen's firework rays: 1.5, gold-white, not orange)
   const mult = f._HasMultiplier || def?.keywords?.includes('MULTIPLIER_ENABLED') ? f._Multiplier ?? 1 : 1;
   if (mult !== 1) tint = [...tint.slice(0, 3).map((v) => v * mult), tint[3] ?? 1];
+  // Unity's Mobile particle shaders have no tint: texture × particle color (1.93 Hong Kong's
+  // stars keep a dim _TintColor from another shader)
+  if (/^Mobile\/Particles\//.test(shader)) tint = [1, 1, 1, 1];
+  // 2.x Bend/Additive and Bend/Displace AlphaBlend ignore the particle color: texture ×
+  // _Color × _Color.a (× _ColorMultiplier), compiled code of 2.10
+  let flat = /^(SYBO\/)?Bend\/(Additive|Displace AlphaBlend)$/.test(shader);
+  if (flat) tint = (c._Color ?? [1, 1, 1, 1]).map((v) => v * (c._Color?.[3] ?? 1) * (f._ColorMultiplier ?? 1));
+  // 1.x Custom/Distorted particle shaders, compiled code of 1.111: Alpha Blended doubles
+  // _TintColor and multiplies; Additive (soft) has no tint (1.111 Houston's fountains kept a
+  // _TintColor from another shader); plain and falloff Additive ignore the particle color
+  const distorted = shader.match(/^Custom\/Distorted\/(Alpha Blended|Additive \(soft\)|Additive|Additive \((?:fog )?falloff\))$/)?.[1];
+  const cm = f._ColorMultiplier ?? 1;
+  const main = [...(c._MainColor ?? [1, 1, 1]).slice(0, 3), 1];
+  if (distorted === 'Alpha Blended') tint = (c._TintColor ?? [0.5, 0.5, 0.5, 0.5]).map((v) => v * 2 * cm);
+  else if (distorted === 'Additive (soft)') tint = [cm, cm, cm, 1];
+  else if (distorted === 'Additive') tint = [...main.slice(0, 3).map((v) => v * cm), 1];
+  else if (distorted) tint = main;
+  if (distorted && /^Additive( \((fog )?falloff\))?$/.test(distorted)) flat = true;
   // Combined without VERTEX_COLORS: meshes cut from the city atlas ignore the particle
   // color (3.60 Ireland seagulls: dark grey start color, Sydney's fish: red). The rest keep
   // it, their tints and fades live there: billboards (cloud Space Station's purple fog),
   // white masks (Cambridge's black bats), fading meshes (Cambridge's tube light beam)
   const atlas = /_environment[^/]*$/i.test(def?.textures?._MainTex?.url ?? '');
-  const vertexColors = shader !== 'SYBO/Bend/Combined' || renderMode !== 4 || !atlas || !!f._HasVertexColors || !!def?.keywords?.includes('VERTEX_COLORS_ENABLED');
+  const vertexColors = !flat && (shader !== 'SYBO/Bend/Combined' || renderMode !== 4 || !atlas || !!f._HasVertexColors || !!def?.keywords?.includes('VERTEX_COLORS_ENABLED'));
   // Pre-3.0 particle shaders (Bend/Particle_AlphaBlend) name their texture _Texture
   let map = def ? materials.tex(def, '_MainTex') ?? materials.tex(def, '_Texture') : null;
   // A mesh particle whose material has no texture is plain (Unity's "white" default), not

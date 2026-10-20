@@ -14,4 +14,9 @@
 // 5 (2026-10-20): ≤ 1.54 sky gradient offset (1.35/1.49 Hawaii's pink horizon was off screen);
 //   1.44-1.54 skylines laid in EnvironmentBackground's slots, with each mover's speed (1.49
 //   Hawaii's mountains and town never took turns)
-export const IMPORT_VERSION = 5;
+// 6 (2026-10-20): 1.x Rotate scripts (1.93 Hong Kong's landmark lasers sweep); 1.55+ skyline
+//   layers keep their speed and objects their drift (laid and moved as the game does)
+// 7 (2026-10-20): 1.x _baseIgnoredEnvironmentKinds lay no track (1.111 Houston's rails
+//   through water); 2.x+ decorations no chunk or config spawns are "unplaced" (2.16 Houston's
+//   truck in the trees)
+export const IMPORT_VERSION = 7;

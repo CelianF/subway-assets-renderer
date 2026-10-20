@@ -987,8 +987,10 @@ export function generateLayout(
     }
   }
 
-  // Event / extra decorations (decoration_event_*, decoration_extra_*): the game places
-  // them from stripped code, so they are scattered plausibly by footprint here.
+  // Event / extra decorations (decoration_event_*, decoration_extra_*): scattered plausibly by
+  // footprint, for games where nothing says where they go. 2.x+ themes list them, but no
+  // chunk or config names their types (2.10, 2.16, 2.37): the importer marks those
+  // "unplaced", and they show only where pieces model them in.
   const eventSlots = Object.keys(slots).filter((s) => /^decoration_(event|extra)_/.test(s) && has(s));
   // Decorations also modeled inside boundary pieces (manifest "embedded": Edinburgh's
   // barrels, Buenos Aires' event streets) are already placed by those pieces; scattered,
@@ -999,7 +1001,11 @@ export function generateLayout(
     const fullWidth = bb && bb[0][0] < -60 && bb[1][0] > 60;
     return !!bb && !fullWidth && bb[1][2] - bb[0][2] >= SEGMENT - 10;
   };
-  const embedded = (s) => slots[s].every((n) => manifest.prefabs[n]?.embedded);
+  // Never scattered either: decorations the game spawns from nothing but the theme's list
+  // (manifest "unplaced", 2.16 Houston's truck in the trees) and transition pieces, which
+  // only go where a boundary run starts or ends (its tube entrance's flag gate)
+  const transitionPieces = new Set((manifest.boundaries?.[themeName]?.transitions ?? []).map((t) => t.prefab));
+  const embedded = (s) => slots[s].every((n) => manifest.prefabs[n]?.embedded || manifest.prefabs[n]?.unplaced || transitionPieces.has(n));
   // Picked among all of them so the free ones keep their odds; embedded picks place nothing
   const decoSlots = eventSlots.filter((s) => !/tube_(start|end)/i.test(slots[s][0]));
   function decorate(segZ) {

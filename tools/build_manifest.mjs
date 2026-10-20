@@ -1068,6 +1068,11 @@ function parseLegacyTheme(file, guidIndex) {
       // (1.81 Cairo's Sun layer: up and to the left, in its own materials)
       shift: ['x', 'y'].map((k) => number(k, (layer.match(/_offsetFromLayerDefault: \{[^}]*\}/)?.[0] ?? '').replace(/[{},]/g, '\n')) ?? 0),
       ...(/_useCommonMaterial: 0/.test(layer) ? { own: true } : {}),
+      // (MoveGameObject's SpeedMultiplier: the layer drifts at camera speed × this × the
+      // object's vector.x; 1.93 Hong Kong 0.3 / 0.5 / 0.65)
+      // (always written: it also marks the layer as laid by the 1.x EnvironmentBackground)
+      speed: number('_speed', layer) ?? 0,
+      ...(/_dontRandomizeSingleObjectSpawnPosition: 1/.test(layer) ? { fixedSingle: true } : {}),
     };
   });
   // Before the layered skyline (1.55): background silhouettes and monuments in one color,
@@ -1169,7 +1174,14 @@ function parseLegacyTheme(file, guidIndex) {
       ...(layers.some((l) => l.classic) ? { classic: true } : {}),
     };
   }
-  return { name, slots, composites, roles, themedOf, transitions, config, trackInfos: { ...LEGACY_TRACK_INFOS } };
+  // `_baseIgnoredEnvironmentKinds`: sections the game lays no ground or track under, their
+  // pieces model their own (1.111 Houston's High stretches: rails through water)
+  const trackInfos = { ...LEGACY_TRACK_INFOS };
+  const ignored = text.split('\n  _baseIgnoredEnvironmentKinds:')[1]?.split(/\n {2}_\w/)[0] ?? '';
+  for (const [, t, d] of ignored.matchAll(/_type: (\d+)\n\s+_density: (\d+)/g)) {
+    for (const slot of legacyKind(Number(t), Number(d))?.slots ?? []) trackInfos[slot] = { ShowShadows: false, ...trackInfos[slot], SpawnTracks: false };
+  }
+  return { name, slots, composites, roles, themedOf, transitions, config, trackInfos };
 }
 
 const TRACK_TYPES = {
@@ -1440,7 +1452,7 @@ function parseAnimators(file, guidIndex) {
 /**
  * Script-driven motion on scenery: RotationEffect (spin), OffsetEffect (bob), ScaleEffect
  * (pulse), RotateAndScaleTransform (sway / breathe: candle glows), MeshFlickering (on/off
- * pattern). Each names its node by path below the prefab root, "name#k" the k-th sibling
+ * pattern), 1.x Rotate (spin, or world angles ping-ponging: Hong Kong's lasers). Each names its node by path below the prefab root, "name#k" the k-th sibling
  * of that name, so identical copies (three candle glows) all move. glb space (X mirrored).
  */
 // Unity's built-in meshes (Library/unity default resources): not exported with the prefab
@@ -1580,6 +1592,18 @@ function parseMotions(file, guidIndex) {
       if (num(doc, '_enableRotation') === 1) motion.rotation = { axis: axis(vec(doc, '_rotationAxis') ?? [0, 1, 0]), min: num(doc, '_minRotationRange'), max: num(doc, '_maxRotationRange'), speed: num(doc, '_rotationSpeed') };
       if (num(doc, '_enableScaling') === 1) motion.scale = { axis: (vec(doc, '_scaleAxis') ?? [0, 1, 0]).map(Math.abs), min: num(doc, '_minScale', 1), max: num(doc, '_maxScale', 1), speed: num(doc, '_scaleSpeed') };
       if (!motion.rotation && !motion.scale) motion = null;
+    } else if (kind === 'Rotate') {
+      // 1.x Rotate (1.93 Hong Kong's landmark lasers): PingPong sets the world angles each
+      // frame, Mathf.PingPong(Time.time × Speed + offset, to − from) + from per axis whose
+      // range isn't empty (others 0); otherwise it turns by (x, y, z) degrees a second
+      const from = ['X', 'Y', 'Z'].map((c) => num(doc, `Rotate_${c}`));
+      if (num(doc, 'PingPong') === 1) {
+        const to = ['X', 'Y', 'Z'].map((c) => num(doc, `Rotate_${c}_To`));
+        if (to.some((v, i) => v !== from[i])) motion = { type: 'pingpong', from, to, offset: ['X', 'Y', 'Z'].map((c) => num(doc, `Rotate_${c}_Time_Offset`)), speed: num(doc, 'Speed', 100) };
+      } else if (from.some(Boolean)) {
+        const speed = Math.hypot(...from);
+        motion = { type: 'spin', axis: axis(from.map((v) => v / speed)), speed };
+      }
     } else if (kind === 'MeshFlickering') {
       target = goOfComponent.get(doc.match(/_Mesh: \{fileID: (\d+)/)?.[1]) ?? go;
       const pattern = doc.match(/_FlickerPattern: (.*)/)?.[1].trim().replace(/^'|'$/g, '');
@@ -3615,7 +3639,12 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     // 1.x skyline objects (BackgroundObject): a fixed one stands at its layer's offset, shown
     // only if always visible; movable ones are placed within the skyline limits
     const bgObject = read(prefabPath).match(/\n {2}_alwaysVisible: (\d)\n {2}_movable: (\d)/);
-    if (bgObject) info.backgroundObject = { alwaysVisible: bgObject[1] === '1', movable: bgObject[2] === '1' };
+    if (bgObject) {
+      info.backgroundObject = { alwaysVisible: bgObject[1] === '1', movable: bgObject[2] === '1' };
+      // (its MoveGameObject's vector.x: how fast it slides right, × camera speed × layer speed)
+      const drift = Number(read(prefabPath).match(/\n {2}vector: \{x: ([\d.e-]+)/)?.[1]);
+      if (drift) info.backgroundObject.drift = drift;
+    }
     const rootScale = parseRootScale(prefabPath);
     // (a particle system in Shape scaling mode: the scale only stretches its emitter, see below)
     const shapeScaled = rootScale && !info.bbox && /\n {2}scalingMode: 2/.test(read(prefabPath));
@@ -3697,6 +3726,28 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     // (decorations themselves are checked below)
     for (const entry of Object.values(info.placeholders ?? {})) {
       for (const { name: target } of entry.prefabs) if (decorations.has(target)) prefabs[target].embedded = true;
+    }
+  }
+
+  // 2.x+ decoration types are spawned where a chunk or another config names the type
+  // (ChunkAssetPlacer `_assetType`…). A type only the theme assets list is never spawned on
+  // its own: scattered, 2.16 Houston's truck stood in the trees and its tube entrance's
+  // flag gate in the middle of the street
+  const decoTypes = new Map(); // type guid -> slot
+  for (const [guid, p] of guidIndex) if (p.endsWith('.asset') && /^decoration_(event|extra)_/.test(stem(p))) decoTypes.set(guid, stem(p));
+  if (decoTypes.size) {
+    const named = new Set();
+    for (const p of guidIndex.values()) {
+      if (!/\.(prefab|asset)$/.test(p) || /^decoration_/.test(stem(p))) continue;
+      const text = read(p);
+      if (text.includes('InheritParentAssets')) continue; // theme assets
+      for (const [guid, slot] of decoTypes) if (text.includes(guid)) named.add(slot);
+    }
+    for (const slots of Object.values(themes)) {
+      for (const [slot, names] of Object.entries(slots)) {
+        if (!/^decoration_/.test(slot) || named.has(slot)) continue;
+        for (const name of names) if (prefabs[name]) prefabs[name].unplaced = true;
+      }
     }
   }
 

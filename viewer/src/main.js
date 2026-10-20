@@ -783,8 +783,21 @@ function updateMotion(mo, dt, time) {
   } else if (m.type === 'flicker') {
     const i = Math.floor(t * m.speed) % m.pattern.length;
     node.visible = m.pattern[i] !== '0';
+  } else if (m.type === 'pingpong') {
+    // 1.x Rotate with PingPong: world euler angles (Unity applies Z, then X, then Y) from
+    // Mathf.PingPong on the game clock (Time.time: every copy in step, set apart by its
+    // offsets); glb space mirrors X, so the quaternion's y and z flip
+    const pingPong = (v, len) => len - Math.abs((((v % (2 * len)) + 2 * len) % (2 * len)) - len);
+    const deg = m.from.map((f, i) => (m.to[i] !== f ? pingPong(time * m.speed + m.offset[i], Math.abs(m.to[i] - f)) * Math.sign(m.to[i] - f) + f : 0));
+    motionEuler.set(...deg.map((d) => (d * Math.PI) / 180), 'YXZ');
+    motionQuat.setFromEuler(motionEuler);
+    motionQuat.set(motionQuat.x, -motionQuat.y, -motionQuat.z, motionQuat.w);
+    if (node.parent) node.quaternion.copy(node.parent.getWorldQuaternion(motionParent).invert().multiply(motionQuat));
+    else node.quaternion.copy(motionQuat);
   }
 }
+const motionEuler = new THREE.Euler();
+const motionParent = new THREE.Quaternion();
 
 /**
  * SkyboxColorModifier triggers (3.19 Haunted Hood's landmark): passing one fades the sky's
@@ -1499,6 +1512,7 @@ const state = {
   ads: params.get('ads') === '1', // ad billboards the game's online config spawns (off in play)
   season: params.get('season') !== '0', // classic season skin (1.4 Halloween, 1.5 Christmas)
   skylineOpacity: 1,
+  skylinePick: 'auto', // the skyline's front piece: 'auto' (in turn, as the game) or one prefab
   skylineDistance: 1,
   obstacleMode: params.get('obstacleMode') ?? 'random',
   inspect: params.get('prefab')?.split(',') ?? null, // prefab names shown alone, or null for the run
@@ -2434,6 +2448,15 @@ async function loadSkylineLayers(cfg) {
       // (the game goes on from the last placed one: it shows again, already there)
       group.userData.classic = { entries, next, show, limits: cfg.limits, wait: 0 };
     }
+    // (glb space mirrors x: the game's offset to the left is +x here)
+    const [shiftX, shiftY] = layer.shift ?? [0, 0];
+    // 1.55+ EnvironmentBackground (layers carrying their speed): laid and moved as the game does
+    if (layer.speed != null && !layer.classic) {
+      await layLayered(layer, cfg, group, place, rng, shiftX, shiftY, near);
+      group.userData.distance = distance;
+      skylineGroup.add(group);
+      continue;
+    }
     // Fill: side by side across a wide span, each tile one of the fill prefabs
     const span = 4000;
     for (let x = -span; x < span; ) {
@@ -2444,8 +2467,6 @@ async function loadSkylineLayers(cfg) {
       await place(name, x - lo[0]);
       x += width;
     }
-    // (glb space mirrors x: the game's offset to the left is +x here)
-    const [shiftX, shiftY] = layer.shift ?? [0, 0];
     // Moving singles take turns: the game shows one at a time, picked at random, and the next
     // only once it has crossed the sky (1.82 Chicago's two cloud sets showed together)
     const movers = layer.singles.filter((n) => manifest.prefabs[n]?.backgroundObject?.movable);
@@ -2462,6 +2483,94 @@ async function loadSkylineLayers(cfg) {
   }
 }
 
+/**
+ * 1.55+ EnvironmentBackground (1.93 Hong Kong), as compiled: fill pieces from the left limit
+ * until past the right one plus the widest piece (each at x, then x += its width), picked at
+ * random; one movable single at a time, at a random x within the limits (the "Front piece"
+ * pick in View: always that one). Movable pieces slide right at camera speed × the layer's
+ * speed × their vector.x; checked each second, a fill piece past the right limit goes back
+ * to the left of the next one, and the single past it hands over to the next, both coming in
+ * from the left limit. Tiled over the whole horizon and still, Hong Kong showed its
+ * fill skyline everywhere and both front pieces at once.
+ */
+async function layLayered(layer, cfg, group, place, rng, shiftX, shiftY, near) {
+  const [left, right] = cfg.limits;
+  const widthOf = (name) => {
+    const bb = manifest.prefabs[name]?.bbox;
+    return bb ? Math.max(bb[1][0] - bb[0][0], 1) : 50;
+  };
+  const scale = layer.own ? near : 1; // (own-material layers are placed at the game's size)
+  const setX = (e, x) => {
+    e.x = x;
+    e.obj.position.x = -(x + shiftX) * scale;
+  };
+  const entry = async (name, x) => {
+    const obj = await place(name, -(x + shiftX), shiftY);
+    if (!obj) return null;
+    const bo = manifest.prefabs[name]?.backgroundObject;
+    return { obj, name, x, w: widthOf(name), drift: bo?.movable ? bo.drift ?? 0.1 : 0 };
+  };
+  const state_ = { fills: [], singles: [], next: 0, pick: null, speed: layer.speed, left, right, wait: 0, setX };
+  if (layer.fill.length) {
+    let widest = 0;
+    for (let x = left; x < right + widest; ) {
+      const name = layer.fill[Math.floor(rng() * layer.fill.length)];
+      const e = await entry(name, x);
+      if (e) state_.fills.push(e);
+      x += widthOf(name);
+      widest = Math.max(widest, widthOf(name));
+    }
+  }
+  for (const name of layer.singles) {
+    const bo = manifest.prefabs[name]?.backgroundObject;
+    if (bo && !bo.movable) {
+      if (bo.alwaysVisible) await place(name, -shiftX, shiftY); // a fixed one stands at the offset
+      continue;
+    }
+    const e = await entry(name, left);
+    if (!e) continue;
+    e.obj.visible = false;
+    state_.singles.push(e);
+  }
+  if (state_.singles.length) {
+    const picked = state_.singles.findIndex((e) => e.name === state.skylinePick);
+    state_.pick = picked >= 0 ? picked : null;
+    state_.next = state_.pick ?? Math.floor(rng() * state_.singles.length);
+    const s = state_.singles[state_.next];
+    s.obj.visible = true;
+    setX(s, layer.fixedSingle ? left : left + rng() * (right - left));
+  }
+  group.userData.layered = state_;
+}
+function updateLayered(L, speed, dt) {
+  if (speed > 0) {
+    for (const e of L.fills) if (e.drift) L.setX(e, e.x + speed * L.speed * e.drift * dt);
+    const s = L.singles[L.next];
+    if (s?.drift) L.setX(s, s.x + speed * L.speed * s.drift * dt);
+  }
+  if ((L.wait += dt) < 1) return;
+  L.wait = 0;
+  L.fills.forEach((e, i) => {
+    if (e.x <= L.right) return;
+    const n = L.fills[(i + 1) % L.fills.length];
+    L.setX(e, n.x - (n.w / 2 + e.w / 2));
+  });
+  const s = L.singles[L.next];
+  if (s && s.x > L.right) {
+    s.obj.visible = false;
+    L.setX(s, L.left - s.w / 2);
+    L.next = L.pick ?? (L.next + 1) % L.singles.length;
+    const n = L.singles[L.next];
+    n.obj.visible = true;
+    L.setX(n, L.left - n.w / 2);
+  }
+}
+/** Movable single objects of the theme's skyline layers that take turns (the View picker). */
+function skylineSingles() {
+  const layers = manifest?.themeConfigs?.[state.theme]?.skylineLayers?.layers ?? [];
+  return layers.flatMap((l) => (l.speed != null && !l.classic ? l.singles.filter((n) => manifest.prefabs[n]?.backgroundObject?.movable) : [])).filter((n, i, a) => a.indexOf(n) === i);
+}
+
 let skylineLast = null; // { z, t }: the camera's speed along the run moves classic silhouettes
 function updateSkyline() {
   updateDistantObjects();
@@ -2471,6 +2580,7 @@ function updateSkyline() {
   skylineLast = { z: camera.position.z, t: now };
   for (const obj of skylineGroup.children) {
     obj.position.set(0, 0, camera.position.z + obj.userData.distance * state.skylineDistance);
+    if (obj.userData.layered) updateLayered(obj.userData.layered, speed, dt);
     const classic = obj.userData.classic;
     if (!classic?.entries.length) continue;
     // (only shown ones move: the game's hidden objects don't update)
@@ -2874,6 +2984,16 @@ const view = createWorkbar(
             { type: 'toggle', label: 'Enabled', obj: state, key: 'skyline', onChange: applyThemeLook },
             { type: 'slider', label: 'Opacity', obj: state, key: 'skylineOpacity', min: 0, max: 1, step: 0.01, onChange: applyThemeLook },
             { type: 'slider', label: 'Distance ×', obj: state, key: 'skylineDistance', min: 0.3, max: 3, step: 0.05, onChange: applyThemeLook },
+            {
+              // The game shows one front piece at a time, the next once it has crossed the sky
+              type: 'select',
+              label: 'Front piece',
+              obj: state,
+              key: 'skylinePick',
+              options: () => ({ 'In turn (game)': 'auto', ...Object.fromEntries(skylineSingles().map((n) => [variantLabel(state.theme, n), n])) }),
+              visible: () => skylineSingles().length > 1,
+              onChange: () => ((skylineTheme = null), applyThemeLook()),
+            },
           ],
         },
         {

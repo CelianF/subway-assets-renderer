@@ -519,19 +519,17 @@ ${CUT_MAIN}
     if (uDrift.x > 0.0) {
       // Two lookups half a texture apart, each fading out where it wraps (the texture
       // doesn't tile across: one lookup left a seam line drifting over the sea); the
-      // texture's gradient follows the mesh's v as in game, through row averages
+      // texture's colors follow the mesh's uv as in game, blurred (a low mip): its ripples
+      // come from the drifting lookup. Whole-row averages greyed 1.93 Hong Kong's
+      // reflections, colored blobs side by side in one band
       vec4 sum = vec4(0.0);
       for (int k = 0; k < 2; k++) {
         float f = fract(vRaw + 0.5 * float(k));
         float uy = clamp(f - (1.0 - f) * push, 0.0, 1.0) + 0.002;
-        vec3 shift = vec3(0.0);
-        for (int r = 0; r < 8; r++) {
-          float ur = float(r) / 8.0 + 0.0625;
-          // (rows kept off the edges: the repeat wrap would average in the other end's rows)
-          shift += textureLod(uMap, vec2(ur, clamp(1.0 - uy0, 0.02, 0.98)), 3.0).rgb - textureLod(uMap, vec2(ur, clamp(1.0 - uy, 0.02, 0.98)), 3.0).rgb;
-        }
+        // (rows kept off the edges: the repeat wrap would blur in the other end's rows)
+        vec3 shift = textureLod(uMap, vec2(ux, clamp(1.0 - uy0, 0.02, 0.98)), 1.0).rgb - textureLod(uMap, vec2(ux, clamp(1.0 - uy, 0.02, 0.98)), 1.0).rgb;
         vec4 t = textureGrad(uMap, vec2(ux, 1.0 - uy), gx, gy);
-        t.rgb += shift / 8.0;
+        t.rgb += shift;
         sum += t * (1.0 - abs(2.0 * f - 1.0));
       }
       wobbleColor = sum;
