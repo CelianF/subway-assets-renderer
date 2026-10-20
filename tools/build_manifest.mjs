@@ -2749,7 +2749,17 @@ function minMaxCurve(c, fallback = 0) {
   }
   return out;
 }
-const rgba = (c) => (c ? [c.r ?? 1, c.g ?? 1, c.b ?? 1, c.a ?? 1] : [1, 1, 1, 1]);
+// (Unity 5.x and older pack a gradient key's or particle color's RGBA into one integer,
+// r in the low byte: { rgba: 4093639845 }. Read as missing, every one came out opaque white:
+// 1.56 Las Vegas' pale cyan fountain spray, fading out at the top, drew solid white columns)
+const rgba = (c) => {
+  if (!c) return [1, 1, 1, 1];
+  if (c.rgba != null && c.r == null) {
+    const v = Number(c.rgba) >>> 0;
+    return [0, 8, 16, 24].map((s) => ((v >>> s) & 255) / 255);
+  }
+  return [c.r ?? 1, c.g ?? 1, c.b ?? 1, c.a ?? 1];
+};
 /** Gradient -> { colors: [[t, r, g, b]], alphas: [[t, a]] } */
 function gradient(g) {
   if (!g) return null;

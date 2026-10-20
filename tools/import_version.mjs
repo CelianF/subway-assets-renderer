@@ -19,4 +19,7 @@
 // 7 (2026-10-20): 1.x _baseIgnoredEnvironmentKinds lay no track (1.111 Houston's rails
 //   through water); 2.x+ decorations no chunk or config spawns are "unplaced" (2.16 Houston's
 //   truck in the trees)
-export const IMPORT_VERSION = 7;
+// 8 (2026-10-20): Unity 5.x packed particle colors ({ rgba: int }) decoded: they all came out
+//   opaque white (1.56 Las Vegas' cyan fountain spray fading out at the top, 1.45 Kenya's
+//   waterfall spray, 1.60 Iceland's lava glow, geysers, snow and splashes)
+export const IMPORT_VERSION = 8;

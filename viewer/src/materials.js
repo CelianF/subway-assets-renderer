@@ -1209,10 +1209,12 @@ export class MaterialLibrary {
       },
     });
     this.applyRenderState(mat, name, def);
-    // A mesh without vertex colors reads them as black in the game (GLES), so its wave weight
-    // (red) is 0; three's ShaderMaterial would hand it white (1.104 Dubai's aquarium fish,
-    // still in game, swam about)
-    if (wave) mat.defaultAttributeValues = { ...mat.defaultAttributeValues, color: [0, 0, 0] };
+    // A mesh without vertex colors reads them as black in the 1.x game (GLES), so its wave
+    // weight (red) is 0; three's ShaderMaterial would hand it white (1.104 Dubai's aquarium
+    // fish, still in game, swam about). 2.x/3.x SYBO VertexWave meshes without colors do sway
+    // in game (white: 2.22/3.25 Las Vegas' tube fish and shark, _VertexColorWeight 1, no color
+    // channel in the game's mesh either): they keep three's white
+    if (wave && !/^SYBO\/Bend\/(Legacy\/)?VertexWave/.test(def.shader)) mat.defaultAttributeValues = { ...mat.defaultAttributeValues, color: [0, 0, 0] };
     // (a flag mesh without the second UV set reads 0 there: V is flipped, so 0 is (0, 1))
     if (def.shader === 'Bend/Flag') mat.defaultAttributeValues = { ...mat.defaultAttributeValues, uv1: [0, 1] };
     if (fadeMode === 1 && /glass/i.test(name)) {

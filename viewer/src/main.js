@@ -2411,7 +2411,7 @@ async function loadSkylineLayers(cfg) {
       copy.side = THREE.DoubleSide; // (flat cards, facing either way like the layer's)
       return copy;
     };
-    const place = async (name, x, y = 0) => {
+    const place = async (name, x, y = 0, ownLook = false) => {
       const prefab = manifest.prefabs[name];
       if (!prefab?.glb || !prefab.bbox) return null;
       const obj = (await loadGlb(prefab.glb)).clone();
@@ -2419,7 +2419,7 @@ async function loadSkylineLayers(cfg) {
       obj.traverse((o) => {
         if (!o.isMesh) return;
         // (layers with their own materials: 1.81 Cairo's sun and its glow)
-        if (layer.own) o.material = Array.isArray(o.material) ? o.material.map(own) : own(o.material);
+        if (layer.own || ownLook) o.material = Array.isArray(o.material) ? o.material.map(own) : own(o.material);
         else if (modeMat) {
           // (only Multi Skyline meshes take the layer's color; the glow keeps its own)
           const mats = Array.isArray(o.material) ? o.material : [o.material];
@@ -2449,7 +2449,20 @@ async function loadSkylineLayers(cfg) {
     // every 2 s, one past the right limit goes back to the left limit, hidden, and the next in
     // the list shows (1.49 Hawaii: mountains, then the town, in turn)
     if (layer.classic) {
-      const { cycle, slots, pick } = layer.classic;
+      const { slots, pick } = layer.classic;
+      // A BackgroundObject not movable and always visible (1.56 Las Vegas' MonumentMoon: the
+      // starry sky) stays out of the turns: EnvironmentBackground places it once at the left
+      // limit of its layer (camera + 900), ToggleElement never hides it, and it keeps its own
+      // unfogged material. Taken as one turn and painted in the layer tint, the stars never showed
+      const fixed = (m) => manifest.prefabs[m.name]?.backgroundObject?.alwaysVisible && !manifest.prefabs[m.name].backgroundObject.movable;
+      for (const name of new Set(layer.classic.cycle.filter(fixed).map((m) => m.name))) {
+        const obj = await place(name, -cfg.limits[0], 0, true);
+        if (!obj) continue;
+        obj.position.z = 900;
+        obj.scale.set(...(manifest.prefabs[name].rootScale ?? [1, 1, 1]));
+        obj.traverse((o) => o.isMesh && (o.renderOrder -= 10)); // behind the silhouettes
+      }
+      const cycle = layer.classic.cycle.filter((m) => !fixed(m));
       const entries = [];
       for (const m of cycle) {
         // (an empty prefab keeps its turn as a gap: 1.35 Hawaii's Monument3)
