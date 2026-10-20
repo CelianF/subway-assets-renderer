@@ -1467,9 +1467,17 @@ function applyEffectPlayers(obj, players, seed) {
     const key = nodeKey(table, node.name);
     if (!key) return;
     const fx = table[key];
+    // Frames by name, or with the loader's suffix: a piece holding the same effect twice gets
+    // "waterRippleEdge08_1" in its second copy (1.111 Houston's water: every frame of the
+    // other ripple groups drawn at once, white patches)
     const byName = new Map();
-    node.traverse((o) => o !== node && byName.set(THREE.PropertyBinding.sanitizeNodeName(o.name), o));
-    const frames = fx.children.map((n) => byName.get(THREE.PropertyBinding.sanitizeNodeName(n))).filter(Boolean);
+    node.traverse((o) => {
+      if (o === node) return;
+      byName.set(o.name, o);
+      const base = o.name.replace(/_\d+$/, '');
+      if (!byName.has(`~${base}`)) byName.set(`~${base}`, o);
+    });
+    const frames = fx.children.map((n) => THREE.PropertyBinding.sanitizeNodeName(n)).map((n) => byName.get(n) ?? byName.get(`~${n}`)).filter(Boolean);
     if (frames.length < 2) return;
     // As EffectPlayer.cs: a cycle lasts a random time in [duration, maxDuration], split
     // evenly between frames; a frame changes on the first update after its wait runs out
@@ -3499,7 +3507,7 @@ if (params.get('z')) {
   camera.lookAt(orbit.target);
 }
 setControlMode(state.controls);
-window.__viewer = { time, motions, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild, unruledShaders, instantiate, manifest };
+window.__viewer = { time, motions, meshAnimations, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild, unruledShaders, instantiate, manifest };
 if (state.obstacleMode === 'studio' && state.studio.some((it) => ['coins', 'coinArc', 'pickup'].includes(it.type))) await ensurePickups();
 await rebuild();
 
