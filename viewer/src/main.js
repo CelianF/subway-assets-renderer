@@ -365,7 +365,22 @@ function applyRandomizers(obj, randomizers, seed, prefabName = '', forced = null
   // loader's duplicate suffix: 3.68 Cosmic Crossroads' tube group "Random" picks between
   // "Random_01".."Random_03", which were emptied as copies of it (their asteroids lost)
   const childNames = new Set(Object.values(randomizers).flatMap((e) => Object.keys((e && typeof e === 'object' && e.weights) || {})).map((k) => THREE.PropertyBinding.sanitizeNodeName(k)));
-  obj.traverse((o) => nodeKey(table, o.name) && (o.name === nodeKey(table, o.name) || !childNames.has(o.name)) && groups.push(o));
+  // A weighted group is a node holding at least one of its options: a node sharing a group's
+  // name but holding none is something else (3.26/3.61 Ireland's tube: "Puffins", an option of
+  // "RandomSpawn" holding the puffin, read as the other "Puffins" group, lost its puffin)
+  const sane = (k) => THREE.PropertyBinding.sanitizeNodeName(k);
+  const holdsOption = (o) => {
+    const entry = table[nodeKey(table, o.name)];
+    const weights = entry && typeof entry === 'object' ? entry.weights : null;
+    if (!weights) return true;
+    const keys = new Set(Object.keys(weights).map(sane));
+    // Its only option is itself (DistanceRequiredChildRandomizer with _uniqueFiller = its own
+    // object: 3.26/3.61 Ireland's Big_Rocks): nothing to choose; its "children" are the mesh's
+    // material parts, one of them was dropped at random
+    if (keys.size === 1 && keys.has(nodeKey(table, o.name))) return false;
+    return o.children.some((c) => keys.has(c.name) || keys.has(c.name.replace(/_\d+$/, '')));
+  };
+  obj.traverse((o) => nodeKey(table, o.name) && (o.name === nodeKey(table, o.name) || !childNames.has(o.name)) && holdsOption(o) && groups.push(o));
   for (const group of groups) {
     const children = [...group.children];
     const groupName = Object.keys(randomizers).find((k) => THREE.PropertyBinding.sanitizeNodeName(k) === nodeKey(table, group.name)) ?? group.name;
