@@ -77,7 +77,7 @@ export class FlyControls {
       (k.has('Space') || k.has('KeyE') ? 1 : 0) - (k.has('ShiftLeft') || k.has('ShiftRight') || k.has('KeyQ') ? 1 : 0),
       (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0) - (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0),
     );
-    const boost = k.has('ControlLeft') || k.has('ControlRight') || k.has('AltLeft') || k.has('AltRight') ? 4 : 1; // sprint
+    const boost = k.has('ControlLeft') || k.has('ControlRight') || k.has('AltLeft') || k.has('AltRight') ? 8 : 1; // sprint
     // Smooth acceleration so movement doesn't feel jerky
     const target = dir.normalize().multiplyScalar(this.speed * boost);
     this.velocity.lerp(target, 1 - Math.exp(-dt * 12));
