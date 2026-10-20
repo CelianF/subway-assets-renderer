@@ -306,6 +306,7 @@ uniform vec4 uTint;
 uniform vec3 uFogColor;
 uniform vec2 uFogRange;
 uniform float uFogOn;
+uniform float uFogScale; // 0: the shader has no fog (2.x Bend/Particle Additive)
 varying vec2 vUv;
 varying vec4 vColor;
 varying float vDepth;
@@ -315,7 +316,7 @@ void main() {
 #else
   vec4 c = texture2D(uMap, vUv) * uTint;
 #endif
-  float fog = uFogOn * clamp((vDepth - uFogRange.x) / max(uFogRange.y - uFogRange.x, 1.0), 0.0, 1.0);
+  float fog = uFogOn * uFogScale * clamp((vDepth - uFogRange.x) / max(uFogRange.y - uFogRange.x, 1.0), 0.0, 1.0);
 #if FADE_MODE == 2
   c.rgb *= 1.0 - fog; // additive fades to nothing
 #elif FADE_MODE == 3
@@ -359,7 +360,8 @@ export function particleLook(materials, name, renderMode = 0) {
   let blend;
   // Blend factors when the material has them (Combined, Bend/Particle Effect…), else from the name
   if (f._SrcMode != null && f._DstMode != null) blend = [f._SrcMode, f._DstMode];
-  else if (/Premultipl|Premultimpl|^Bend\/Particle \(Additive, Alpha Darkening\)$/i.test(shader)) blend = [1, 10]; // ("Premultimplied": the game's spelling, 1.85)
+  else if (/Premultipl|Premultimpl|^Bend\/Particle \(Additive, Alpha Darkening\)$/i.test(shader)) blend = [1, 10];
+  else if (/^Bend\/Particle Additive$/.test(shader)) blend = [1, 1]; // (compiled 2.12: One One) // ("Premultimplied": the game's spelling, 1.85)
   else if (/Additive/i.test(shader)) blend = [/Premul/i.test(shader) ? 1 : 5, 1];
   else if (/Multiply/i.test(shader)) blend = [2, 0];
   else blend = [5, 10];
@@ -395,6 +397,12 @@ export function particleLook(materials, name, renderMode = 0) {
   // OneMinusSrcAlpha, rgb = texture × particle color × _ColorMultiplier × _TintColor.rgb, alpha ×
   // _TintColor.a undoubled ("A reduces background"): 1.60 Iceland's lava glow has alpha 0, a pure
   // add. Read as SrcAlpha/One with the tint doubled, alpha 0 drew nothing
+  // 2.x Bend/Particle Additive, compiled code of 2.12: texture × particle color × _ColorMultiplier,
+  // no tint, One One. Blended by alpha, Journey to the East's fireworks (a soft dot whose alpha is
+  // its brightness) squared their falloff: every spark and halo smaller and dimmer than in game
+  if (shader === 'Bend/Particle Additive') tint = [cm, cm, cm, cm];
+  // (and no fog in any of its 16 variants: Journey to the East's fireworks, 925 ahead, faded out)
+  const noFog = shader === 'Bend/Particle Additive';
   if (/^Bend\/(Particle \(Additive, Alpha Darkening\)|Additive, Premultimplied Alpha Darkening)$/.test(shader)) {
     const t = c._TintColor ?? [1, 1, 1, 1];
     tint = [...t.slice(0, 3).map((v) => v * cm), t[3] ?? 1];
@@ -413,7 +421,7 @@ export function particleLook(materials, name, renderMode = 0) {
   // One/Zero with depth writes: drawn as a solid (3.68 Cosmic Crossroads' rocks and cars
   // flying into the portal showed their far faces through, sorted as transparent)
   const opaque = src === 1 && dst === 0 && f._ZWrite !== 0;
-  return { map, src, dst, fadeMode, tint, vertexColors, opaque };
+  return { map, src, dst, fadeMode, tint, vertexColors, opaque, noFog };
 }
 
 const BLEND = [
@@ -439,6 +447,7 @@ function makeMaterial(look, vertexShader, extraUniforms) {
       ...globals,
       uMap: { value: look.map ?? DOT },
       uTint: { value: new THREE.Vector4(...look.tint) },
+      uFogScale: { value: look.noFog ? 0 : 1 },
       ...extraUniforms,
     },
     transparent: !look.opaque,
@@ -715,6 +724,7 @@ class Emitter {
   emitSources(dt) {
     const d = this.def;
     this.sources = this.sources.filter((s) => {
+      const from = s.prev ?? s.pos.clone();
       if (s.follow != null) {
         const i = s.parent.index.get(s.follow);
         if (i == null) s.follow = null; // parent particle gone: stays where it was
@@ -725,6 +735,17 @@ class Emitter {
       const t = Math.min(s.time / Math.max(d.duration, 1e-3), 1);
       s.acc += sample(d.rate, t) * dt;
       for (; s.acc >= 1; s.acc -= 1) this.spawn(s.pos, s.tint);
+      // Rate over distance, by how far the followed particle moved (2.12 Journey to the East's
+      // rocket trails: 0.125 per unit, 0 per second: nothing came out of the rising rockets),
+      // spread along the way it went this frame
+      if (d.distanceRate) {
+        const moved = s.pos.distanceTo(from);
+        s.dacc = (s.dacc ?? 0) + sample(d.distanceRate, t) * moved;
+        const n = Math.floor(s.dacc);
+        s.dacc -= n;
+        for (let k = 1; k <= n; k++) this.spawn(from.clone().lerp(s.pos, k / n), s.tint);
+      }
+      s.prev = s.pos.clone();
       d.bursts.forEach((b, k) => {
         for (let n = 0; n < (b.cycles || 1); n++) {
           if (s.time >= b.time + n * b.interval && !s.bursts.has(`${k}:${n}`)) {
