@@ -2473,6 +2473,9 @@ async function loadSkylineLayers(cfg) {
       }
       // (the game goes on from the last placed one: it shows again, already there)
       group.userData.classic = { entries, next, show, limits: cfg.limits, wait: 0 };
+      // (the silhouettes hold their distance inside the model, 900 × MoveGameObject's scale: the
+      // Distance × slider scales the layer's depth, not its position, see updateSkyline)
+      group.userData.depthScaled = true;
     }
     // (glb space mirrors x: the game's offset to the left is +x here)
     const [shiftX, shiftY] = layer.shift ?? [0, 0];
@@ -2606,6 +2609,10 @@ function updateSkyline() {
   skylineLast = { z: camera.position.z, t: now };
   for (const obj of skylineGroup.children) {
     obj.position.set(0, 0, camera.position.z + obj.userData.distance * state.skylineDistance);
+    // ≤ 1.54 classic layers sit at the camera, their flat silhouettes 900 × their scale ahead
+    // inside the models: the slider scales that depth (1.45 Kenya: it did nothing; shifted by a
+    // fixed 900 instead, the smaller silhouettes came up to the camera)
+    if (obj.userData.depthScaled) obj.scale.z = state.skylineDistance;
     if (obj.userData.layered) updateLayered(obj.userData.layered, speed, dt);
     const classic = obj.userData.classic;
     if (!classic?.entries.length) continue;

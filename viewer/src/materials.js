@@ -990,8 +990,9 @@ function translateLegacy(def) {
   // 2.11 Space Station's lane glow is 0.12 there, 2.4 in 3.70's Combined copy. 1.x
   // "UV Scroll (Screen)/Simple" and "/Advanced" use _Time.yy too (1.90 Havana's waterfall and
   // fountain crept at a twentieth of the game's speed), and "UV Lava Scroll" (1.70 Hawaii's
-  // volcano lava lay still)
-  if (/^Bend\/(UVScroll|UV Lava Scroll|UV Scroll \(Screen\)\/\w+)$/.test(def.shader) && def.colors?._ScrollSpeed) {
+  // volcano lava lay still), and plain "UV Scroll (Screen)" (1.45 Kenya's landmark waterfall,
+  // compiled _Time.yy: it ran at 0.06/s instead of 1.2/s)
+  if (/^Bend\/(UVScroll|UV Lava Scroll|UV Scroll \(Screen\)(\/\w+)?)$/.test(def.shader) && def.colors?._ScrollSpeed) {
     return { ...def, floats, renderQueue: def.renderQueue > 0 ? def.renderQueue : floats._DstMode ? 3000 : 2000, colors: { ...def.colors, _ScrollSpeed: def.colors._ScrollSpeed.map((v) => v * 20) } };
   }
   // Legacy transparent queues were left at -1 (shader default)
