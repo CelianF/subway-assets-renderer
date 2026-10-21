@@ -26,4 +26,6 @@
 //   camera + 900: 1.56 Las Vegas' silhouettes were drawn at half their distance)
 // 10 (2026-10-20): extra material passes (renderers with more materials than submeshes:
 //   2.12 Journey to the East's train glass reflection layer was dropped)
-export const IMPORT_VERSION = 10;
+// 11 (2026-10-21): the theme's own run-wide snow (1.x `_effects` FallingSnowThemeEffect, the
+//   runner EFX's showSnow): 1.32 and 1.96 London had no snow while running
+export const IMPORT_VERSION = 11;

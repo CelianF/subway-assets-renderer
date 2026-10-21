@@ -1200,6 +1200,16 @@ function parseLegacyTheme(file, guidIndex) {
       ...(layers.some((l) => l.classic) ? { classic: true, layerZ: classicLayerZ(file) } : {}),
     };
   }
+  // `_effects`: FallingSnowThemeEffect keeps its `_snowPrefab` zOffset ahead of the runner
+  // along the run, while running (1.96 London's snow)
+  for (const [, g] of (text.split('\n  _effects:')[1]?.split(/\n {2}_\w/)[0] ?? '').matchAll(GUID_RE_G)) {
+    const effect = guidIndex.get(g);
+    const t = effect ? read(effect) : '';
+    const script = t.match(/m_Script: .*guid: (\w+)/)?.[1];
+    if (!script || prefabName(script) !== 'FallingSnowThemeEffect') continue;
+    const prefab = prefabName(t.match(/\n {2}_snowPrefab: \{fileID: -?\d+, guid: (\w+)/)?.[1]);
+    if (prefab) config.weather = { prefab, zOffset: number('zOffset', t) ?? 0 };
+  }
   // `_baseIgnoredEnvironmentKinds`: sections the game lays no ground or track under, their
   // pieces model their own (1.111 Houston's High stretches: rails through water)
   const trackInfos = { ...LEGACY_TRACK_INFOS };
@@ -3528,6 +3538,17 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   }
   for (const [theme, info] of Object.entries(legacy)) themeConfigs[theme] ??= info.config;
   if (classic) themeConfigs[classic.name] ??= classic.config;
+  // Snow on every theme of the build (CharacterRenderingEffects `showSnow`, on the runner's
+  // EFX: its `_snow` system kept `_zOffset` ahead of the runner while running, none inside
+  // subways; 1.32 London's Christmas snow)
+  const efx = find('EFX.prefab');
+  const efxSnow = efx && read(efx).match(/\n {2}showSnow: 1\n {2}_snow: \{fileID: (\d+)\}[\s\S]*?\n {2}_zOffset: ([\d.e-]+)/);
+  if (efxSnow) {
+    const doc = read(efx).split(/\n--- /).find((d) => d.includes(`&${efxSnow[1]}\n`));
+    const go = doc?.match(/m_GameObject: \{fileID: (\d+)\}/)?.[1];
+    const system = go && read(efx).split(/\n--- /).find((d) => d.includes(`&${go}\n`))?.match(/\n {2}m_Name: (.*)/)?.[1].trim();
+    for (const theme of Object.keys(themeConfigs)) themeConfigs[theme].weather ??= { prefab: 'EFX', ...(system ? { system } : {}), zOffset: num(efxSnow[2]) };
+  }
   log(`Theme configs: ${Object.keys(themeConfigs).length}`);
 
   // Slot types declare their length in cells (BoundaryType.CellDepth); bounding boxes
@@ -3562,6 +3583,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   transitionPrefabs.push(modePrefabs(modes));
   transitionPrefabs.push(Object.values(themeConfigs).filter((c) => c.background).map((c) => c.background.prefab));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.effects ?? []).map((e) => e.prefab)));
+  transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.weather ? [c.weather.prefab] : [])));
   // 1.x: skyline layers, and the cars / short pieces composites are built from
   const composites = new Map(Object.values(legacy).flatMap((t) => Object.entries(t.composites)));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => [...(c.skylineLayers?.layers ?? []), ...(c.plain?.skylineLayers?.layers ?? [])].flatMap((l) => [...l.fill, ...l.singles, ...(l.classic?.cycle.map((m) => m.name) ?? [])])));
@@ -3977,6 +3999,7 @@ function splitByTheme(manifest, staging, out, log) {
     for (const n of modePrefabs(manifest.modes)) names.add(n);
     if (config.background) names.add(config.background.prefab);
     for (const e of config.effects ?? []) names.add(e.prefab);
+    if (config.weather) names.add(config.weather.prefab);
     for (const l of [...(config.skylineLayers?.layers ?? []), ...(config.plain?.skylineLayers?.layers ?? [])]) for (const n of [...l.fill, ...l.singles, ...(l.classic?.cycle.map((m) => m.name) ?? [])]) names.add(n);
     for (const d of config.distantObjects?.objects ?? []) for (const n of d.prefabs ?? [d.prefab]) names.add(n);
     for (const n of [...names]) for (const part of manifest.prefabs[n]?.parts ?? []) names.add(part.prefab);

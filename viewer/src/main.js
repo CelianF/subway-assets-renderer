@@ -1562,7 +1562,7 @@ const state = {
   glass: 1,
   skyline: true,
   particles: params.get('particles') !== '0', // smoke, steam, glows, sparks
-  weather: params.get('weather') !== '0', // snow or leaves along the whole run (from the start train's)
+  weather: params.get('weather') !== '0', // snow along the whole run (the theme's, or the start train's)
   ads: params.get('ads') === '1', // ad billboards the game's online config spawns (off in play)
   season: params.get('season') !== '0', // classic season skin (1.4 Halloween, 1.5 Christmas)
   skylineOpacity: 1,
@@ -2117,16 +2117,20 @@ function coveredRanges(items) {
 }
 
 /**
- * What falls along the whole run: the theme's start-train snow (a big looping box: 2.27 North
- * Pole), else its start-train leaves (Vancouver: a 3-unit sphere above the bag, 1-2 s lives),
- * spread over a box around the camera like the snow and living long enough to drift into view.
+ * What falls along the whole run: the theme's own snow (1.x FallingSnowThemeEffect, 1.32's
+ * runner EFX snow: kept ahead of the runner while running), else its start-train snow (a
+ * big looping box: 2.27 North Pole), laid ahead of the camera in world space.
+ * (Start-train leaves stay on the start train: 3.21 London's never fall along the run.)
  */
 function themeWeather() {
+  const own = manifest.themeConfigs?.[state.theme]?.weather;
+  const ownSystems = Object.entries(manifest.prefabs[own?.prefab]?.particles ?? {});
+  const ownDef = (ownSystems.find(([n]) => own.system && n === own.system) ?? ownSystems.find(([, d]) => d.loop))?.[1];
+  if (ownDef) return ownDef;
   let best = null;
   let volume = 0;
-  let leaves = null;
-  // Snow and leaves only from the start train or the intro: others fall where their piece
-  // stands (1.98 Atlanta's trees, 2.5 Bali's landmark, every Iceland's landmark snow)
+  // Snow only from the start train or the intro: others fall where their piece stands
+  // (1.98 Atlanta's trees, 2.5 Bali's landmark, every Iceland's landmark snow)
   const slots = Object.assign({}, ...Object.values(manifest.themes?.[state.theme] ?? {}));
   const startFx = new Set([...(slots.prop_train_start ?? []), ...Object.keys(manifest.prefabs).filter((n) => manifest.prefabs[n].chunk?.intro)]);
   // 1.x pieces hold their effects through placeholders (a separate `snow` prefab)
@@ -2135,23 +2139,12 @@ function themeWeather() {
   }
   for (const [prefab, p] of Object.entries(manifest.prefabs)) {
     for (const [name, def] of Object.entries(p.particles ?? {})) {
-      if (!def.loop || !startFx.has(prefab)) continue;
-      if (/snow/i.test(name) && def.shape?.type === 5) {
-        const v = def.shape.box.reduce((a, b) => a * b, 1);
-        if (v > volume) [best, volume] = [def, v];
-      } else if (/lea(f|ves)|petal|blossom/i.test(name)) leaves ??= def;
+      if (!def.loop || !startFx.has(prefab) || !/snow/i.test(name) || def.shape?.type !== 5) continue;
+      const v = def.shape.box.reduce((a, b) => a * b, 1);
+      if (v > volume) [best, volume] = [def, v];
     }
   }
-  if (best || !leaves) return best;
-  return {
-    ...leaves,
-    // Leaves barely sink: the box sits around the camera's height, not above it like snow's
-    shape: { type: 5, box: [140, 60, 180], position: [0, -30, 0], rotation: [0, 0, 0] },
-    rate: { mode: 0, min: 50, max: 50 },
-    lifetime: { mode: 3, min: 3, max: 5 },
-    delay: { mode: 0, min: 0, max: 0 },
-    max: 250,
-  };
+  return best;
 }
 let weatherTheme = null;
 
@@ -2219,7 +2212,7 @@ function applyThemeLook() {
   if (weatherTheme !== state.theme) {
     weatherTheme = state.theme;
     const follow = followEffectsOf(state.theme);
-    // The start-train snow or leaves stand in when the theme has no falling effect of its own
+    // The theme's or start-train snow stands in when the theme has no falling effect of its own
     setWeather(scene, follow.some((e) => manifest.prefabs[e.prefab].particles) ? null : themeWeather(), materials, particleMesh);
     setFollowEffects(follow);
   }
