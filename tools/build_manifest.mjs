@@ -2840,6 +2840,11 @@ const curveKeys = (c) => (Array.isArray(c?.m_Curve) ? c.m_Curve.map((k) => [k.ti
  * 0 constant, 1 curve, 2 random between two curves (both scaled by max), 3 random between
  * two constants (min, max).
  */
+// Unity 5.4 and older keep up to four bursts as cnt0-3 / time0-3, m_BurstCount of them used
+// (1.46 Transylvania's pillar-hall lightning: all four lost, it never flashed)
+function legacyBursts(emission) {
+  return Array.from({ length: Math.min(4, emission.m_BurstCount ?? 0) }, (_, i) => ({ time: emission[`time${i}`], minCount: emission[`cnt${i}`] }));
+}
 function minMaxCurve(c, fallback = 0) {
   if (c == null) return { mode: 0, min: fallback, max: fallback };
   if (typeof c === 'number') return { mode: 0, min: c, max: c }; // very old serializations
@@ -2952,6 +2957,37 @@ function parseSkyColorTriggers(file) {
     .filter((t) => t.node && t.top && t.bottom);
 }
 
+/**
+ * A Mesh shape's own mesh, in Unity shape space: { mesh: { positions, indices }, placement }
+ * (placement 0 vertices, 1 edges, 2 triangles), or nothing. Read from the asset
+ * itself; the glb doesn't keep meshes no renderer draws (3.70 Transylvania's frost rises
+ * from Fog_emitter, two strips beside the tracks: from the emitter's origin, it streamed down
+ * the middle track).
+ */
+function shapeMesh(shape, guidIndex) {
+  if (![6, 13, 14].includes(shape.type) || !shape.m_Mesh?.guid) return {};
+  const file = guidIndex.get(shape.m_Mesh.guid);
+  if (!file || !existsSync(file)) return {};
+  const text = read(file);
+  let positions;
+  let indices;
+  if (/m_MeshCompression: [1-9]/.test(text)) {
+    const mesh = compressedMesh(text);
+    if (!mesh) return {};
+    // back from glb space: X unmirrored, winding restored
+    positions = mesh.positions.map((v, i) => (i % 3 ? v : round(-v, 4)));
+    indices = [];
+    for (let i = 0; i + 2 < mesh.indices.length; i += 3) indices.push(mesh.indices[i], mesh.indices[i + 2], mesh.indices[i + 1]);
+  } else {
+    const asset = meshAsset(file);
+    if (!asset) return {};
+    positions = Array.from(asset.positions, (v) => round(v, 4));
+    indices = asset.submeshes.flat();
+  }
+  if (!indices.length || indices.length > 6000) return {};
+  return { mesh: { positions, indices }, placement: shape.placementMode ?? 0 };
+}
+
 function parseParticles(file, guidIndex) {
   const docs = yamlDocs(read(file));
   const names = new Map();
@@ -3031,11 +3067,12 @@ function parseParticles(file, guidIndex) {
         scaling: ps.scalingMode ?? 0, // 0 hierarchy, 1 local, 2 shape
         // Mesh shapes (6, 13, 14) without their mesh fire from the origin along +Z
         hasMesh: [shape.m_Mesh, shape.m_MeshRenderer, shape.m_SkinnedMeshRenderer].some((m) => m?.fileID),
+        ...shapeMesh(shape, guidIndex),
       },
       rate: minMaxCurve(emission.enabled === 0 ? 0 : emission.rateOverTime ?? emission.rate, 0),
       // Per unit the system moves (3.x St Petersburg's Christmas gifts, thrown as the runner runs)
       distanceRate: minMaxCurve(emission.enabled === 0 ? 0 : emission.rateOverDistance, 0),
-      bursts: (emission.enabled === 0 ? [] : emission.m_Bursts ?? []).map((b) => ({
+      bursts: (emission.enabled === 0 ? [] : emission.m_Bursts ?? legacyBursts(emission)).map((b) => ({
         time: b.time ?? 0,
         count: minMaxCurve(b.countCurve ?? b.minCount, b.minCount ?? 1),
         cycles: b.cycleCount ?? 1,
@@ -3863,6 +3900,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
       for (const { name: target } of entry.prefabs) if (decorations.has(target)) prefabs[target].embedded = true;
     }
   }
+  // 1.x spawns decorations only into placeholders: one no placeholder names never shows
+  // (1.46 Transylvania's extra_3 glow and extra_8 cart, only pooled by SpawnPoolManager,
+  // were scattered over the downtown and the cemetery)
+  const spawnedByPlaceholders = Object.values(prefabs).some((p) => Object.values(p.placeholders ?? {}).some((e) => e.prefabs.some((x) => decorations.has(x.name))));
+  if (spawnedByPlaceholders) for (const name of decorations) if (prefabs[name] && !prefabs[name].embedded) prefabs[name].unplaced = true;
 
   // 2.x+ decoration types are spawned where a chunk or another config names the type
   // (ChunkAssetPlacer `_assetType`…). A type only the theme assets list is never spawned on

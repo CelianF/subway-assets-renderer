@@ -107,6 +107,52 @@ const randomUnit = (v) => {
 /** A cone in Shape scaling mode (older manifests: one whose root scale stretches it). */
 const shapeCone = (shape) => [4, 7, 8, 9].includes(shape.type) && (shape.scaling === 2 || !!shape.scale);
 
+/** A mesh shape's triangles with their normals and running areas, built once per shape. */
+const meshShapes = new WeakMap();
+function meshShapeOf(shape) {
+  let m = meshShapes.get(shape);
+  if (m) return m;
+  const { positions: p, indices } = shape.mesh;
+  const v = (i) => new THREE.Vector3(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]);
+  const tris = [];
+  let total = 0;
+  for (let i = 0; i + 2 < indices.length; i += 3) {
+    const [a, b, c] = [v(indices[i]), v(indices[i + 1]), v(indices[i + 2])];
+    // Unity winds front faces clockwise in its left-handed space: (b - a) × (c - a) faces out
+    // (3.70 Transylvania's Fog_emitter: up, where its frost rises)
+    const n = new THREE.Vector3().crossVectors(b.clone().sub(a), c.clone().sub(a));
+    total += n.length() / 2;
+    tris.push({ a, b, c, n: n.normalize(), upTo: total });
+  }
+  m = { tris, total };
+  meshShapes.set(shape, m);
+  return m;
+}
+
+/** Unity's Mesh shape: a random vertex, point on an edge or (by area) on a triangle, along its normal. */
+function meshSpawn(shape, pos, dir) {
+  const { tris, total } = meshShapeOf(shape);
+  if (!tris.length) {
+    pos.set(0, 0, 0);
+    randomUnit(dir);
+    return;
+  }
+  const r = Math.random() * total;
+  const t = shape.placement === 2 ? tris.find((x) => x.upTo >= r) ?? tris[tris.length - 1] : tris[Math.floor(Math.random() * tris.length)];
+  const corners = [t.a, t.b, t.c];
+  if (shape.placement === 0) pos.copy(corners[Math.floor(Math.random() * 3)]);
+  else if (shape.placement === 1) {
+    const k = Math.floor(Math.random() * 3);
+    pos.copy(corners[k]).lerp(corners[(k + 1) % 3], Math.random());
+  } else {
+    let u = Math.random();
+    let w = Math.random();
+    if (u + w > 1) [u, w] = [1 - u, 1 - w];
+    pos.copy(t.a).addScaledVector(t.b.clone().sub(t.a), u).addScaledVector(t.c.clone().sub(t.a), w);
+  }
+  dir.copy(t.n);
+}
+
 function shapeSpawn(shape, pos, dir) {
   if (!shape) {
     pos.set(0, 0, 0);
@@ -165,7 +211,11 @@ function shapeSpawn(shape, pos, dir) {
       dir.set(0, 0, 1);
       break;
     }
-    default: // mesh shapes: from the emitter's origin (along +Z when no mesh is set)
+    default: // mesh shapes: on their mesh, else from the emitter's origin (along +Z when no mesh is set)
+      if (shape.mesh) {
+        meshSpawn(shape, pos, dir);
+        break;
+      }
       pos.set(0, 0, 0);
       if (shape.hasMesh === false) dir.set(0, 0, 1);
       else randomUnit(dir);
@@ -238,7 +288,10 @@ void main() {
     vec3 side = cross(axis, normalize(-mv.xyz));
     side = length(side) > 1e-4 ? normalize(side) : vec3(1.0, 0.0, 0.0);
     float len = size * uLengthScale + length(v) * uVelocityScale;
-    mv.xyz += axis * corner.y * len + side * corner.x * size;
+    // Unity lays the texture's U along the stretch, the particle at the head (u = 1), the quad
+    // trailing behind it (ahead for a negative length). With V along it and centered, 1.46
+    // Transylvania's 4:1 lightning bolts (-4.21) drew as stars around the coils, not reaching out
+    mv.xyz += axis * (corner.x - 0.5) * len + side * corner.y * size;
   } else {
     mv.xy += mat2(c, -s, s, c) * corner * size;
   }
@@ -462,15 +515,13 @@ function makeMaterial(look, vertexShader, extraUniforms) {
 // ---------------------------------------------------------------- emitters
 
 const UP = new THREE.Vector3(0, 1, 0);
-
 class Emitter {
   constructor(node, root, def, materials, meshGeometry) {
     this.root = root;
     this.def = def;
     this.node = node;
     this.max = Math.max(1, def.max);
-    this.mesh = def.render.mode === 4 && meshGeometry;
-    this.local = { pos: new Float32Array(this.max * 3), vel: new Float32Array(this.max * 3) };
+    this.mesh = def.render.mode === 4 && meshGeometry;    this.local = { pos: new Float32Array(this.max * 3), vel: new Float32Array(this.max * 3) };
     this.age = new Float32Array(this.max);
     this.life = new Float32Array(this.max);
     this.size0 = new Float32Array(this.max);
@@ -684,6 +735,7 @@ class Emitter {
     }
     this.local.pos.set([pos.x, pos.y, pos.z], i * 3);
     this.local.vel.set([dir.x * speed, dir.y * speed, dir.z * speed], i * 3);
+    this.heading.set([dir.x * speed, dir.y * speed, dir.z * speed], i * 3);
     this.age[i] = 0;
     this.life[i] = Math.max(sample(d.lifetime, t), 0.05);
     if (this.trail) {
@@ -989,8 +1041,7 @@ class Emitter {
       const up = this.gravityLocal ? this.gravityLocal.clone().negate().normalize() : new THREE.Vector3(0, 1, 0);
       const byVelocity = d.render.alignment === 4;
       const spinQ = new THREE.Quaternion();
-      const euler = new THREE.Euler(0, 0, 0, 'YXZ');
-      const counts = this.parts.map(() => 0);
+      const euler = new THREE.Euler(0, 0, 0, 'YXZ');      const counts = this.parts.map(() => 0);
       const total = this.parts.reduce((n, p) => n + p.weight, 0);
       for (let i = 0; i < this.count; i++) {
         const lt = this.age[i] / this.life[i];
@@ -1039,7 +1090,11 @@ class Emitter {
       const size = grow * this.size0[i] * (d.sizeOverLife ? sample(d.sizeOverLife, lt, this.rand[i * 2]) : 1);
       const frame = this.frameOf(i, lt);
       this.posAttr.setXYZ(i, this.local.pos[i * 3], this.local.pos[i * 3 + 1], this.local.pos[i * 3 + 2]);
-      this.velAttr.setXYZ(i, this.local.vel[i * 3], this.local.vel[i * 3 + 1], this.local.vel[i * 3 + 2]);
+      // Stretched billboards follow the whole velocity, the velocity module's included: 1.62
+      // Transylvania's cemetery fog (start speed 0, drifting by its module) stood upright in streaks
+      // (not the drift of a world-space system on a moving node: in the world they don't move)
+      const dr = this.drift ?? { x: 0, y: 0, z: 0 };
+      this.velAttr.setXYZ(i, this.heading[i * 3] - dr.x, this.heading[i * 3 + 1] - dr.y, this.heading[i * 3 + 2] - dr.z);
       this.miscAttr.setXYZW(i, size, this.rot[i], frame, 0);
       this.tiltAttr.setXY(i, this.tilt[i * 2], this.tilt[i * 2 + 1]);
       this.color(i, lt, col, life);

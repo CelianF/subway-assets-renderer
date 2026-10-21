@@ -28,4 +28,8 @@
 //   2.12 Journey to the East's train glass reflection layer was dropped)
 // 11 (2026-10-21): the theme's own run-wide snow (1.x `_effects` FallingSnowThemeEffect, the
 //   runner EFX's showSnow): 1.32 and 1.96 London had no snow while running
-export const IMPORT_VERSION = 11;
+// 12 (2026-10-21): Unity <= 5.4 particle bursts (cnt0-3/time0-3: 1.46 Transylvania's
+//   pillar-hall lightning never flashed); 1.x decorations no placeholder spawns are
+//   "unplaced" (1.46's extra_3 glow in the cemetery); Mesh shapes keep their mesh (3.70
+//   Transylvania's frost rose on the middle track instead of beside it)
+export const IMPORT_VERSION = 12;

@@ -2152,8 +2152,8 @@ let weatherTheme = null;
  * The theme's own effect that follows the runner while running (ThemeEffectFollowPlayer:
  * Vancouver Autumn's falling leaves, Transylvania's frost): it stands in for the start-train
  * weather above. Placed every frame at its offset from where the runner would be (the game
- * camera rides 33 behind and above it); its world-space particles stay put as it moves,
- * and come at the camera at the run speed, as the runner runs into them.
+ * camera rides 33 behind and above it); its world-space particles stay put in the decor as
+ * it moves.
  */
 const followEffectsOf = (theme) => (manifest.themeConfigs?.[theme]?.effects ?? []).filter((e) => e.follow && manifest.prefabs[e.prefab]?.glb);
 let followFx = []; // { obj, effect, particles } per effect
@@ -2186,8 +2186,9 @@ async function attachRunnerParticles(obj, particles, { anchored = false } = {}) 
   const emitters = await attachParticles(obj, table, materials, (n) => nodeKey(table, n), particleMesh);
   for (const e of emitters) {
     if (e.def.local) continue;
+    // (no drift back at the run speed: in game they stay in the decor; streaming past a still
+    // camera, 3.70 Transylvania's frost read as fast smoke)
     e.worldLock = { pos: new THREE.Vector3(), ready: false, anchored };
-    if (!anchored) e.drift = new THREE.Vector3(0, 0, -RUN_SPEED).applyQuaternion(e.node.getWorldQuaternion(new THREE.Quaternion()).invert());
     e.travel = RUN_SPEED;
     // Imported before rate over distance was kept: a looping system that never emits over
     // time nor in bursts emitted on distance; 2.27 Christmas gifts' rate (0.05 a unit) until
