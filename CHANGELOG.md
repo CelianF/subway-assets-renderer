@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1: security update (2026-10-21)
+
+Electron 44.9.3: the bundled trust store now rejects the eight compromised eMudhra intermediate CAs (fixed in Electron 44.9.1). No other change.
+
 ## 1.2.0: the classic cities update (2026-10-20)
 
 51 commits since 1.1.0. The viewer used to be built around recent maps (3.x). This release makes the **whole history of the game** work: 1.x and 2.x cities are laid out, animated and lit the way the game does, and the home page and importer got the tools to handle a library of dozens of maps.
