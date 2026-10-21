@@ -1,7 +1,7 @@
 {
   "name": "subway-assets-renderer",
   "productName": "Subway Assets Renderer",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Environment viewer for Subway Surfers maps",
   "license": "AGPL-3.0-only",
   "author": "CelianF",
