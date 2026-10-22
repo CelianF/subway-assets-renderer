@@ -32,4 +32,10 @@
 //   pillar-hall lightning never flashed); 1.x decorations no placeholder spawns are
 //   "unplaced" (1.46's extra_3 glow in the cemetery); Mesh shapes keep their mesh (3.70
 //   Transylvania's frost rose on the middle track instead of beside it)
-export const IMPORT_VERSION = 12;
+// 13 (2026-10-22): ≤ 1.43 classic levels split the modern way: road looks as sections, chunks
+//   with their own scenery laid whole, the plain chunks' trains and obstacles as gameplay
+//   chunks (`manifest.classic`): the chunk editor and the studio work on them like any map
+export const IMPORT_VERSION = 13;
+// Maps built before this one don't open: the viewer has dropped what reading them needed (13:
+// classic levels as whole chunks) and asks for a re-import
+export const MIN_IMPORT_VERSION = 13;

@@ -2533,7 +2533,7 @@ function parseClassic(root, project, guidIndex, log) {
       }
       if (CLASSIC_HIDE.test(name)) out.hide = true;
       if (/^trains?_|^random_trainType$|^train_ramp$/i.test(name)) out.layer = 'train';
-      else if (/^blocker$|^lightSignal$|^powerbox/i.test(name)) out.layer = 'obstacle';
+      else if (/^blocker$|^lightSignal$|^powerbox|^bush$|^dumpster$|^pillar$/i.test(name)) out.layer = 'obstacle';
       if (Object.keys(out).length) extras.set(ni, out);
     }
 
@@ -2747,6 +2747,10 @@ function parseClassic(root, project, guidIndex, log) {
       obstacle_barrier_roll: [['blocker_roll', 'Blocker_Roll']],
       obstacle_barrier_standard: [['blocker_standard', 'Blocker_Standard']],
       obstacle_lightSignal: [['lightSignal', 'LightSignal']],
+      obstacle_bush: [['bush', 'Bush']],
+      obstacle_dumpster: [['dumpster', 'Dumpster']],
+      obstacle_powerBox: [['powerbox', 'PowerBox']],
+      obstacle_pillar: [['pillar', 'Pillar']],
     };
     const inLibrary = new Set();
     const collect = (i) => {
@@ -2770,15 +2774,451 @@ function parseClassic(root, project, guidIndex, log) {
         pieces.push({ name, slot, bbox, offset });
       }
     }
+    const split = splitClassic(json, extras, rename, skip, chunks, subtreeBbox);
+    if (split.looks.length) log(`  split: ${split.looks.filter((l) => l.slot.startsWith('classic_')).length} road looks, ${split.looks.filter((l) => l.slot.startsWith('boundary_pillars')).length} pillar hall pieces, ${Object.keys(split.gameplay).length} gameplay chunks, ${chunks.filter((c) => c.special).length} special chunks`);
     const libraryGlb = glbSubset(glb, library, extras, rename, skip, geometryFor);
     if (rebuilt || failed) log(`  Primitives rebuilt from mesh assets (UVs): ${rebuilt}${failed ? `, ${failed} left without` : ''}`);
     if (swapped) log(`  Primitives swapped for ${meshPrefix} meshes: ${swapped}`);
     plainPass = true;
     const plainLibrary = meshPrefix && swapped ? glbSubset(glb, library, extras, rename, skip, geometryFor) : null;
     if (seasonal) config.season = SEASON_NAMES[season] ?? season;
-    return { name, chunks, pieces, config, library: libraryGlb, plainLibrary, textureSwaps };
+    return { name, chunks, pieces, config, library: libraryGlb, plainLibrary, textureSwaps, ...split };
   }
   return null;
+}
+
+// Classic chunks split the modern way: each chunk's road segments (RandomizerHold: one of six
+// looks, the road, buildings, subway, forest, edges, kept over 3000 units) become pieces of
+// their look's slot, and its trains and obstacles a chunk of placements (random groups,
+// RandomizeOffset lanes, Mirror flips). Chunks with scenery of their own (the start, tunnels,
+// stations, pillar halls, the bridge) stay whole: their trains go with their tracks.
+const CLASSIC_GAMEPLAY = /^(train_(cargo|standard|sub)(_\d)?|train_ramp|blocker_(jump|roll|standard)|lightSignal|bush|dumpster|powerbox|pillar|pogo|pow)$/i;
+function classicSlot(name, moving) {
+  const train = name.match(/^train_(?:cargo|standard|sub)(?:_(\d))?$/i);
+  if (train) return `train_${moving ? 'moving' : 'static'}_${train[1] ?? 1}`;
+  const blocker = name.match(/^blocker_(jump|roll|standard)$/i);
+  if (blocker) return `obstacle_barrier_${blocker[1].toLowerCase()}`;
+  return { train_ramp: 'train_ramp', lightsignal: 'obstacle_lightSignal', bush: 'obstacle_bush', dumpster: 'obstacle_dumpster', powerbox: 'obstacle_powerBox', pillar: 'obstacle_pillar' }[name.toLowerCase()] ?? null;
+}
+
+function splitClassic(json, extras, rename, skip, chunks, subtreeBbox) {
+  const nodes = json.nodes;
+  const ex = (i) => extras.get(i) ?? {};
+  const kids = (i) => (nodes[i].children ?? []).filter((c) => !skip.has(c) && !ex(c).hide);
+  // A subtree's content, the same wherever it's instanced (each copy has its own glb mesh)
+  const meshSig = (mi) => json.meshes[mi].primitives.map((p) => {
+    const a = json.accessors[p.attributes.POSITION];
+    return `${json.meshes[mi].name}:${a.count}:${a.min}:${a.max}:${json.materials[p.material]?.name ?? ''}`;
+  }).join(';');
+  // (branches without a mesh draw nothing: 1.27 Los Angeles' buildings look holds empty
+  // "buildings" groups, otherwise the road)
+  const drawn = (i) => nodes[i].mesh != null || kids(i).some(drawn);
+  const signature = (i) => {
+    const n = nodes[i];
+    const own = [n.mesh != null ? meshSig(n.mesh) : '', JSON.stringify(ex(i))];
+    const xf = ['translation', 'rotation', 'scale'].map((k) => (n[k] ?? []).map((v) => round(v, 2)).join(','));
+    return `${n.name}|${own.join('|')}|${xf.join('|')}[${kids(i).filter(drawn).map(signature).join(',')}]`;
+  };
+  const sigOwn = (i) => {
+    // (the look node itself sits at the segment's origin: its own transform is the segment's;
+    // its name aside, two looks can be one model: LA's road and buildings, both edges)
+    const n = nodes[i];
+    return `${n.mesh != null ? meshSig(n.mesh) : ''}[${kids(i).filter(drawn).map(signature).join(',')}]`;
+  };
+  const isScenery = (name) => !CLASSIC_GAMEPLAY.test(name);
+  const nodeOf = (c) => [...rename].find(([, n]) => n === c.name)?.[0];
+
+  // Point transforms down the tree, the chunk's root at the origin
+  const local = (n, t = n.translation ?? [0, 0, 0]) => (p) => {
+    const s = n.scale ?? [1, 1, 1];
+    const q = qrot(n.rotation ?? [0, 0, 0, 1], [0, 1, 2].map((k) => p[k] * s[k]));
+    return [0, 1, 2].map((k) => q[k] + t[k]);
+  };
+
+  // Road looks: one piece per distinct subtree of each look (named by its node: "1_road_buildings")
+  const lookPieces = new Map(); // signature -> prefab name
+  const lookSlots = new Map(); // slot -> [prefab names]
+  const lookRefs = [];
+  let order = null; // look index -> slot, from the commonest RandomizerHold
+  const holdOrders = new Map();
+  for (const c of chunks) {
+    if (c.chunk.intro) continue;
+    const root = nodeOf(c);
+    const walk = (i, xf) => {
+      for (const k of kids(i)) {
+        const f = (p) => xf(local(nodes[k])(p));
+        if (ex(k).pick === 'hold') lookRefs.push({ chunk: c, node: k, z: round(f([0, 0, 0])[2], 1) });
+        else walk(k, f);
+      }
+    };
+    walk(root, (p) => p);
+  }
+  for (const { node } of lookRefs) {
+    const key = JSON.stringify(ex(node).hold);
+    holdOrders.set(key, (holdOrders.get(key) ?? 0) + 1);
+  }
+  const common = JSON.parse([...holdOrders].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'null');
+  const slotOfLook = (i) => `classic_${nodes[i].name.replace(/^\d+_/, '').replace(/[^A-Za-z0-9]+/g, '_').toLowerCase()}`;
+  // Each distinct model once, in the slot of the looks that use it: one look's own, or for a
+  // left/right pair the side-less name (both edges: classic_edge); others the first's
+  const usedBy = new Map(); // signature -> { node, slots }
+  for (const ref of lookRefs) {
+    const children = nodes[ref.node].children ?? [];
+    for (const k of ex(ref.node).hold) {
+      const c = children[k];
+      if (c == null || skip.has(c)) continue;
+      const key = sigOwn(c);
+      if (!usedBy.has(key)) usedBy.set(key, { node: c, slots: new Set() });
+      usedBy.get(key).slots.add(slotOfLook(c));
+    }
+  }
+  const pieceSlot = new Map(); // signature -> slot
+  for (const [key, { slots }] of usedBy) {
+    const list = [...slots];
+    const sided = list.length === 2 && list.every((s) => /_(left|right)$/.test(s)) && list[0].replace(/_(left|right)$/, '') === list[1].replace(/_(left|right)$/, '');
+    pieceSlot.set(key, sided ? list[0].replace(/_(left|right)$/, '') : list[0]);
+  }
+  const lookPiece = (i) => {
+    const key = sigOwn(i);
+    if (lookPieces.has(key)) return lookPieces.get(key);
+    const slot = pieceSlot.get(key);
+    const label = slot.slice(8).split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join('');
+    const list = lookSlots.get(slot) ?? lookSlots.set(slot, []).get(slot);
+    const name = `Classic_${label}${list.length ? `_${list.length + 1}` : ''}`;
+    rename.set(usedBy.get(key).node, name);
+    list.push({ name, bbox: subtreeBbox(usedBy.get(key).node) });
+    lookPieces.set(key, name);
+    return name;
+  };
+  const looks = [];
+  for (const ref of lookRefs) {
+    const children = nodes[ref.node].children ?? [];
+    ref.looks = ex(ref.node).hold.map((k) => (children[k] != null && !skip.has(children[k]) ? lookPiece(children[k]) : null));
+    if (!order && common && JSON.stringify(ex(ref.node).hold) === JSON.stringify(common)) order = common.map((k) => pieceSlot.get(sigOwn(children[k])));
+  }
+
+  // A pillar hall the modern way: the 2-track chunks' long-pillars option is a start piece,
+  // 180-long middles and an end (road_pillars_extended_*), as the modern hall, between road
+  // segments. Those chunks are laid as these pieces (boundary_pillars_*: Chunk mode's Pillar
+  // hall, its length set with − / +), with that option's trains and pillars; their short-pillars
+  // option (halls and road in turn) is left out
+  const hallParts = new Map(); // start | mid | end -> { name, bbox }
+  const HALL = /^road_pillars_extended_(start|mid|end)$/i;
+  const hallOf = (i) => {
+    const ks = kids(i);
+    if (ex(i).pick === 'random') {
+      const k = ks.find((o) => kids(o).some((w) => HALL.test(nodes[w].name)));
+      if (k != null) return { group: i, option: k };
+    }
+    for (const k of ks) {
+      if (ex(k).pick === 'hold') continue;
+      const found = hallOf(k);
+      if (found) return found;
+    }
+    return null;
+  };
+  // A station the same way: the 1-track chunks' long station (road_station_extended under
+  // station_extended, 360) or short one (road_station, station: 180) as one piece each, road
+  // and platforms together (classic_station_long / _short: Chunk mode's Station, 1 short, 2
+  // long); the chunks laid with the long one where they choose
+  const STATION = /^(road_)?station(_extended)?$/i;
+  const stationOf = (i) => {
+    const ks = kids(i);
+    if (ex(i).pick === 'random') {
+      const holds = (o, re) => kids(o).some((w) => re.test(nodes[w].name));
+      const k = ks.find((o) => holds(o, /^station_extended$/i)) ?? ks.find((o) => holds(o, /^station$/i));
+      if (k != null) return { group: i, option: k };
+    }
+    for (const k of ks) {
+      if (ex(k).pick === 'hold') continue;
+      if (nodes[k].mesh != null && /^station(_extended)?$/i.test(nodes[k].name)) return { group: null, option: null };
+      const found = stationOf(k);
+      if (found) return found;
+    }
+    return null;
+  };
+  const stationParts = new Map(); // mesh name -> { name, bbox }
+  const stationPieces = new Map(); // short | long -> { name, parts, length }
+  const stationPiece = (size, names) => {
+    if (!stationPieces.has(size)) {
+      const label = size === 'long' ? 'Long' : '';
+      stationPieces.set(size, { name: `Classic_Station${label || 'Short'}`, parts: names.map((n) => ({ prefab: stationParts.get(n).name, pos: [0, 0, 0] })), length: size === 'long' ? 360 : 180 });
+    }
+    return stationPieces.get(size).name;
+  };
+  const stationPart = (k) => {
+    const name = nodes[k].name;
+    if (!stationParts.has(name)) {
+      const piece = `Classic_${name.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join('')}`;
+      rename.set(k, piece);
+      stationParts.set(name, { name: piece, bbox: subtreeBbox(k) });
+    }
+  };
+  // A plain road segment: a road mesh (1.0: "road" with random building groups under it;
+  // later games' fixed "road 1", "road 2" beside the looks), the Road slot's piece of its model
+  const ROAD = /^(\d+_)?road( \d+)?$/i;
+  const isRoad = (i) => nodes[i].mesh != null && ROAD.test(nodes[i].name);
+  const roadPieceOf = (k) => {
+    const key = sigOwn(k);
+    if (lookPieces.has(key)) return lookPieces.get(key);
+    const list = lookSlots.get('classic_road') ?? lookSlots.set('classic_road', []).get('classic_road');
+    const name = `Classic_Road${list.length ? `_${list.length + 1}` : ''}`;
+    rename.set(k, name);
+    list.push({ name, bbox: subtreeBbox(k) });
+    lookPieces.set(key, name);
+    return name;
+  };
+  /** A chunk's road segments outside random groups: [{ z, prefab, slot }], and whether one sits in a random group. */
+  const roadsOf = (root) => {
+    const out = [];
+    let random = false;
+    const walk = (i, xf, inRandom) => {
+      for (const k of kids(i)) {
+        if (ex(k).pick === 'hold') continue;
+        const f = (p) => xf(local(nodes[k])(p));
+        if (isRoad(k)) {
+          if (inRandom) random = true;
+          else out.push({ z: round(f([0, 0, 0])[2], 1), prefab: roadPieceOf(k), slot: 'classic_road' });
+          continue;
+        }
+        walk(k, f, inRandom || (ex(k).pick === 'random' && kids(k).length > 1));
+      }
+    };
+    walk(root, (p) => p, false);
+    return { roads: out, random };
+  };
+  /** Scenery of its own beyond its road segments (their buildings included). */
+  const ownScenery = (i) => kids(i).some((k) => ex(k).pick !== 'hold' && !isRoad(k) && ((nodes[k].mesh != null && isScenery(nodes[k].name)) || ownScenery(k)));
+  const hallGround = (root, hall) => {
+    const out = [];
+    const walk = (i, xf) => {
+      for (const k of kids(i)) {
+        if (ex(k).pick === 'hold') continue; // (in lookRefs)
+        if (hall.group != null && i === hall.group && k !== hall.option) continue;
+        const f = (p) => xf(local(nodes[k])(p));
+        const name = nodes[k].name;
+        const part = name.match(HALL)?.[1]?.toLowerCase();
+        if (nodes[k].mesh != null && part) {
+          if (!hallParts.has(part)) {
+            const piece = `Classic_Pillars${part[0].toUpperCase()}${part.slice(1)}`;
+            rename.set(k, piece);
+            hallParts.set(part, { name: piece, bbox: subtreeBbox(k) });
+          }
+          out.push({ z: round(f([0, 0, 0])[2], 1), prefab: hallParts.get(part).name, slot: `boundary_pillars_${part}` });
+        } else if (nodes[k].mesh != null && STATION.test(name)) {
+          // (road and platforms meet at one spot: one piece there)
+          stationPart(k);
+          const size = /_extended$/i.test(name) ? 'long' : 'short';
+          const z = round(f([0, 0, 0])[2], 1);
+          const here = out.find((g) => g.z === z && g.slot === `classic_station_${size}`);
+          if (here) here.names.push(name);
+          else out.push({ z, slot: `classic_station_${size}`, names: [name], size });
+        } else if (isRoad(k)) {
+          out.push({ z: round(f([0, 0, 0])[2], 1), prefab: roadPieceOf(k), slot: 'classic_road' });
+          continue; // (its buildings are the piece's)
+        }
+        walk(k, f);
+      }
+    };
+    walk(root, (p) => p);
+    for (const g of out) {
+      if (!g.names) continue;
+      g.prefab = stationPiece(g.size, g.names.sort());
+      delete g.names;
+      delete g.size;
+    }
+    return out;
+  };
+
+  // Chunks: plain ones (scenery only in their road segments) split; the others whole
+  const gameplay = {};
+  for (const c of chunks) {
+    if (c.chunk.intro) continue;
+    const root = nodeOf(c);
+    // (only when every scenery mesh of its own becomes a piece: 1.0's stations also lay a
+    // random overlay of upper buildings, kept with the chunk laid whole)
+    const covers = (found) => {
+      if (!found) return null;
+      const covered = (i) => kids(i).every((k) => {
+        if (ex(k).pick === 'hold' || isRoad(k)) return true;
+        if (found.group != null && i === found.group && k !== found.option) return true;
+        const name = nodes[k].name;
+        if (nodes[k].mesh != null && isScenery(name) && !HALL.test(name) && !STATION.test(name)) return false;
+        return covered(k);
+      });
+      return covered(root) ? found : null;
+    };
+    // (the run's start is laid whole, its first half under the intro: 1.0's is plain road)
+    const start = c.chunk.zMin === 0 && c.chunk.zMax != null && c.chunk.zMax <= 1;
+    const hall = start ? null : covers(hallOf(root)) ?? covers(stationOf(root));
+    const { roads, random: roadInRandom } = hall ? { roads: [], random: false } : roadsOf(root);
+    if (!hall && (ownScenery(root) || roadInRandom || start)) {
+      c.special = true;
+      // Its scenery's own random pick (Randomizer), each option a card in Chunk mode: the
+      // tunnel chunks are the classic gate (tunnel_s/r/m/l walls, each option named for its
+      // opening: sides, right, mid, left), the 1-track chunk one long station or two short
+      // ones, the 2-track one long or short pillars
+      const sceneryOf = (i) => {
+        const out = [];
+        const walk = (k) => {
+          if (ex(k).pick === 'hold') return;
+          if (nodes[k].mesh != null && isScenery(nodes[k].name)) out.push(nodes[k].name);
+          for (const q of kids(k)) walk(q);
+        };
+        walk(i);
+        return out.sort();
+      };
+      const findChoice = (i) => {
+        const ks = kids(i);
+        if (ex(i).pick === 'random' && ks.length > 1 && new Set(ks.map((k) => sceneryOf(k).join())).size > 1) {
+          const wall = (k) => kids(k).some((w) => /^tunnel_[a-z]$/i.test(nodes[w].name));
+          return { group: nodes[i].name, options: ks.map((k) => ({ name: nodes[k].name, stations: sceneryOf(k).filter((n) => /^station/i.test(n)).length })), gate: ks.every(wall) };
+        }
+        for (const k of ks) {
+          if (ex(k).pick === 'hold') continue;
+          const found = findChoice(k);
+          if (found) return found;
+        }
+        return null;
+      };
+      const choice = findChoice(root);
+      const gate = !!choice?.gate;
+      if (choice) {
+        delete choice.gate;
+        c.choice = choice;
+      }
+      // What the modern sections call it, from its own scenery: the run's start (picked only
+      // at 0), a station (one track between platforms), a pillar hall (two tracks), the
+      // landmark (the bridge)
+      const own = new Set(sceneryOf(root));
+      const has = (re) => [...own].some((n) => re.test(n));
+      const { zMin, zMax } = c.chunk;
+      // (1.0: a random setting for the whole chunk, bridge, forest, plain road or subway: laid
+      // whole, a card per setting, not a landmark)
+      const setting = (choice?.options ?? []).filter((o) => /^(normal|forest|subway)/i.test(o.name)).length >= 2;
+      c.kind = setting ? 'setting' : gate ? 'gate' : zMin === 0 && zMax != null && zMax <= 1 ? 'start' : has(/station/i) ? 'station' : has(/pillars/i) ? 'pillars' : has(/bridge/i) ? 'epic' : 'other';
+      continue;
+    }
+    c.ground = [...lookRefs.filter((r) => r.chunk === c).map((r) => ({ z: r.z, looks: r.looks })), ...(hall ? hallGround(root, hall) : roads)].sort((a, b) => a.z - b.z);
+    const placements = [];
+    // conds: [group, option] all the way up; mirrors: [id, x], innermost first
+    const visit = (i, xf, conds, mirrors, moving) => {
+      const e = ex(i);
+      if (e.pick === 'hold') return;
+      const n = nodes[i];
+      const t = n.translation ?? [0, 0, 0];
+      const options = e.lanes?.length ? e.lanes.map((lane) => ({ t: [lane, t[1], t[2]], cond: [`L${i}`, lane] })) : [{ t, cond: null }];
+      for (const o of options) {
+        const f = (p) => xf(local(n, o.t)(p));
+        const here = o.cond ? [...conds, o.cond] : conds;
+        const mv = moving || e.moving > 0;
+        const mir = e.mirror ? [[`M${i}`, round(f([0, 0, 0])[0], 2)], ...mirrors] : mirrors;
+        const slot = n.mesh != null ? classicSlot(n.name, mv) : null;
+        if (slot) {
+          const [x, y, z] = f([0, 0, 0]).map((v) => round(v, 2));
+          const pl = { slot, pos: [x, y, z] };
+          if (slot.startsWith('train_static') || slot.startsWith('train_moving')) {
+            // (trains are laid from their back end: the piece's origin)
+            const a = json.accessors[json.meshes[n.mesh].primitives[0].attributes.POSITION];
+            const zs = [a.min[2], a.max[2]].map((mz) => f([a.min[0], a.min[1], mz])[2]);
+            pl.pos[2] = round(Math.min(...zs), 2);
+            pl.extent = round(Math.max(...zs) - Math.min(...zs), 2);
+          }
+          if (here.length) pl.conds = here;
+          if (mir.length) pl.mirrors = mir;
+          placements.push(pl);
+        }
+        const ks = kids(i);
+        if (hall?.group === i) visit(hall.option, f, here, mir, mv); // (the long-pillars hall, the long station)
+        else if (e.pick === 'random' && ks.length) {
+          // One of identical-looking options (a train's three skins) is the slot's own pick
+          const same = ks.every((k) => nodes[k].mesh != null && classicSlot(nodes[k].name, mv) && classicSlot(nodes[k].name, mv) === classicSlot(nodes[ks[0]].name, mv) && JSON.stringify(nodes[k].translation ?? []) === JSON.stringify(nodes[ks[0]].translation ?? []));
+          if (same) visit(ks[0], f, here, mir, mv);
+          else for (const [idx, k] of ks.entries()) visit(k, f, [...here, [`R${i}`, idx]], mir, mv);
+        } else for (const k of ks) visit(k, f, here, mir, mv);
+      }
+    };
+    for (const k of kids(root)) visit(k, (p) => p, [], [], false);
+    // MovingTrain: two in a lane never touch in the game (each runs ahead of the next until it
+    // meets the runner): moved forward to clear the one before, as the chunks were shown
+    const lanes = new Map();
+    for (const pl of placements) {
+      if (!pl.slot.startsWith('train_moving')) continue;
+      const key = `${pl.pos[0]}|${JSON.stringify(pl.conds ?? [])}`;
+      (lanes.get(key) ?? lanes.set(key, []).get(key)).push(pl);
+    }
+    for (const list of lanes.values()) {
+      let end = -Infinity;
+      for (const pl of list.sort((a, b) => a.pos[2] - b.pos[2])) {
+        pl.pos[2] = round(Math.max(pl.pos[2], end + 1), 2);
+        end = pl.pos[2] + pl.extent;
+      }
+    }
+    for (const pl of placements) delete pl.extent;
+    gameplay[c.name] = { length: c.chunk.zSize, placements };
+  }
+  // Chunks laid whole with the same scenery of their own (the bridge, the gate, the start
+  // road), more road segments and trains around it aside, are one Chunk mode card: the
+  // shortest one (`dupOf`, `dupAt`: where its scenery sits in the other; their road
+  // segments are their `ground`)
+  const coreOf = (root) => {
+    const out = [];
+    const walk = (i, xf) => {
+      for (const k of kids(i)) {
+        if (ex(k).pick === 'hold' || isRoad(k)) continue;
+        const f = (p) => xf(local(nodes[k])(p));
+        if (nodes[k].mesh != null && isScenery(nodes[k].name)) out.push({ sig: meshSig(nodes[k].mesh), at: f([0, 0, 0]).map((v) => round(v, 1)) });
+        walk(k, f);
+      }
+    };
+    walk(root, (p) => p);
+    const z0 = Math.min(...out.map((m) => m.at[2]));
+    return { z0, key: out.map((m) => `${m.sig}@${m.at[0]},${m.at[1]},${round(m.at[2] - z0, 1)}`).sort().join(';') };
+  };
+  const byCore = new Map();
+  for (const c of chunks) {
+    if (!c.special) continue;
+    const core = coreOf(nodeOf(c));
+    c.ground = [...lookRefs.filter((r) => r.chunk === c).map((r) => ({ z: r.z, looks: r.looks })), ...roadsOf(nodeOf(c)).roads].sort((a, b) => a.z - b.z);
+    const key = `${c.kind}|${core.key}`;
+    const rep = byCore.get(key);
+    if (!rep || c.chunk.zSize < rep.c.chunk.zSize) byCore.set(key, { c, z0: core.z0 });
+    c.core = core;
+  }
+  for (const c of chunks) {
+    if (!c.special) continue;
+    const rep = byCore.get(`${c.kind}|${c.core.key}`);
+    // (its length must be the other's and its road segments': else it has more of its own)
+    if (rep.c !== c && c.chunk.zSize === rep.c.chunk.zSize + 180 * c.ground.length) {
+      c.dupOf = rep.c.name;
+      c.dupAt = round(c.core.z0 - rep.z0, 1);
+    }
+    delete c.core;
+  }
+  // (after the chunks: their plain road segments add Road pieces)
+  for (const [slot, pieces] of lookSlots) looks.push({ slot, pieces });
+  for (const [part, piece] of hallParts) looks.push({ slot: `boundary_pillars_${part}`, pieces: [piece] });
+  // Both stations, wherever the chunks hold them (the short one is only an option the chunks
+  // are laid without: Chunk mode's Station at length 1)
+  for (const c of chunks) {
+    const root = nodeOf(c);
+    if (root == null) continue;
+    const scan = (i) => {
+      for (const k of kids(i)) {
+        if (nodes[k].mesh != null && STATION.test(nodes[k].name)) stationPart(k);
+        scan(k);
+      }
+    };
+    scan(root);
+  }
+  for (const [size, names] of [['short', ['road_station', 'station']], ['long', ['road_station_extended', 'station_extended']]]) {
+    if (names.every((n) => stationParts.has(n))) stationPiece(size, names);
+  }
+  // (the station pieces are composites: their road and platform parts, pieces of their own)
+  const parts = [...stationParts.values()];
+  const composites = [...stationPieces].map(([size, piece]) => ({ slot: `classic_station_${size}`, ...piece }));
+  // (no RandomizerHold in 1.0: its roads are the only look)
+  return { looks, lookOrder: order ?? looks.map((l) => l.slot).filter((s) => s.startsWith('classic_')), gameplay, parts, composites };
 }
 
 // ---------------------------------------------------------------- particles
@@ -3521,8 +3961,15 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   // ≤ 1.43: no themes either, the level is a scene of hand-built chunks
   const classic = !Object.keys(themes).length ? parseClassic(root, project, guidIndex, log) : null;
   if (classic) {
-    themes[classic.name] = { classic_chunk: classic.chunks.map((c) => c.name) };
+    // Road looks and the chunks laid whole as theme pieces; trains and obstacles as the studio's
+    // (a moving train is a static one the game sets going)
+    themes[classic.name] = { classic_special: classic.chunks.filter((c) => c.special).map((c) => c.name) };
+    const intro = classic.chunks.find((c) => c.chunk.intro);
+    if (intro) themes[classic.name].classic_intro = [intro.name];
+    for (const { slot, pieces } of classic.looks) themes[classic.name][slot] = pieces.map((p) => p.name);
     for (const p of classic.pieces) (themes[classic.name][p.slot] ??= []).push(p.name);
+    for (const n of [1, 3, 5]) if (themes[classic.name][`train_static_${n}`]) themes[classic.name][`train_moving_${n}`] = themes[classic.name][`train_static_${n}`];
+    for (const c of classic.composites) themes[classic.name][c.slot] = [c.name];
   }
   log(`Themes: ${Object.keys(themes).join(', ')}${Object.keys(legacy).length ? ' (1.x format)' : ''}${classic ? ' (classic chunks)' : ''}`);
 
@@ -3542,6 +3989,8 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     const chunk = parseChunk(p, guidIndex);
     if (chunk.placements.length) chunks[stem(p).replace(/^Chase_Chunk_/, '')] = chunk;
   }
+  // ≤ 1.43: the plain classic chunks' trains and obstacles
+  if (classic) Object.assign(chunks, classic.gameplay);
   const placementCount = Object.values(chunks).reduce((n, c) => n + c.placements.length, 0);
   log(`Chunks: ${Object.keys(chunks).length} (${placementCount} placements)`);
   const modes = parseModes(find, guidIndex, log);
@@ -3626,7 +4075,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => [...(c.skylineLayers?.layers ?? []), ...(c.plain?.skylineLayers?.layers ?? [])].flatMap((l) => [...l.fill, ...l.singles, ...(l.classic?.cycle.map((m) => m.name) ?? [])])));
   transitionPrefabs.push(Object.values(themeConfigs).flatMap((c) => (c.distantObjects?.objects ?? []).flatMap((d) => d.prefabs ?? [d.prefab])));
   transitionPrefabs.push([...composites.values()].flatMap((parts) => parts.map((p) => p.prefab)));
-  const classicNames = new Set([...(classic?.chunks ?? []), ...(classic?.pieces ?? [])].map((c) => c.name));
+  const classicNames = new Set([...(classic?.chunks ?? []), ...(classic?.pieces ?? []), ...(classic?.looks ?? []).flatMap((l) => l.pieces), ...(classic?.parts ?? []), ...(classic?.composites ?? [])].map((c) => c.name));
   const nameLists = [...Object.values(themes).flatMap((slots) => Object.values(slots)), ...transitionPrefabs];
   // 1.x placeholder contents (and theirs, recursively)
   // Placeholders can name generic prefabs ("event_3_gen"): the game swaps in the city's own
@@ -3677,8 +4126,18 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     // Without the season's meshes (the viewer's season toggle)
     const plain = classic.plainLibrary ? { plainGlb: 'glb/Classic_chunks_plain.glb' } : {};
     if (classic.plainLibrary) writeFileSync(path.join(outGlb, 'Classic_chunks_plain.glb'), classic.plainLibrary);
-    for (const c of classic.chunks) prefabs[c.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: c.name, meshes: 1, materials, bbox: c.bbox, chunk: c.chunk };
+    // (a chunk laid whole takes its own length along the run, not its bounds')
+    for (const c of classic.chunks) prefabs[c.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: c.name, meshes: 1, materials, bbox: c.bbox, chunk: c.chunk, ...(c.special ? { length: c.chunk.zSize, classicKind: c.kind } : {}), ...(c.choice ? { choice: c.choice } : {}), ...(c.dupOf ? { dupOf: c.dupOf, dupAt: c.dupAt } : {}) };
     for (const p of classic.pieces) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox, ...(p.offset ? { offset: p.offset } : {}) };
+    // (180 a segment; 1.0's pillar hall pieces are two segments long)
+    const segments = (bbox) => Math.max(180, Math.round((bbox ? bbox[1][2] - bbox[0][2] : 180) / 180) * 180);
+    for (const { pieces } of classic.looks) for (const p of pieces) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox, length: segments(p.bbox) };
+    for (const p of classic.parts) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox };
+    for (const c of classic.composites) {
+      const boxes = c.parts.map((q) => prefabs[q.prefab]?.bbox).filter(Boolean);
+      const bbox = boxes.length ? [[0, 1, 2].map((k) => Math.min(...boxes.map((b) => b[0][k]))), [0, 1, 2].map((k) => Math.max(...boxes.map((b) => b[1][k])))] : null;
+      prefabs[c.name] = { parts: c.parts, bbox, length: c.length };
+    }
   }
 
   // 1.x: the generic role of each themed prefab (name rules in the viewer use it)
@@ -3999,6 +4458,17 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     chunks,
     modes,
     ...(prePortal ? { prePortal } : {}),
+    // ≤ 1.43: the game's chunk picker (Track.cs) and each plain chunk's road segments:
+    // where they are and which piece each of the six looks lays there
+    ...(classic
+      ? {
+          classic: {
+            looks: classic.lookOrder,
+            intro: classic.chunks.find((c) => c.chunk.intro)?.name ?? null,
+            chunks: classic.chunks.filter((c) => !c.chunk.intro).map((c) => ({ name: c.name, ...c.chunk, ...(c.special ? { special: true } : {}), ground: c.ground ?? [] })),
+          },
+        }
+      : {}),
     pickups: pickups.filter((n) => prefabs[n]?.bbox),
     // (a hunt token is a model a few units across; menu-sized ones are left out)
     huntTokens: huntTokens.filter((n) => prefabs[n]?.bbox && prefabs[n].bbox[1][0] - prefabs[n].bbox[0][0] > 2),

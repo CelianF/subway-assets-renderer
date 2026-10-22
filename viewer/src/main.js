@@ -6,14 +6,14 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FlyControls } from './flyControls.js';
 import { prepareCutaway, registerPiece, updatePieces, cutawayDebug, largestIslandCenter } from './cutaway.js';
 import { MaterialLibrary, unruledShaders, setBendDegrees, globals, setFog, createSky, setTrackCuts, setChallengeRunners, setChallengeRunner, MAX_ALT_ZONES, setReversedDepth, texturesReady, zoneClipped, makeZoneUniforms } from './materials.js';
-import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs, chunkCards, chunkLength, checkPlan, normalizePlan, sectionPiecesOf, variantLabel, mainRandomGroup, prefabVariants, MAX_SECTION_LENGTH } from './layout.js';
+import { generateLayout, mulberry32, DEFAULT_GEN, itemsToStudio, studioCatalog, gameModes, TRAIN_VARIANTS, buildingPieces, landmarkVariants, trainLength, FIXABLE, wallItems, studioSizePrefabs, chunkCards, chunkLength, checkPlan, normalizePlan, sectionPiecesOf, variantLabel, mainRandomGroup, prefabVariants, MAX_SECTION_LENGTH, HOLD_INDICES } from './layout.js';
 import { createSettings, createWorkbar } from './settings.js';
 import { createStudio } from './studio.js';
 import { createUI } from './ui.js';
 import { createTime, createTimeDeck } from './time.js';
 import { createCameraDeck } from './cameras.js';
 import { createChunkDeck } from './chunks.js';
-import { IMPORT_VERSION } from '../../tools/import_version.mjs';
+import { IMPORT_VERSION, MIN_IMPORT_VERSION } from '../../tools/import_version.mjs';
 import { addCredit } from './credit.js';
 import { attachParticles, updateParticles, setWeather, setWeatherVisible, setWeatherCover } from './particles.js';
 
@@ -148,7 +148,27 @@ if (seasonName && new URLSearchParams(location.search).get('season') === '0') {
 const envList = await (await fetch('/api/envs')).json().catch(() => []);
 const envInfo = envList.find((e) => e.id === ENV_ID) ?? { id: ENV_ID, theme: manifest.theme };
 document.title = `${envInfo.theme} · Subway Viewer`;
+// Built by an importer this viewer no longer reads: only a re-import opens it
+if ((manifest.importVersion ?? 0) < MIN_IMPORT_VERSION) {
+  showOutdatedMap();
+  await new Promise(() => {});
+}
 showImportNotice();
+
+/** A map too old to open: says so, with the way back home to re-import it. */
+function showOutdatedMap() {
+  const apk = envInfo.source ? ` (${envInfo.source})` : '';
+  const box = document.createElement('div');
+  box.className = 'import-notice';
+  box.innerHTML = `<strong>This map needs to be re-imported</strong>
+    <p>It was built by an older version of the importer that this viewer no longer reads. Re-import its APK${apk.replace(/[<>&]/g, '')} from the home page to open it.</p>`;
+  const home = document.createElement('button');
+  home.className = 'primary';
+  home.textContent = 'Back to the home page';
+  home.onclick = () => location.assign('/');
+  box.append(home);
+  document.body.append(box);
+}
 
 /**
  * A map built by an older importer (no stamp: from before stamps) misses fixes that need a
@@ -1221,9 +1241,9 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
     });
     return group;
   }
-  // ≤ 1.43: a chunk of the classic level library, or one of its trains/obstacles (studio)
+  // ≤ 1.43: a piece of the classic level library (a road look, a chunk laid whole, a train…)
   if (prefab?.node) {
-    const obj = await instantiateChunk(prefab, layer, variantSeed, worldZ);
+    const obj = await instantiateChunk(prefab, layer, variantSeed, worldZ, { variants });
     if (!obj || !prefab.offset) return obj;
     const group = new THREE.Group();
     obj.position.set(...prefab.offset);
@@ -1311,8 +1331,6 @@ async function particleMesh(url) {
   return geometry;
 }
 
-// RandomizerHold.cs: the road's look follows this sequence, a step every 3000 units
-const HOLD_INDICES = [0, 1, 2, 3, 0, 4, 5, 1, 0, 2, 4, 1, 3, 2, 0, 5, 1, 0, 3, 1, 3];
 
 /**
  * A classic chunk cloned out of the level library, its variants picked like the game's
@@ -1320,7 +1338,7 @@ const HOLD_INDICES = [0, 1, 2, 3, 0, 4, 5, 1, 0, 2, 4, 1, 3, 2, 0, 5, 1, 0, 3, 1
  * (children flipped left/right), RandomizeOffset (a random allowed lane). Coins and
  * pickups are left out; trains and obstacles follow the layer toggles.
  */
-async function instantiateChunk(prefab, layer, seed, worldZ, { keepObstacles = false } = {}) {
+async function instantiateChunk(prefab, layer, seed, worldZ, { keepObstacles = false, variants = null } = {}) {
   const library = await loadGlb(prefab.glb, { cutaway: 'floor' });
   const source = library.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(prefab.node));
   if (!source) return null;
@@ -1343,7 +1361,9 @@ async function instantiateChunk(prefab, layer, seed, worldZ, { keepObstacles = f
       continue;
     }
     if (x.pick === 'random' && o.children.length) {
-      const keep = o.children[Math.floor(rng() * o.children.length)];
+      // (one asked for by name: a classic gate's wall, from its Chunk mode card)
+      const asked = variants?.[o.name] && o.children.find((c) => c.name === variants[o.name]);
+      const keep = asked || o.children[Math.floor(rng() * o.children.length)];
       for (const c of [...o.children]) if (c !== keep) c.removeFromParent();
     } else if (x.pick === 'hold' && x.hold?.length) {
       const z = worldZ + new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).z;
@@ -1590,7 +1610,12 @@ const state = {
 // Chunk mode's map (chunks.js): kept per environment in this browser; `on` while it lays the run
 const savedChunks = loadChunks();
 // (maps laid before sections came: their station, tube… pieces become whole sections)
-if (savedChunks.on && Array.isArray(savedChunks.plan)) state.gen.plan = normalizePlan(savedChunks.plan);
+// (and pieces the map no longer has, since a re-import: ≤ 1.43 chunks now laid as sections)
+if (savedChunks.on && Array.isArray(savedChunks.plan)) state.gen.plan = keptPieces(normalizePlan(savedChunks.plan));
+function keptPieces(plan) {
+  const slots = Object.assign({}, ...Object.values(manifest.themes[state.theme] ?? {}));
+  return plan.filter((e) => e.type !== 'piece' || slots[e.slot]?.includes(e.prefab));
+}
 function loadChunks() {
   try {
     return JSON.parse(localStorage.getItem(`chunks:${ENV_ID}`) ?? '{}') ?? {};
@@ -2939,7 +2964,7 @@ const generation = createWorkbar(
         },
         {
           title: 'Scenery',
-          visible: () => hasSlot('classic_chunk') || hasAdSpots(),
+          visible: () => !!manifest.classic || hasAdSpots(),
           controls: [
             {
               type: 'toggle',
@@ -2967,7 +2992,7 @@ const generation = createWorkbar(
             {
               type: 'toggle',
               label: 'Mix scenery',
-              visible: () => hasSlot('classic_chunk'),
+              visible: () => !!manifest.classic,
               title: 'Each section picks its own look (tunnel, forest, city…). Off: long stretches of one look, as in the game',
               obj: state.gen,
               key: 'classicMix',
@@ -3168,14 +3193,16 @@ async function runToStudio(mode = 'random') {
 }
 
 /**
- * The auto-generated run as studio items. Classic chunks pick their trains and obstacles
- * when instantiated, so those are read from the chunks as the run lays them out.
+ * The auto-generated run as studio items. Classic chunks laid whole pick their trains and
+ * obstacles when instantiated, so those are read from the chunks as the run lays them out.
  */
 async function runToStudioItems(mode) {
   const items = currentLayout(mode).items;
   const chunks = items.filter((it) => manifest.prefabs[it.prefab]?.chunk);
   if (!chunks.length) return itemsToStudio(items);
-  const out = [];
+  // (the plain classic chunks' trains and obstacles are items like any map's)
+  const rest = items.filter((it) => !manifest.prefabs[it.prefab]?.chunk);
+  const out = itemsToStudio(rest);
   const v = new THREE.Vector3();
   for (const it of chunks) {
     const obj = await instantiateChunk(manifest.prefabs[it.prefab], it.layer, it.variantSeed, it.pos[2], { keepObstacles: true });
@@ -3199,6 +3226,7 @@ async function runToStudioItems(mode) {
       } else if (/^(train_ramp|Classic_Ramp)$/.test(name)) ramps.push({ lane, z: v.z });
       else if ((m = name.match(/^(?:blocker_|Classic_Blocker_)(jump|roll|standard)$/i))) out.push({ type: 'obstacle', key: m[1].toLowerCase(), lane, z: Math.round(v.z) });
       else if (/^(lightSignal|Classic_LightSignal)$/.test(name)) out.push({ type: 'signal', x: Math.round(v.x), z: Math.round(v.z), color: 'green' });
+      else if ((m = name.match(/^(?:Classic_)?(bush|dumpster|powerbox|pillar)$/i))) out.push({ type: 'obstacle', key: { powerbox: 'powerBox' }[m[1].toLowerCase()] ?? m[1].toLowerCase(), lane, z: Math.round(v.z) });
     });
     for (const t of trains) {
       // A ramp just in front of the train in its lane
@@ -3397,7 +3425,7 @@ async function renderChunkThumbnail(card) {
     if (card.wall && slots[card.wall]?.[0]) parts.push([slots[card.wall][0], null, [0, 0, 0]]);
     parts.push([card.prefab, null, [0, 0, 0]]);
   } else {
-    parts.push([card.prefab, null, [0, 0, 0]]);
+    parts.push([card.prefab, null, [0, 0, 0], card.variants]); // (a classic gate: its wall)
     const info = manifest.boundaries?.[state.theme]?.trackInfos?.[card.slot];
     const track = slots.track_track?.[0];
     if (track && info?.SpawnTracks !== false) {
@@ -3425,7 +3453,8 @@ async function renderChunkThumbnail(card) {
   cam.lookAt(30 * sideX, landmark ? 30 : 6, landmark ? reach * 0.8 : reach * 0.5);
   // A variant card: framed on what the variant adds (the tube's props sit inside it, out of
   // sight from its entrance), from behind and above
-  const picked = card.variants && Object.values(card.variants).map((n) => THREE.PropertyBinding.sanitizeNodeName(n));
+  // (a classic gate's card shows the whole gate, its wall picked)
+  const picked = card.variants && card.type === 'section' && Object.values(card.variants).map((n) => THREE.PropertyBinding.sanitizeNodeName(n));
   if (picked) {
     group.updateMatrixWorld(true);
     const box = new THREE.Box3();
@@ -3572,7 +3601,7 @@ if (params.get('z')) {
   camera.lookAt(orbit.target);
 }
 setControlMode(state.controls);
-window.__viewer = { time, motions, meshAnimations, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild, unruledShaders, instantiate, manifest };
+window.__viewer = { chunkThumbnail, chunkCards: () => chunkCards(manifest, state.theme, state.gen), time, motions, meshAnimations, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild, unruledShaders, instantiate, manifest };
 if (state.obstacleMode === 'studio' && state.studio.some((it) => ['coins', 'coinArc', 'pickup'].includes(it.type))) await ensurePickups();
 await rebuild();
 

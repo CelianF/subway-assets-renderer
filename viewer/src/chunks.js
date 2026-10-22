@@ -41,7 +41,7 @@ export function createChunkDeck(root, ctx) {
   const cardIds = (e) =>
     e.type === 'buildings' ? ['left', 'right'].map((side) => e[side] && `${e[side].slot}|${e[side].prefab}`)
     : e.type === 'section' ? [`section|${e.kind}${e.variants ? `|${Object.entries(e.variants).map(([g, c]) => `${g}=${c}`).join(',')}` : ''}`]
-    : [e.type === 'gate' ? `gate|${e.wall}` : `${e.slot}|${e.prefab}`];
+    : [e.type === 'gate' ? `gate|${e.wall}` : `${e.slot}|${e.prefab}${e.variants ? `|${Object.entries(e.variants).map(([g, c]) => `${g}=${c}`).join(',')}` : ''}`];
 
   /** A thumbnail <img>, filled in when its card is rendered. */
   function thumb(card) {
@@ -72,7 +72,7 @@ export function createChunkDeck(root, ctx) {
   function chunkOf(card) {
     if (card.type === 'gate') return { type: 'gate', wall: card.wall };
     if (card.type === 'section') return { type: 'section', kind: card.kind, length: card.length, ...(card.variants ? { variants: card.variants } : {}) };
-    if (card.type === 'piece') return { type: 'piece', slot: card.slot, prefab: card.prefab };
+    if (card.type === 'piece') return { type: 'piece', slot: card.slot, prefab: card.prefab, ...(card.variants ? { variants: card.variants } : {}) };
     const side = { slot: card.slot, prefab: card.prefab };
     if (card.side === 'left') return { type: 'buildings', left: side, awaiting: true };
     const left = partnerOf(card.slot, 'left');
@@ -152,7 +152,8 @@ export function createChunkDeck(root, ctx) {
           {
             class: `chunk-item ${e.type === 'buildings' ? 'chunk-buildings' : ''} ${own.length ? 'warn' : ''}`,
             draggable: 'true',
-            style: `width: ${e.type === 'buildings' ? BUILDING_WIDTH : CHUNK_WIDTH}px`,
+            // (≤ 1.43 building segments are one piece: narrow like a modern segment)
+            style: `width: ${e.type === 'buildings' || cards.get(cardIds(e)[0])?.narrow ? BUILDING_WIDTH : CHUNK_WIDTH}px`,
             title: [...own.map((m) => `⚠ ${m}`), `At ${Math.round(at)} · ${Math.round(length)} long`].join('\n'),
             onclick: () => ctx.goTo(at),
             ondragstart: (ev) => {
@@ -184,19 +185,21 @@ export function createChunkDeck(root, ctx) {
   /** A section's − n + (its middles, 1 to 10; a tube: its pieces); none for a fixed one. */
   function lengthControl(e, i, plan, card) {
     if (card && !card.adjustable) return null;
+    // (≤ 1.43 road looks run longer: the game keeps one for 3000 units)
+    const max = card?.maxLength ?? ctx.maxLength;
     const set = (n) => (ev) => {
       ev.stopPropagation();
-      if (n < 1 || n > ctx.maxLength) return;
+      if (n < 1 || n > max) return;
       ctx.setPlan(plan.map((c, k) => (k === i ? { ...c, length: n } : c)));
     };
     const n = e.length ?? 1;
-    const what = e.kind === 'tube' ? 'tube pieces' : 'middles';
+    const what = e.kind === 'tube' ? 'tube pieces' : card?.maxLength ? 'road segments' : 'middles';
     return el(
       'span',
-      { class: 'chunk-length', title: `${n} ${what} (1 to ${ctx.maxLength})`, onclick: (ev) => ev.stopPropagation(), ondragstart: (ev) => ev.preventDefault() },
+      { class: 'chunk-length', title: `${n} ${what} (1 to ${max})`, onclick: (ev) => ev.stopPropagation(), ondragstart: (ev) => ev.preventDefault() },
       el('button', { title: 'Shorter', disabled: n <= 1, onclick: set(n - 1) }, '−'),
       el('span', { class: 'chunk-count' }, String(n)),
-      el('button', { title: 'Longer', disabled: n >= ctx.maxLength, onclick: set(n + 1) }, '+'),
+      el('button', { title: 'Longer', disabled: n >= max, onclick: set(n + 1) }, '+'),
     );
   }
 
@@ -243,7 +246,7 @@ export function createChunkDeck(root, ctx) {
         );
       }
     }
-    const name = e.type === 'buildings' ? 'Buildings' : e.type === 'gate' ? 'Gate' : cards.get(`section|${e.kind}`)?.label ?? 'Chunk';
+    const name = e.type === 'buildings' ? 'Buildings' : e.type === 'gate' ? 'Gate' : cards.get(`section|${e.kind}`)?.label ?? cards.get(cardIds(e)[0])?.label ?? 'Chunk';
     editBar.replaceChildren(
       el('div', { class: 'chunk-edit-head' }, el('strong', {}, `${name} · chunk ${i + 1}`), el('span', { class: 'studio-sep' }), el('button', { title: 'Close', onclick: () => ((editing = null), renderStrip()) }, 'Done')),
       el('div', { class: 'chunk-edit-rows' }, ...rows),
@@ -346,10 +349,12 @@ export function createChunkDeck(root, ctx) {
     const ads = all.find((g) => g.group === 'Ads')?.cards ?? [];
     const groups = all.filter((g) => g.group !== 'Ads');
     if (!groups.some((g) => g.group === group)) group = groups[0]?.group ?? null;
-    // Buildings in two steps: a left side, then the right side to go with it
+    // Buildings in two steps: a left side, then the right side to go with it (≤ 1.43 maps'
+    // buildings are whole road stretches, laid in one)
     const awaiting = awaitingIndex() >= 0;
+    const sided = (groups.find((g) => g.group === 'Buildings')?.cards ?? []).some((c) => c.side);
     const steps =
-      group === 'Buildings'
+      group === 'Buildings' && sided
         ? awaiting
           ? [
               el('span', { class: 'chunk-step' }, '② Now its right side'),
@@ -365,7 +370,7 @@ export function createChunkDeck(root, ctx) {
       ...steps,
     );
     let cards = groups.find((g) => g.group === group)?.cards ?? [];
-    if (group === 'Buildings') cards = awaiting ? [...cards.filter((c) => c.side === 'right'), ...ads] : cards.filter((c) => c.side === 'left');
+    if (group === 'Buildings' && sided) cards = awaiting ? [...cards.filter((c) => c.side === 'right'), ...ads] : cards.filter((c) => c.side === 'left');
     // A section's types stay folded under its card (random) until opened
     const typesOf = (card) => cards.filter((c) => c.base === card.id);
     const cardButton = (card, shown = card) =>

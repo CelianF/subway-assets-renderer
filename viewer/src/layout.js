@@ -60,6 +60,8 @@ const CELL = 11.25;
  */
 const OVERHANG = 30;
 function slotLength(manifest, slot, prefab) {
+  // (≤ 1.43: a road segment, a chunk laid whole: their own length)
+  if (prefab?.length) return prefab.length;
   const cells = manifest.slotDepths?.[slot] ?? SLOT_CELLS[slot];
   if (cells) return cells * CELL;
   const maxZ = prefab?.bbox?.[1][2] ?? SEGMENT;
@@ -135,6 +137,8 @@ export function chunkKind(e) {
   if (e.type === 'gate') return 'gate';
   if (e.type === 'section') return e.kind;
   if (e.slot === 'boundary_PrePortal_Left') return 'start';
+  if (e.slot in SECTIONS) return e.slot; // ≤ 1.43: the tube
+  if (/^classic_station_(short|long)$/.test(e.slot ?? '')) return 'classic_station';
   return e.slot?.match(/^boundary_(station|tube|pillars|epic)/)?.[1] ?? 'other';
 }
 
@@ -149,6 +153,28 @@ export const SECTIONS = {
   pillars: { label: 'Pillar hall', parts: ['boundary_pillars_start', 'boundary_pillars_mid', 'boundary_pillars_end'], length: 2 },
   epic: { label: 'Landmark', parts: ['boundary_epic_start', 'boundary_epic_mid', 'boundary_epic_end'], length: 1 },
 };
+// ≤ 1.43: the road's six looks (RandomizerHold), each a stretch of 180-long segments,
+// named after the game's nodes ("1_road_buildings" -> classic_road_buildings)
+// (one model serving two looks is one piece: LA's road and buildings, both edges as classic_edge;
+// the subway's roof over the tracks is the classic tube)
+// The looks are the buildings, a segment at a time (Chunk mode's narrow tiles, as modern
+// building segments); the subway's roof over the tracks is the classic tube, a section
+const CLASSIC_LOOKS = { classic_road: 'Road', classic_road_buildings: 'Buildings', classic_forest: 'Forest', classic_edge: 'Edge', classic_edge_right: 'Edge right', classic_edge_left: 'Edge left' };
+// (as long as the game keeps the look: 3000 units, up to 17 segments)
+SECTIONS.classic_subway = { label: 'Tube', parts: [null, 'classic_subway', null], length: 3, max: 20, classic: true };
+// The station, short (one 180 piece) or long (one 360 piece): its − / + switches the two
+SECTIONS.classic_station = { label: 'Station', parts: [null, 'classic_station_short', null], length: 2, max: 2, long: 'classic_station_long', classic: true };
+const lookLabel = (slot) => CLASSIC_LOOKS[slot] ?? slot.replace(/^classic_/, '').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+/** A classic map's road looks (the slots the game's RandomizerHold picks between), but the tube. */
+const classicLookSlots = (manifest) => [...new Set(manifest.classic?.looks ?? [])].filter((slot) => !SECTIONS[slot]);
+/** RandomizerHold.cs: the road's look follows this sequence, a step every 3000 units. */
+export const HOLD_INDICES = [0, 1, 2, 3, 0, 4, 5, 1, 0, 2, 4, 1, 3, 2, 0, 5, 1, 0, 3, 1, 3];
+/** A classic chunk laid whole, by name: "Classic_Difficulty_2_-_Normal_bridge" -> "Bridge (normal)". */
+const classicChunkLabel = (name) => {
+  const m = name.match(/^Classic_(?:Difficulty_\d+_-_([A-Za-z]+)_|Chunks_)?(.*)$/);
+  const rest = (m?.[2] ?? name).replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+  return `${rest[0].toUpperCase()}${rest.slice(1)}${m?.[1] ? ` (${m[1].toLowerCase()})` : ''}`;
+};
 export const MAX_SECTION_LENGTH = 10;
 const PARTS = ['start', 'mid', 'end'];
 
@@ -161,6 +187,8 @@ const PARTS = ['start', 'mid', 'end'];
 function sectionPieces(slots, e) {
   const def = SECTIONS[e.kind];
   if (!def) return [];
+  // (a classic station of length 2: its long piece)
+  if (def.long && sectionLength(e) >= 2 && slots[def.long]?.length) return [{ type: 'piece', slot: def.long, prefab: slots[def.long][0], part: 'mid:0' }];
   const main = def.parts[0] ? 0 : 1;
   const piece = (i, part) => {
     const slot = def.parts[i];
@@ -189,7 +217,7 @@ export function mainRandomGroup(manifest, prefab) {
 /** A section's middles (a tube: its pieces), 1 to 10; a fixed one's own. */
 function sectionLength(e) {
   const def = SECTIONS[e.kind];
-  return def.fixed ? def.length : Math.max(1, Math.min(MAX_SECTION_LENGTH, Math.round(e.length ?? def.length)));
+  return def.fixed ? def.length : Math.max(1, Math.min(def.max ?? MAX_SECTION_LENGTH, Math.round(e.length ?? def.length)));
 }
 
 /** sectionPieces for a theme (chunk cards' pictures). */
@@ -205,19 +233,23 @@ export function sectionPiecesOf(manifest, themeName, e, gen = null) {
 export function normalizePlan(plan) {
   const out = [];
   for (const e of plan ?? []) {
+    // (a kind of section no longer laid: an older plan's classic road stretch)
+    if (e.type === 'section' && !SECTIONS[e.kind]) continue;
     const kind = e.type === 'piece' ? chunkKind(e) : null;
     if (!SECTIONS[kind]) {
       out.push(e);
       continue;
     }
-    const part = kind === 'tube' ? 'mid' : e.slot.match(/_(start|mid|end)$/)?.[1];
+    const def = SECTIONS[kind];
+    const part = e.slot === def.parts[0] ? 'start' : e.slot === def.parts[2] ? 'end' : 'mid';
     const last = out[out.length - 1];
     // A new section on a start, or where the previous one of its kind is done (its end)
     const open = last?.type === 'section' && last.kind === kind && !last.done && part !== 'start';
     const section = open ? last : { type: 'section', kind, length: 0, prefabs: {} };
     if (!open) out.push(section);
-    if (part === 'mid') section.length++;
-    section.prefabs[part] ??= e.prefab;
+    // (a classic long station is the station at length 2)
+    if (part === 'mid') section.length += e.slot === def.long ? 2 : 1;
+    if (e.slot !== def.long) section.prefabs[part] ??= e.prefab;
     if (part === 'end') section.done = true;
   }
   for (const e of out) {
@@ -264,7 +296,7 @@ export function chunkCards(manifest, themeName, gen = null) {
     .map(([kind, def]) => {
       const main = def.parts[0] ?? def.parts[1];
       const start = manifest.prefabs[real(main)[0]];
-      return { id: `section|${kind}`, type: 'section', kind, length: def.length, adjustable: !def.fixed, prefab: real(main)[0], label: def.label };
+      return { id: `section|${kind}`, type: 'section', kind, length: def.length, adjustable: !def.fixed, ...(def.max ? { maxLength: def.max } : {}), prefab: real(main)[0], label: def.label };
     });
   // Each section once per variant of its main piece's random group (Cosmic Crossroads'
   // landmarks: the galaxy, the meteors, the pink monster; Fantasy Fest's tube dragon), after
@@ -278,7 +310,41 @@ export function chunkCards(manifest, themeName, gen = null) {
     variantCards.set(card, kids.map((child) => ({ ...card, id: `section|${card.kind}|${group}=${child}`, base: card.id, variants: { [group]: child }, variantPart: PARTS[part], label: `${card.label}: ${variantLabel(themeName, child)}` })));
   }
   sections.splice(0, sections.length, ...sections.flatMap((c) => [c, ...(variantCards.get(c) ?? [])]));
-  if (sections.length) groups.push({ group: 'Sections', cards: sections });
+  // ≤ 1.43, as the modern groups: the road's looks are the buildings (a stretch of one look
+  // each), the subway the tube; the chunks laid whole are the run's start, stations (one
+  // track), pillar halls (two tracks), landmarks (the bridge) and gates (the tunnel: a card
+  // per wall, as its random group picks them)
+  // (a segment each, laid like a modern building segment: narrow in the strip)
+  const looks = classicLookSlots(manifest).filter((slot) => real(slot).length).map((slot) => ({ id: `${slot}|${real(slot)[0]}`, type: 'piece', slot, prefab: real(slot)[0], label: lookLabel(slot), narrow: true }));
+  if (looks.length) groups.splice(starts.length ? 1 : 0, 0, { group: 'Buildings', cards: looks });
+  // (one card per scenery: the chunks that only add road and trains around it are left out)
+  const whole = (kind) => real('classic_special').filter((n) => (manifest.prefabs[n].classicKind ?? 'other') === kind && !manifest.prefabs[n].dupOf).sort((a, b) => manifest.prefabs[a].length - manifest.prefabs[b].length);
+  // A chunk's scenery choice, a card per option (as its random group picks them): a gate's
+  // walls, one long station or two short ones, long or short pillars; more chunks of a kind
+  // are numbered, shortest first (the longer ones bring more road and trains)
+  const gateNames = { sides: 'open sides', left: 'open left', mid: 'open middle', right: 'open right' };
+  const optionLabel = (kind, o) => (kind === 'gate' ? gateNames[o.name] ?? o.name : kind === 'station' ? (o.stations > 1 ? `${o.stations} stations` : 'one long') : o.name.replace(/^pillars_/, '').replace(/_/g, ' '));
+  const rank = (o) => ['left', 'mid', 'right', 'sides'].indexOf(o.name) + 1 || 9; // (the modern gate cards' order)
+  const wholeCards = (kind, label) =>
+    whole(kind).flatMap((prefab, i, all) => {
+      const name = all.length > 1 ? `${label} ${i + 1}` : label;
+      const choice = manifest.prefabs[prefab].choice;
+      if (!choice) return [{ id: `classic_special|${prefab}`, type: 'piece', slot: 'classic_special', prefab, kind, label: name }];
+      const options = kind === 'gate' ? [...choice.options].sort((a, b) => rank(a) - rank(b)) : choice.options;
+      return options.map((o) => ({ id: `classic_special|${prefab}|${choice.group}=${o.name}`, type: 'piece', slot: 'classic_special', prefab, kind, variants: { [choice.group]: o.name }, label: `${name}, ${optionLabel(kind, o)}` }));
+    });
+  if (whole('start').length) groups.unshift({ group: 'Start', cards: wholeCards('start', 'Run start') });
+  const order = { station: 0, classic_station: 0, classic_subway: 1, tube: 1, pillars: 2, epic: 3 };
+  const others = [...sections.filter((c) => !looks.includes(c)), ...wholeCards('station', 'Station'), ...wholeCards('pillars', 'Pillar hall'), ...wholeCards('epic', 'Landmark')].sort((a, b) => (order[a.kind] ?? 9) - (order[b.kind] ?? 9));
+  if (others.length) groups.push({ group: 'Sections', cards: others });
+  const gateCards = wholeCards('gate', 'Gate');
+  if (gateCards.length) groups.push({ group: 'Gate', cards: gateCards });
+  // (1.0: chunks that pick a whole stretch's scenery, a card per setting)
+  const settings = wholeCards('setting', 'Chunk').map((c) => ({ ...c, label: c.variants ? `${classicChunkLabel(c.prefab)}, ${Object.values(c.variants)[0].replace(/_\d+$/, '').replace(/_/g, ' ')}` : classicChunkLabel(c.prefab) }));
+  // (the rest by name, a card per option of their own choice too: 1.0's upper buildings)
+  const named = wholeCards('other', 'Chunk').map((c) => ({ ...c, label: c.variants ? `${classicChunkLabel(c.prefab)}, ${Object.values(c.variants)[0].replace(/_/g, ' ')}` : classicChunkLabel(c.prefab) }));
+  const rest = [...settings, ...named];
+  if (rest.length) groups.push({ group: 'Chunks', cards: rest });
   if (has('boundary_gate') && has('track_gates')) {
     const walls = GATE_WALLS.filter(has);
     const names = { special_gate_left: 'Gate, open left', special_gate_mid: 'Gate, open middle', special_gate_right: 'Gate, open right', special_gate_sides: 'Gate, open sides' };
@@ -308,6 +374,8 @@ export function chunkLength(manifest, e) {
  */
 export function checkPlan(plan) {
   const out = [];
+  // ≤ 1.43: road looks and whole chunks follow each other freely, as in the game's runs
+  if (plan.some((e) => SECTIONS[chunkKind(e)]?.classic || e.slot?.startsWith('classic_'))) return out;
   const warn = (index, message) => out.push({ index, message });
   // (a special start opens the run itself: Cosmic Crossroads' Subway City)
   const first = plan.findIndex((e) => chunkKind(e) !== 'start');
@@ -546,65 +614,57 @@ export function wallItems(layout, key) {
 }
 
 /**
- * ≤ 1.43: hand-built chunks laid end to end, as Track/TrackChunkCollection do: the chunks
- * whose [zMinimum, zMaximum) window holds the current distance and that aren't still in use,
- * picked by probability. About 720 units per section.
+ * ≤ 1.43 (manifest.classic): the chunks Track/TrackChunkCollection would lay, by their
+ * [zMinimum, zMaximum) windows and probabilities, none still in use (laid less than 2000
+ * behind the player, who runs 700 behind the track's end): [{ chunk, z }], where the intro
+ * goes (at 0, and before each start chunk of the showcase) and the run's length.
  */
-function classicLayout(manifest, names, seed, sections, showcase = false) {
-  const rng = mulberry32(seed);
-  const all = names.map((name) => ({ name, ...manifest.prefabs[name]?.chunk }));
-  const chunks = all.filter((c) => c.zSize > 0 && !c.intro);
-  const target = Math.max(sections, 1) * 720;
-  const items = [];
-  // The run starts in the intro scene, laid over the first chunk
-  const intro = all.find((c) => c.intro);
-  if (intro) items.push({ prefab: intro.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, 0], variantSeed: Math.floor(rng() * 2 ** 31) });
+function classicSequence(manifest, rng, sections, showcase) {
+  const all = manifest.classic.chunks;
+  const intro = manifest.classic.intro ? manifest.prefabs[manifest.classic.intro] : null;
+  const out = [];
+  const intros = intro ? [0] : [];
   let z = 0;
-  const laid = [];
   if (showcase) {
-    // Debug: every chunk once, by difficulty (as the game unlocks them)
-    // (not the ones a run never picks: zMaximum below zMinimum, e.g. 1.10's jetpack landing)
-    const usable = chunks.filter((c) => c.zMax == null || c.zMax > c.zMin);
-    // Start chunks (picked only at 0) are built to follow the intro, whose scenery covers
-    // their first half (1.38 Arabia: the road from 180 on is theirs): each one after the
-    // first gets its own intro, its back edge where the last chunk ended
-    // The intro's road ends where the start chunk's own begins, both overhanging their front
-    // by the same margin, and runs a chunk length back from there: by its bounds' back edge
-    // instead, props behind the road left a 6-unit gap (1.28 Beijing)
-    const introBox = intro ? manifest.prefabs[intro.name]?.bbox : null;
-    const start = usable.find((c) => c.zMin === 0 && c.zMax != null && c.zMax <= 1);
+    const usable = all.filter((c) => c.zSize > 0 && (c.zMax == null || c.zMax > c.zMin));
+    const isStart = (c) => c.zMin === 0 && c.zMax != null && c.zMax <= 1;
+    const start = usable.find(isStart);
     const startBox = start ? manifest.prefabs[start.name]?.bbox : null;
-    const introBack = !introBox
-      ? 0
-      : startBox
-        ? Math.max(0, start.zSize - (introBox[1][2] - (startBox[1][2] - start.zSize)))
-        : Math.max(0, -introBox[0][2]);
+    const introBox = intro?.bbox;
+    const introBack = !introBox ? 0 : startBox ? Math.max(0, start.zSize - (introBox[1][2] - (startBox[1][2] - start.zSize))) : Math.max(0, -introBox[0][2]);
     let starts = 0;
+    let looks = 0;
     for (const chunk of usable.sort((a, b) => a.zMin - b.zMin || a.name.localeCompare(b.name))) {
-      if (intro && chunk.zMin === 0 && chunk.zMax != null && chunk.zMax <= 1 && starts++ > 0) {
-        z += introBack;
-        items.push({ prefab: intro.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(rng() * 2 ** 31) });
+      // (once per option of its own scenery: every gate wall, both stations' chunks; the plain
+      // ones each in the next road look, so every look shows)
+      const choice = chunk.special ? manifest.prefabs[chunk.name]?.choice : null;
+      for (const option of choice?.options ?? [null]) {
+        if (intro && isStart(chunk) && starts++ > 0) {
+          z += introBack;
+          intros.push(z);
+        }
+        out.push({ chunk, z, variants: option ? { [choice.group]: option.name } : null, ...(chunk.special ? {} : { look: looks++ % 6 }) });
+        z += chunk.zSize;
       }
-      items.push({ prefab: chunk.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(rng() * 2 ** 31) });
-      z += chunk.zSize;
     }
-    return { items, length: z };
+    return { sequence: out, intros, length: z };
   }
+  const chunks = all.filter((c) => c.zSize > 0);
+  const target = Math.max(sections, 1) * 720;
+  const laid = [];
   while (z < target) {
     let pool = chunks.filter((c) => c.zMin <= z && z < (c.zMax ?? Infinity));
-    if (!pool.length) pool = chunks.filter((c) => c.zMin <= z); // past every window: anything allowed so far
+    if (!pool.length) pool = chunks.filter((c) => c.zMin <= z);
     if (!pool.length) break;
-    // Track.cs never lays a chunk that is still in use: one laid less than 2000 units behind
-    // the player, who runs 700 behind the end of the track
     const inUse = new Set(laid.filter((l) => l.end >= z - 2700).map((l) => l.name));
     if (pool.some((c) => !inUse.has(c.name))) pool = pool.filter((c) => !inUse.has(c.name));
     let r = rng() * pool.reduce((n, c) => n + c.probability, 0);
     const chunk = pool.find((c) => (r -= c.probability) < 0) ?? pool[0];
-    items.push({ prefab: chunk.name, slot: 'classic_chunk', layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(rng() * 2 ** 31) });
+    out.push({ chunk, z });
     z += chunk.zSize;
     laid.push({ name: chunk.name, end: z });
   }
-  return { items, length: z };
+  return { sequence: out, intros, length: z };
 }
 
 /** Wagon count for a span: the longest available train that fits, else the shortest. */
@@ -756,7 +816,7 @@ export function studioCatalog(manifest, themeName, trainTheme = null, gen = null
     signal: has('obstacle_lightSignal'),
     pillars: has('boundary_pillars_mid') && has('obstacle_pillar'),
     // Classic maps model their rails into the chunks: no track to take out
-    tracks: !slots.classic_chunk?.length,
+    tracks: !manifest.classic,
     modeLabel,
     modePieces,
     // Pieces with two states (raised / dropped) the studio can show or animate
@@ -787,7 +847,11 @@ export function generateLayout(
   const { mode, overrides: modeSlots } = activeMode(manifest, gen);
   // A game mode's run: its scenery (in the studio too, so both views match), and its
   // route lays the obstacles unless the studio places them
-  const modeRun = !!mode && !slots.classic_chunk?.length;
+  // ≤ 1.43: road looks, chunks laid whole and the plain chunks' gameplay
+  const classic = manifest.classic ?? null;
+  const classicGameplay = []; // { name, z }: the plain chunks' trains and obstacles, where they were laid
+  const classicOwn = []; // [z0, z1) of chunks laid whole, with their own trains and obstacles
+  const modeRun = !!mode && !classic;
   const routed = modeRun && obstacleMode !== 'studio';
   const has = (slot) => slots[slot]?.length > 0;
   const rng = mulberry32(seed);
@@ -840,15 +904,6 @@ export function generateLayout(
     items.push({ prefab, slot, layer, pos, variantSeed: Math.floor(placeRng() * 2 ** 31), ...(variants ? { variants } : {}), ...own, ...extra });
     return prefab;
   };
-  // ≤ 1.43: the game's hand-built chunks; in the studio, hand-placed trains and obstacles
-  // on top (the chunks leave theirs out)
-  if (slots.classic_chunk?.length) {
-    const classic = classicLayout(manifest, slots.classic_chunk, seed, sections, gen.showcase);
-    if (obstacleMode !== 'studio') return classic;
-    items.push(...classic.items);
-    placeStudio();
-    return { items, length: classic.length };
-  }
 
   // Boundary runs per side of the track, for the theme's transition pieces
   const runs = { left: [], right: [] };
@@ -1088,7 +1143,7 @@ export function generateLayout(
 
   // Showcase (debug): every section type in turn, the gate once per wall and the landmark
   // once per variant, buildings in between, so every piece loads
-  if (gen.showcase) {
+  if (gen.showcase && !classic) {
     const type = (name) => sectionTypes.find((t) => t.name === name);
     const steps = [];
     for (const name of ['buildings', 'station', 'tube', 'pillars']) if (type(name)) steps.push(() => type(name).build());
@@ -1175,8 +1230,73 @@ export function generateLayout(
       addRun('left', `boundary_super_epic_${span.kind}_left`, at, z);
       addRun('right', `boundary_super_epic_${span.kind}_right`, at, z);
     }
-  } else if (gen.plan?.length && !gen.showcase) buildPlan(gen.plan);
+  } else if (classic && (gen.showcase || !gen.plan?.length)) classicRun();
+  else if (gen.plan?.length && !gen.showcase) buildPlan(gen.plan);
   else if (!gen.showcase) for (const section of finalPlan) section.build();
+  // A hand-laid classic run that opens with a start chunk: the intro (start train) over it
+  if (classic?.intro && gen.plan?.length && !gen.showcase) {
+    const first = classic.chunks.find((c) => c.name === gen.plan[0]?.prefab);
+    if (first && first.zMin === 0 && first.zMax != null && first.zMax <= 1) items.push({ prefab: classic.intro, slot: 'classic_intro', layer: 'environment', pos: [0, 0, 0], variantSeed: Math.floor(rng() * 2 ** 31) });
+  }
+
+  /**
+   * ≤ 1.43: the chunks the game would lay, each plain one as its road segments (the look the
+   * road keeps there: RandomizerHold's sequence, a step every 3000 units, or per chunk) with
+   * its trains and obstacles laid after; the others whole.
+   */
+  function classicRun() {
+    const { sequence, intros, length: total } = classicSequence(manifest, rng, sections, gen.showcase);
+    for (const iz of intros) items.push({ prefab: classic.intro, slot: 'classic_intro', layer: 'environment', pos: [0, 0, iz], variantSeed: Math.floor(rng() * 2 ** 31) });
+    const slotOf = new Map(classic.looks.flatMap((slot) => (slots[slot] ?? []).map((n) => [n, slot])));
+    const holdStart = seed % HOLD_INDICES.length;
+    for (const { chunk, z: cz, variants: shown, look } of sequence) {
+      if (chunk.special) {
+        // (its scenery choice is picked here, as Chunk mode lays them, so the run's plan shows
+        // its card; the showcase lays each)
+        const choice = manifest.prefabs[chunk.name]?.choice;
+        const variants = shown ?? (choice ? { [choice.group]: pick(rng, choice.options).name } : null);
+        items.push({ prefab: chunk.name, slot: 'classic_special', layer: 'environment', pos: [0, 0, cz], variantSeed: Math.floor(placeRng() * 2 ** 31), ...(variants ? { variants } : {}) });
+        // (one that only adds road segments and trains around a scenery another chunk has:
+        // in the run's plan, those road segments and that chunk's card)
+        const dup = manifest.prefabs[chunk.name]?.dupOf;
+        const entries = [{ z: dup ? manifest.prefabs[chunk.name].dupAt ?? 0 : 0, e: { type: 'piece', slot: 'classic_special', prefab: dup ?? chunk.name, ...(variants ? { variants } : {}) } }];
+        if (dup) {
+          for (const g of chunk.ground ?? []) {
+            const prefab = g.prefab ?? g.looks[HOLD_INDICES[(holdStart + Math.floor((cz + g.z) / 3000) + holdStart) % HOLD_INDICES.length]];
+            const slot = g.slot ?? slotOf.get(prefab);
+            if (slot) entries.push({ z: g.z, e: { type: 'piece', slot, prefab: slots[slot]?.[0] ?? prefab } });
+          }
+        }
+        for (const { e } of entries.sort((a, b) => a.z - b.z)) placed.push(e);
+        classicOwn.push([cz, cz + chunk.zSize]);
+        continue;
+      }
+      const own = gen.classicMix ? Math.floor(rng() * HOLD_INDICES.length) : null;
+      for (const g of chunk.ground ?? []) {
+        const gz = cz + g.z;
+        const step = own ?? Math.floor(gz / 3000);
+        // (a piece of its own there: a pillar hall's, its road; else the look the road keeps,
+        // the showcase's next one)
+        const prefab = g.prefab ?? g.looks[look ?? HOLD_INDICES[(holdStart + step + holdStart) % HOLD_INDICES.length]];
+        const slot = g.slot ?? slotOf.get(prefab);
+        if (!prefab || !slot) continue;
+        items.push({ prefab, slot, layer: 'environment', pos: [0, 0, gz], variantSeed: Math.floor(placeRng() * 2 ** 31) });
+        placed.push({ type: 'piece', slot, prefab: slots[slot]?.[0] ?? prefab }); // (the slot's card)
+      }
+      classicGameplay.push({ name: chunk.name, z: cz });
+    }
+    z = total;
+    // Showcase: then every Chunk mode piece once, each variant of each road look, the tube,
+    // both stations and a pillar hall (start, a middle, the end)
+    if (!gen.showcase) return;
+    const lay = (slot, prefab) => {
+      items.push({ prefab, slot, layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(placeRng() * 2 ** 31) });
+      placed.push({ type: 'piece', slot, prefab });
+      z += slotLength(manifest, slot, manifest.prefabs[prefab]);
+    };
+    for (const slot of new Set(classic.looks)) for (const prefab of slots[slot] ?? []) lay(slot, prefab);
+    for (const slot of ['classic_station_short', 'classic_station_long', 'boundary_pillars_start', 'boundary_pillars_mid', 'boundary_pillars_end']) for (const prefab of slots[slot] ?? []) lay(slot, prefab);
+  }
 
   /**
    * Chunk mode: the run as laid by hand, piece by piece (each building segment with its two
@@ -1210,6 +1330,7 @@ export function generateLayout(
         z += slotLength(manifest, e.slot, manifest.prefabs[prefab]);
         addRun('left', e.slot, z0, z);
         addRun('right', e.slot, z0, z);
+        if (e.slot === 'classic_special') classicOwn.push([z0, z]);
         if (e.slot === 'boundary_epic_start') {
           wholeLandmark = landmarkWhole(manifest, slots, prefab, z - z0);
         } else if (wholeLandmark && kind === 'epic') items.splice(before);
@@ -1229,6 +1350,7 @@ export function generateLayout(
       else stretches.push({ ...sp });
     }
     stretches.forEach((st, i) => {
+      if (classic && st.kind === 'classic_station') classicOwn.push([st.z0, st.z1]); // (no gameplay chunks over its platforms)
       if (st.kind === 'station') {
         // Plain ground on the outer lanes when buildings lead in and out, like the game's
         const ground = has('special_station_platform') && has('track_ground') && stretches[i - 1]?.kind === 'buildings' && stretches[i + 1]?.kind === 'buildings';
@@ -1239,8 +1361,11 @@ export function generateLayout(
         if (has('special_station_platform')) platformRanges.push([st.z0, st.z1]);
       } else if (st.kind === 'pillars') {
         if (has('obstacle_pillar')) pillarHalls.push([st.z0, st.z1]);
+        // ≤ 1.43: the hall's own pillars and trains instead of the gameplay chunks; a pillar
+        // mid-segment from its first middle (the start piece is 180 long, a whole segment)
+        if (classic) classicOwn.push([st.z0, st.z1]);
         if (has('obstacle_pillar') && gen.obstacles.pillar && obstacleMode !== 'studio') {
-          for (let pz = st.z0 + SEGMENT / 2; pz < st.z1; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], 'obstacle');
+          for (let pz = st.z0 + (classic ? SEGMENT : 0) + SEGMENT / 2; pz < st.z1; pz += SEGMENT) place('obstacle_pillar', [0, 0, pz], 'obstacle');
           pillarRanges.push([st.z0, st.z1]);
         }
       } else if (st.kind === 'tube') {
@@ -1355,7 +1480,12 @@ export function generateLayout(
   // Older game versions ship no chase chunks: fall back to random obstacles
   if (obstacleMode === 'studio') placeStudio();
   else if (routed) placeRoute();
-  else {
+  else if (classic) {
+    // ≤ 1.43: the plain chunks' own trains and obstacles where they were laid; a hand-laid run
+    // takes them in turn around the chunks laid whole (which bring their own)
+    if (classicGameplay.length) for (const { name, z: cz } of classicGameplay) placeChunk(manifest.chunks[name], cz, new Set());
+    else if (gen.plan?.length && Object.keys(manifest.chunks ?? {}).length) placeChunks();
+  } else {
     // The pre-portal stretch keeps its chunk's own trains (Subway City ones), nothing random
     if (prePortalAt != null && manifest.prePortal) {
       placeChunk(manifest.prePortal, prePortalAt, new Set());
@@ -1499,7 +1629,7 @@ export function generateLayout(
     let cz = SEGMENT;
     while (cz < length - SEGMENT) {
       const chunk = manifest.chunks[pick(rng, names)];
-      if (noTrackRanges.some(([a, b]) => cz < b && cz + chunk.length > a - 30) || laneBlocks.some((l) => cz < l.z1 && cz + chunk.length > l.z0)) {
+      if (noTrackRanges.some(([a, b]) => cz < b && cz + chunk.length > a - 30) || laneBlocks.some((l) => cz < l.z1 && cz + chunk.length > l.z0) || classicOwn.some(([a, b]) => cz < b && cz + chunk.length > a)) {
         cz += 90;
         continue;
       }
@@ -1533,13 +1663,24 @@ export function generateLayout(
         choice.set(pl.group, rng() < pl.groupProbability ? pick(rng, options) : null);
       }
       if (pl.mirror && !mirrored.has(pl.mirror)) mirrored.set(pl.mirror, rng() < pl.mirrorProbability);
+      // ≤ 1.43: nested groups (Randomizer, RandomizeOffset lanes: [group, option] down to the
+      // piece) and Mirror nodes, each flipping half the time
+      for (const [g] of pl.conds ?? []) {
+        if (choice.has(g)) continue;
+        const options = [...new Set(chunk.placements.flatMap((q) => (q.conds ?? []).filter(([h]) => h === g).map(([, o]) => o)))];
+        choice.set(g, pick(rng, options));
+      }
+      for (const [m] of pl.mirrors ?? []) if (!mirrored.has(m)) mirrored.set(m, rng() < 0.5);
     }
     // Where each kept placement goes (one option per random group, mirrored subtrees flipped)
     const kept = [];
     for (const pl of chunk.placements) {
       if (pl.group && choice.get(pl.group) !== pl.option) continue;
+      if (pl.conds?.some(([g, o]) => choice.get(g) !== o)) continue;
       if (pl.slot.startsWith('special_gate')) continue; // gate walls need a gate section around them
       let [x, y, pz] = pl.pos;
+      // (innermost first: an outer flip also carries the inner mirror)
+      for (const [m, mx] of pl.mirrors ?? []) if (mirrored.get(m)) x = 2 * mx - x;
       // (never pushed off the tracks: the race's Ramps1 has a ramp under a mirror node one
       // lane over; pieces modeled beside the tracks, like bushes, still swap sides)
       if (pl.mirror && mirrored.get(pl.mirror) && Math.abs(2 * pl.mirrorX - x) <= Math.max(20.5, Math.abs(x))) x = 2 * pl.mirrorX - x;
