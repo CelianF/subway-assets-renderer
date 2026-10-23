@@ -425,6 +425,14 @@ body.ui-hidden #status {
   width: 130px;
   accent-color: var(--accent);
 }
+/* (a scrubber: no number, the bar takes the row) */
+.ctl-scrub .ctl-label {
+  flex: none;
+}
+.ctl-scrub input[type='range'] {
+  flex: 1;
+  width: auto;
+}
 .ctl-value {
   width: 64px;
   text-align: right;

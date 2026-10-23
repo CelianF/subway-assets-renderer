@@ -1680,6 +1680,10 @@ function parseMotions(file, guidIndex) {
       // Pickups turn about their up axis, degrees a second; _rotationOffset (degrees a unit
       // along the run) staggers them, so a line of coins twists
       if (num(doc, '_rotationSpeed')) motion = { type: 'spin', axis: [0, -1, 0], speed: num(doc, '_rotationSpeed'), offset: num(doc, '_rotationOffset') };
+    } else if (kind === 'PickupRotate') {
+      // ≤ 1.43: the target turned about up, Time.time × speed + z × rotatePhase degrees
+      target = goOfTransform.get(doc.match(/\n {2}target: \{fileID: (\d+)/)?.[1]) ?? go;
+      motion = { type: 'spin', axis: [0, -1, 0], speed: num(doc, 'speed', 180), offset: num(doc, 'rotatePhase', 0.9) };
     } else if (kind === 'OffsetEffect') {
       const d = vec(doc, '_direction');
       // 2.x: _offsets, a ride from the start up to it and back (2.34 Copenhagen's lift)
@@ -2472,6 +2476,8 @@ function parseClassic(root, project, guidIndex, log) {
     const transformGo = new Map();
     const transformChildren = new Map();
     const goMeshAsset = new Map(); // go -> mesh asset file (MeshFilter)
+    const goAnimation = new Map(); // go -> its legacy Animation component
+    const filterGo = new Map(); // MeshFilter -> go
     for (const { doc, kind, fid } of docs) {
       if (kind === '1') goName.set(fid, doc.match(/m_Name: (.*)/)?.[1].trim() ?? '');
       else if (kind === '4' || kind === '224') {
@@ -2480,8 +2486,10 @@ function parseClassic(root, project, guidIndex, log) {
         transformGo.set(fid, go);
         const kids = doc.split('m_Children:')[1]?.split(/\n {2}m_Father/)[0] ?? '';
         transformChildren.set(fid, [...kids.matchAll(/fileID: (\d+)/g)].map(([, id]) => id));
-      } else if (kind === '33') {
+      } else if (kind === '111') goAnimation.set(doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1], doc);
+      else if (kind === '33') {
         const go = doc.match(/m_GameObject: \{fileID: (\d+)/)?.[1];
+        filterGo.set(fid, go);
         const g = doc.match(/m_Mesh: \{fileID: \d+, guid: (\w+)/)?.[1];
         if (go && g && guidIndex.has(g)) goMeshAsset.set(go, guidIndex.get(g));
       } else if (kind === '114') {
@@ -2510,6 +2518,7 @@ function parseClassic(root, project, guidIndex, log) {
 
     // Node behaviors as extras
     const extras = new Map();
+    const spinners = new Map(); // node -> its PickupRotates' [{ target node, speed, offset }]
     const field = (doc, key) => doc.match(new RegExp(`\\n {2}${key}: ([^\\n]+)`))?.[1].trim();
     for (const [go, ni] of nodeOfGo) {
       const out = {};
@@ -2528,6 +2537,10 @@ function parseClassic(root, project, guidIndex, log) {
           if (field(doc, '  mid') !== '0') lanes.push(0);
           if (field(doc, '  right') !== '0') lanes.push(20);
           if (lanes.length) out.lanes = lanes;
+        } else if (script === 'PickupRotate') {
+          // (its target turned about up, Time.time × speed + z × rotatePhase degrees)
+          const target = nodeOfGo.get(transformGo.get(doc.match(/\n {2}target: \{fileID: (\d+)/)?.[1]));
+          if (target != null) spinners.set(ni, [...(spinners.get(ni) ?? []), { target, speed: Number(field(doc, 'speed') ?? 180), offset: Number(field(doc, 'rotatePhase') ?? 0.9) }]);
         } else if (script === 'MovingTrain') out.moving = Number(field(doc, 'speed') ?? 1);
         else if (script === 'CoinPlaceholder' || script === 'Coin') out.hide = true;
       }
@@ -2778,23 +2791,79 @@ function parseClassic(root, project, guidIndex, log) {
     // under the modern pickups' names; their glow (scale 0: the game's script grows it) shown
     const SPAWN_PICKUPS = { magnetBooster: 'Magnet', 'jetpack pickup': 'Jetpack', jumpBooster: 'SuperSneakers', dailyLetter: 'LetterToken', doubleScoreMultiplier: '2xScore', mysteryBox: 'MysteryBox', saveMeToken: 'Key', mysteryPowerup: 'MysteryPowerup' };
     const pickups = [];
+    const grow = (i) => {
+      for (const c of json.nodes[i].children ?? []) {
+        if (json.nodes[i].name === 'Glow' && json.nodes[c].mesh != null && json.nodes[c].scale?.every((v) => v === 0)) json.nodes[c].scale = [1, 1, 1];
+        grow(c);
+      }
+    };
+    // The PickupRotate spins below a pickup, by path below it ("name#k": the k-th of that name)
+    const parentOf = new Map();
+    json.nodes.forEach((n, i) => (n.children ?? []).forEach((c) => parentOf.set(c, i)));
+    const pathBelow = (root, i) => {
+      const parts = [];
+      for (; i !== root && i != null; i = parentOf.get(i)) {
+        const same = (json.nodes[parentOf.get(i)]?.children ?? []).filter((c) => json.nodes[c].name === json.nodes[i].name);
+        parts.unshift(`${json.nodes[i].name}#${Math.max(0, same.indexOf(i))}`);
+      }
+      return i === root ? parts.join('/') : null;
+    };
+    // The legacy clips playing below a pickup (each glow's glowRotate: turning and growing, the
+    // power-ups' bounce, the mystery power-up's rings), looped, by node name as the viewer finds them
+    const goOfNode = new Map([...nodeOfGo].map(([go, ni]) => [ni, go]));
+    const animationsOf = (root) => {
+      const out = [];
+      const visit = (i) => {
+        const doc = goAnimation.get(goOfNode.get(i));
+        const { clip } = doc ? legacyClip(doc, guidIndex) : {};
+        if (clip && existsSync(clip)) {
+          const text = read(clip);
+          const lastKey = Math.max(0, ...[...text.matchAll(/\n\s+(?:- )?time: ([\d.eE+-]+)/g)].map(([, t]) => Number(t)));
+          const stop = Math.max(Number(text.match(/m_StopTime: ([\d.eE+-]+)/)?.[1] ?? 0), lastKey);
+          const tracks = new Map();
+          if (stop > 0) sampleClipTracks(text, stop, stop, 0, tracks, 30);
+          if (tracks.size) out.push({ node: i === root ? null : json.nodes[i].name, duration: round(stop, 4), tracks: [...tracks.values()] });
+        }
+        (json.nodes[i].children ?? []).forEach(visit);
+      };
+      visit(root);
+      return out.length ? out : undefined;
+    };
+    // DailyLetterPickup: the letter's mesh, one of 26 (A to Z)
+    const lettersOf = (root) => {
+      const doc = goComps.get(goOfNode.get(root))?.find((c) => c.script === 'DailyLetterPickup')?.doc;
+      const node = doc && goName.get(filterGo.get(doc.match(/\n {2}LetterMesh: \{fileID: (\d+)/)?.[1]));
+      const meshes = [...(doc?.split('\n  Letters:')[1]?.split(/\n {2}\w/)[0] ?? '').matchAll(/guid: (\w+)/g)].map(([, g]) => guidIndex.get(g)).filter(Boolean).map(stem);
+      return node && meshes.length === 26 ? { node, meshes } : undefined;
+    };
+    const spinsOf = (root) => {
+      const out = [];
+      const visit = (i) => {
+        for (const sp of spinners.get(i) ?? []) {
+          const at = pathBelow(root, sp.target);
+          if (at) out.push({ path: at, node: json.nodes[sp.target].name, type: 'spin', axis: [0, -1, 0], speed: sp.speed, offset: sp.offset });
+        }
+        (json.nodes[i].children ?? []).forEach(visit);
+      };
+      visit(root);
+      return out.length ? out : undefined;
+    };
     for (const [node, key] of Object.entries(SPAWN_PICKUPS)) {
       const ni = json.nodes.findIndex((n, i) => n.name === node && n.mesh == null && n.children?.length && json.nodes.some((p) => p.name === 'SpawnPoint' && p.children?.includes(i)));
       if (ni < 0 || rename.has(ni)) continue;
       rename.set(ni, key);
-      const grow = (i) => {
-        for (const c of json.nodes[i].children ?? []) {
-          if (json.nodes[i].name === 'Glow' && json.nodes[c].mesh != null && json.nodes[c].scale?.every((v) => v === 0)) json.nodes[c].scale = [1, 1, 1];
-          grow(c);
-        }
-      };
       grow(ni);
-      pickups.push({ name: key, bbox: subtreeBbox(ni) });
+      pickups.push({ name: key, bbox: subtreeBbox(ni), motions: spinsOf(ni), animations: animationsOf(ni), letters: lettersOf(ni) });
     }
-    // The pogo stick: the one the pogo-start chunk lays (the build's "PogostickPickup" prefab is
-    // a random spawn of every other power-up, drawn all at once)
-    const pogo = json.nodes.findIndex((n) => n.name === 'pogo' && n.mesh != null);
-    if (pogo >= 0) pickups.push({ name: 'Pogostick', node: 'pogo', bbox: subtreeBbox(pogo) });
+    // The pogo stick: the one the pogo-start chunk lays, its PickupRotate node (the pogo and its
+    // glow; the build's "PogostickPickup" prefab is a random spawn of every other power-up)
+    const pogoMesh = json.nodes.findIndex((n) => n.name === 'pogo' && n.mesh != null);
+    const pogo = [...spinners].find(([, sps]) => sps.some((sp) => sp.target === pogoMesh))?.[0] ?? pogoMesh;
+    if (pogo >= 0 && !rename.has(pogo)) {
+      rename.set(pogo, 'Pogostick');
+      grow(pogo);
+      pickups.push({ name: 'Pogostick', bbox: subtreeBbox(pogo), motions: spinsOf(pogo), animations: animationsOf(pogo) });
+    }
     const split = splitClassic(json, extras, rename, skip, chunks, subtreeBbox);
     if (split.looks.length) log(`  split: ${split.looks.filter((l) => l.slot.startsWith('classic_')).length} road looks, ${split.looks.filter((l) => l.slot.startsWith('boundary_pillars')).length} pillar hall pieces, ${Object.keys(split.gameplay).length} gameplay chunks, ${chunks.filter((c) => c.special).length} special chunks`);
     const libraryGlb = glbSubset(glb, library, extras, rename, skip, geometryFor);
@@ -4158,7 +4227,21 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     // (180 a segment; 1.0's pillar hall pieces are two segments long)
     const segments = (bbox) => Math.max(180, Math.round((bbox ? bbox[1][2] - bbox[0][2] : 180) / 180) * 180);
     for (const { pieces } of classic.looks) for (const p of pieces) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox, length: segments(p.bbox) };
-    for (const p of classic.pickups) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.node ?? p.name, meshes: 1, materials, bbox: p.bbox };
+    for (const p of classic.pickups) {
+      const info = (prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.node ?? p.name, meshes: 1, materials, bbox: p.bbox, ...(p.motions ? { motions: p.motions } : {}) });
+      if (p.animations) {
+        // (the root's own clip by the prefab's node name: the bounce)
+        mkdirSync(path.join(out, 'anim'), { recursive: true });
+        writeFileSync(path.join(out, 'anim', `${p.name}.json`), JSON.stringify(p.animations.map((a) => ({ ...a, node: a.node ?? info.node }))));
+        info.animators = `anim/${p.name}.json`;
+      }
+      const letters = p.letters?.meshes.map((m) => meshGlbs.get(`${m}.glb`));
+      if (letters?.every(Boolean)) {
+        mkdirSync(path.join(out, 'mesh'), { recursive: true });
+        for (const src of letters) copyIfNewer(src, path.join(out, 'mesh', path.basename(src)));
+        info.letters = { node: p.letters.node, meshes: letters.map((src) => `mesh/${path.basename(src)}`) };
+      }
+    }
     for (const p of classic.parts) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox };
     for (const c of classic.composites) {
       const boxes = c.parts.map((q) => prefabs[q.prefab]?.bbox).filter(Boolean);

@@ -633,6 +633,8 @@ function findNode(obj, name) {
   const key = THREE.PropertyBinding.sanitizeNodeName(name);
   let found = null;
   obj.traverse((o) => (found ??= o.name === key ? o : null));
+  // (else one renamed apart from a namesake in the same glb: ≤ 1.43's level, "Letter_1")
+  obj.traverse((o) => (found ??= o.name.replace(/_\d+$/, '') === key ? o : null));
   return found;
 }
 
@@ -1248,9 +1250,12 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   if (prefab?.node) {
     const obj = await instantiateChunk(prefab, layer, variantSeed, worldZ, { variants });
     if (!obj || !prefab.offset) return obj;
+    // (the offset a level of its own: a pickup's bounce clip moves the node itself)
     const group = new THREE.Group();
-    obj.position.set(...prefab.offset);
-    group.add(obj);
+    const centered = new THREE.Group();
+    centered.position.set(...prefab.offset);
+    centered.add(obj);
+    group.add(centered);
     return group;
   }
   // Particle-only prefabs (glows, steam) have no geometry of their own
@@ -1389,6 +1394,10 @@ async function instantiateChunk(prefab, layer, seed, worldZ, { keepObstacles = f
   }
   if (prefab.chunk) placeMovingTrains(obj);
   if (prefab.chunk) attachTrainBlinkers(obj);
+  // (the level's pickups: PickupRotate turning the power-up, the mystery power-up's rings; their
+  // clips: the bounce, the glow turning and growing)
+  if (prefab.motions) applyMotions(obj, prefab.motions, seed, prefab.bbox, worldZ);
+  if (prefab.animators) await applyAnimators(obj, prefab.animators, seed);
   // (its rails modeled in: studio "no tracks" zones cut them out of the scenery, 3)
   const cut = layer === 'environment' ? 3 : 0;
   obj.traverse((o) => {
@@ -1732,6 +1741,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
   updateVisibility();
   applyBend();
   const missing = objs.filter(([, o]) => !o).length;
+  if (window.__viewer) window.__viewer.unloaded = objs.filter(([, o]) => !o).map(([it]) => it.prefab); // (the import-audit studio check)
   status.textContent = only
     ? `Inspecting ${only.length} piece${only.length > 1 ? 's' : ''}`
     : `Seed ${state.seed} · ${layout.items.length} pieces · ${Math.round(length)} units${missing ? ` · ${missing} without geometry` : ''}`;
@@ -2747,24 +2757,26 @@ function stepLayered(L, units) {
 }
 
 /**
- * ≤ 1.43: how the roads lay their bare dirt (a 1-track road's side lanes: u from the lane's
- * middle to its edge, v over one tile along the run), what the road shows where the studio
- * takes a track out. null if no road has a bare lane.
+ * ≤ 1.43: where the ground's texture keeps its track tiles and their bare twins (a road's
+ * bare lane: the same column, further along v), and the sleepers laid flat on the tracks (a uv
+ * rect, over every piece with tracks), what the studio shows where it takes a track out.
+ * null if no road has a bare lane.
  */
 let classicDirt = null;
 async function classicDirtLane() {
   if (!manifest.classic) return null;
   classicDirt ??= (async () => {
-    const roads = manifest.themes[state.theme] ? Object.assign({}, ...Object.values(manifest.themes[state.theme])).classic_road ?? [] : [];
-    const glb = roads.length ? manifest.prefabs[roads[0]]?.glb : null;
-    if (!glb) return null;
-    const library = await loadGlb(glb);
+    const slots = manifest.themes[state.theme] ? Object.assign({}, ...Object.values(manifest.themes[state.theme])) : {};
+    const roads = slots.classic_road ?? [];
+    const tracked = [...roads, ...Object.entries(slots).filter(([k]) => /^(classic_subway|classic_station_|boundary_pillars_)/.test(k)).flatMap(([, v]) => v)];
     const p = new THREE.Vector3();
-    for (const name of roads) {
-      const node = library.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(manifest.prefabs[name]?.node ?? name));
-      if (!node) continue;
+    // Ground vertices by lane: { side (0 middle, 10 edge, else a sleeper's), u, v }
+    const laneVerts = async (name) => {
+      const prefab = manifest.prefabs[name];
+      const node = prefab?.glb && (await loadGlb(prefab.glb)).getObjectByName(THREE.PropertyBinding.sanitizeNodeName(prefab.node ?? name));
+      if (!node) return null;
       node.updateMatrixWorld(true);
-      const local = node.matrixWorld.clone().invert(); // (in the road's own frame, as laid)
+      const local = node.matrixWorld.clone().invert(); // (in the piece's own frame, as laid)
       const lanes = { [-20]: [], 0: [], 20: [] };
       node.traverse((o) => {
         if (!o.isMesh || !o.geometry.attributes.uv) return;
@@ -2772,26 +2784,72 @@ async function classicDirtLane() {
         const uv = o.geometry.attributes.uv;
         for (let i = 0; i < pos.count; i++) {
           p.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld).applyMatrix4(local);
-          if (Math.abs(p.y) > 0.01) continue;
           const lane = Math.round(p.x / 20) * 20;
-          if (lanes[lane] && Math.abs(p.x - lane) <= 10.01) lanes[lane].push({ side: Math.abs(p.x - lane), z: p.z, u: uv.getX(i), v: uv.getY(i) });
+          if (Math.abs(p.y) <= 0.01 && lanes[lane] && Math.abs(p.x - lane) <= 10.01) lanes[lane].push({ side: Math.abs(p.x - lane), z: p.z, u: uv.getX(i), v: uv.getY(i) });
         }
       });
-      for (const vs of Object.values(lanes)) {
-        // (bare: nothing laid on the ground but the lane's own strip, from its middle to its edges)
-        if (!vs.length || vs.some((q) => Math.min(q.side, 10 - q.side) > 0.01)) continue;
-        const at = (side) => vs.filter((q) => Math.abs(q.side - side) < 0.01).map((q) => q.u);
-        const center = at(0), edge = at(10);
-        const zs = [...new Set(vs.map((q) => Math.round(q.z * 100) / 100))].sort((x, y) => x - y);
-        const tile = zs.length > 1 ? Math.min(...zs.slice(1).map((z, i) => z - zs[i])) : 0;
-        // (v from the middle's vertices: the edges' are shared with the next lane's strip)
-        const v = vs.filter((q) => q.side < 0.01).map((q) => q.v);
-        if (!center.length || !edge.length || tile <= 0) continue;
-        if (Math.max(...center) - Math.min(...center) > 1e-3 || Math.max(...edge) - Math.min(...edge) > 1e-3) continue;
-        return { center: center[0], edge: edge[0], v0: Math.min(...v), v1: Math.max(...v), tile };
+      return lanes;
+    };
+    const isSleeper = (q) => Math.min(q.side, 10 - q.side) > 0.01;
+    const span = (vs) => [Math.min(...vs), Math.max(...vs)];
+    let tiles = null;
+    for (const name of roads) {
+      const lanes = await laneVerts(name);
+      if (!lanes) continue;
+      // (v from the middles: the edges' are shared with the next lane's strip)
+      const middles = (vs) => vs.filter((q) => q.side < 0.01).map((q) => q.v);
+      const track = Object.values(lanes).find((vs) => vs.some(isSleeper));
+      const bare = Object.values(lanes).find((vs) => vs.length && !vs.some(isSleeper));
+      if (!track || !bare || !middles(track).length || !middles(bare).length) continue;
+      const [t0, t1] = span(middles(track));
+      const [b0] = span(middles(bare));
+      const zs = [...new Set(bare.map((q) => Math.round(q.z)))].sort((a, b) => a - b);
+      tiles = { v0: t0 - 0.002, v1: t1 + 0.002, shift: b0 - t0, light: [bare.find((q) => q.side < 0.01).u, bare.find((q) => q.side > 9.99)?.u ?? 0], tile: Math.min(...zs.slice(1).map((z, i) => z - zs[i])) };
+      break;
+    }
+    if (!tiles) return null;
+    // The dark bare lane (the pillar hall's, a station's): its column away from the roads'
+    let dark = null;
+    for (const name of tracked) {
+      for (const vs of Object.values((await laneVerts(name)) ?? {})) {
+        const mids = vs.filter((q) => q.side < 0.01);
+        if (dark || !vs.length || vs.some(isSleeper) || !mids.length || Math.abs(mids[0].u - tiles.light[0]) < 0.05) continue;
+        const [d0, d1] = span(mids.map((q) => q.v));
+        if (d0 < tiles.v1) continue; // (a track tile, not its bare twin)
+        dark = [mids[0].u, vs.find((q) => q.side > 9.99)?.u ?? mids[0].u, d0, d1];
       }
     }
-    return null;
+    // The entrance shadows: lane ground in neither column nor tile (tunnels', stations' mouths),
+    // a band with the rails painted in for the tracks and a bare one for the lanes without:
+    // the same fade into the dark, from the middle of the lane (v) along the run (u)
+    const columns = [tiles.light, dark?.slice(0, 2)].filter(Boolean).map(([a, b]) => [Math.min(a, b) - 0.005, Math.max(a, b) + 0.005]);
+    const shadow = { track: [], bare: [] };
+    for (const name of [...tracked, ...(slots.classic_special ?? [])]) {
+      for (const vs of Object.values((await laneVerts(name)) ?? {})) {
+        // (between the two columns: the wall strips beside the tunnels' tracks sit further on)
+        const own = vs.filter((q) => !isSleeper(q) && q.v > tiles.v1 && columns.length === 2 && q.u > Math.min(columns[0][1], columns[1][1]) && q.u < Math.max(columns[0][0], columns[1][0]));
+        shadow[vs.some(isSleeper) ? 'track' : 'bare'].push(...own);
+      }
+    }
+    const mid = (qs) => Math.min(...qs.filter((q) => q.side < 0.01).map((q) => q.v));
+    const bareMid = shadow.bare.some((q) => q.side < 0.01) ? mid(shadow.bare) : null;
+    // (the track lanes' edges are shared with a bare lane's: only the rails band's own)
+    const railed = shadow.track.filter((q) => bareMid == null || q.v < bareMid - 0.01);
+    const sleepers = [];
+    // (the roads' own sleepers; the other pieces' only on that sprite's column, a row of their
+    // own: 1.31 Bangkok, 1.35 Hawaii, 1.43 Greece lay other ground across their lanes)
+    for (const name of roads) for (const vs of Object.values((await laneVerts(name)) ?? {})) sleepers.push(...vs.filter(isSleeper));
+    // (the sprite's column: the most of them, around their median; 1.31's road has more ground)
+    const median = sleepers.map((q) => q.u).sort((a, b) => a - b)[sleepers.length >> 1];
+    sleepers.splice(0, sleepers.length, ...sleepers.filter((q) => Math.abs(q.u - median) < 0.01));
+    const roadU = sleepers.length ? span(sleepers.map((q) => q.u)) : null;
+    if (roadU) for (const name of tracked) for (const vs of Object.values((await laneVerts(name)) ?? {})) sleepers.push(...vs.filter((q) => isSleeper(q) && q.u >= roadU[0] - 0.003 && q.u <= roadU[1] + 0.003));
+    const [u0, u1] = span(sleepers.map((q) => q.u));
+    const [s0, s1] = span(sleepers.map((q) => q.v));
+    const rect = (qs) => (qs.length ? [...span(qs.map((q) => q.u)), ...span(qs.map((q) => q.v))] : null);
+    const shadows = dark && rect(railed);
+    const shadowShift = shadows && bareMid != null && railed.some((q) => q.side < 0.01) ? bareMid - mid(railed) : 0;
+    return { ...tiles, sleepers: sleepers.length ? [u0 - 0.002, u1 + 0.002, s0 - 0.002, s1 + 0.002] : [1, 0, 1, 0], dark, shadows: shadows ? [shadows[0] - 0.002, shadows[1] + 0.002, shadows[2] - 0.002, shadows[3] + 0.002] : null, shadowShift };
   })();
   return classicDirt;
 }
@@ -3181,7 +3239,7 @@ const view = createWorkbar(
             { type: 'toggle', label: 'Enabled', obj: state, key: 'skyline', onChange: applyThemeLook },
             { type: 'slider', label: 'Opacity', obj: state, key: 'skylineOpacity', min: 0, max: 1, step: 0.01, onChange: applyThemeLook },
             { type: 'slider', label: 'Distance ×', obj: state, key: 'skylineDistance', min: 0.3, max: 3, step: 0.05, onChange: applyThemeLook },
-            { type: 'slider', label: 'Travel', hint: 'Drag lower for finer steps', scrub: true, obj: state, key: 'skylineSlide', min: 0, max: 20000, step: 5, onChange: () => replaySkyline(), visible: () => (manifest.themeConfigs?.[state.theme]?.skylineLayers?.layers ?? []).some((l) => l.classic || l.speed != null) },
+            { type: 'slider', label: 'Travel', scrub: true, obj: state, key: 'skylineSlide', min: 0, max: 20000, step: 5, onChange: () => replaySkyline(), visible: () => (manifest.themeConfigs?.[state.theme]?.skylineLayers?.layers ?? []).some((l) => l.classic || l.speed != null) },
             {
               // The game shows one front piece at a time, the next once it has crossed the sky
               type: 'select',
@@ -3707,7 +3765,7 @@ if (params.get('z')) {
   camera.lookAt(orbit.target);
 }
 setControlMode(state.controls);
-window.__viewer = { chunkThumbnail, replaySkyline, chunkCards: () => chunkCards(manifest, state.theme, state.gen), time, motions, meshAnimations, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild, unruledShaders, instantiate, manifest };
+window.__viewer = { ensurePickups, catalog, chunkThumbnail, replaySkyline, chunkCards: () => chunkCards(manifest, state.theme, state.gen), time, motions, meshAnimations, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild, unruledShaders, instantiate, manifest };
 if (state.obstacleMode === 'studio' && state.studio.some((it) => ['coins', 'coinArc', 'pickup'].includes(it.type))) await ensurePickups();
 await rebuild();
 

@@ -39,7 +39,11 @@
 //   level's power-ups: magnet, jetpack, sneakers, 2x, box, key, letter, mystery power-up)
 // 15 (2026-10-23): ≤ 1.43 pogo stick pickup is the build's own pogo model (it drew every
 //   power-up of the multi-power-up spawn in one)
-export const IMPORT_VERSION = 15;
+// 16 (2026-10-23): ≤ 1.43 pickups turn (PickupRotate: the coins, power-ups, the mystery
+//   power-up's rings) and the pogo stick has its glow
+// 17 (2026-10-23): ≤ 1.43 pickups play their clips (the bounce, the glow turning and growing,
+//   the mystery power-up's rings) and the letter token shows any letter
+export const IMPORT_VERSION = 17;
 // Maps built before this one don't open: the viewer has dropped what reading them needed (13:
 // classic levels as whole chunks) and asks for a re-import
 export const MIN_IMPORT_VERSION = 13;

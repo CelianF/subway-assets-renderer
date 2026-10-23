@@ -71,10 +71,18 @@ export const globals = {
   // Studio "no tracks" zones: (track x, z0, z1); rails hide inside, fill ground shows only inside
   uCutCount: { value: 0 },
   uCuts: { value: Array.from({ length: MAX_CUTS }, () => new THREE.Vector3()) },
-  // (≤ 1.43: where the roads' bare dirt lane is in the texture, laid under a removed track:
-  // u at the lane's middle and edge, v over one tile, the tile's length (0: none))
-  uDirt: { value: new THREE.Vector4() },
-  uDirtTile: { value: 0 },
+  // (≤ 1.43: the ground's texture keeps each track tile with its bare twin beside it, light
+  // dirt for the roads, dark for the pillar hall and stations: the track tiles' v range and
+  // the shift to their twin (0: none); the sleepers laid flat on them, a uv rect)
+  uDirt: { value: new THREE.Vector3() },
+  uSleepers: { value: new THREE.Vector4(1, 0, 1, 0) },
+  // (the tunnels' and stations' entrance shadow, rails painted in: a uv rect, laid over with
+  // the dark bare lane, u at its middle and edge, v over one tile of uDirtTile units)
+  uShadows: { value: new THREE.Vector4(1, 0, 1, 0) },
+  uDarkLane: { value: new THREE.Vector4() },
+  uDirtTile: { value: 30 },
+  // (the shift from the rails' shadow band to the bare lanes' one: 0, the dark lane instead)
+  uShadowShift: { value: 0 },
 };
 
 /**
@@ -112,10 +120,14 @@ export const makeZoneUniforms = () => ({
   list: { value: Array.from({ length: MAX_ALT_ZONES }, () => new THREE.Vector2()) },
 });
 
-/** Sets the "no tracks" zones the track materials cut out (`dirt`: the classic roads' bare dirt lane). */
+/** Sets the "no tracks" zones the track materials cut out (`dirt`: ≤ 1.43's track and bare tiles). */
 export function setTrackCuts(zones, dirt = null) {
-  if (dirt) globals.uDirt.value.set(dirt.center, dirt.edge, dirt.v0, dirt.v1);
-  globals.uDirtTile.value = dirt?.tile ?? 0;
+  globals.uDirt.value.set(dirt?.v0 ?? 0, dirt?.v1 ?? 0, dirt?.shift ?? 0);
+  if (dirt) globals.uSleepers.value.set(...dirt.sleepers);
+  if (dirt) globals.uShadows.value.set(...(dirt.shadows ?? [1, 0, 1, 0]));
+  if (dirt?.dark) globals.uDarkLane.value.set(...dirt.dark);
+  if (dirt) globals.uDirtTile.value = dirt.tile;
+  globals.uShadowShift.value = dirt?.shadowShift ?? 0;
   const list = zones.slice(0, MAX_CUTS);
   list.forEach((z, i) => globals.uCuts.value[i].set(z.lane, z.z0, z.z1));
   globals.uCutCount.value = list.length;
@@ -338,8 +350,12 @@ const CUT_GLSL = /* glsl */ `
 varying vec3 vWorld;
 #ifdef TRACK_CUT
 uniform int uCutCount;
-uniform vec4 uDirt;
+uniform vec3 uDirt;
+uniform vec4 uSleepers;
+uniform vec4 uShadows;
+uniform vec4 uDarkLane;
 uniform float uDirtTile;
+uniform float uShadowShift;
 uniform vec3 uCuts[${32}];
 bool inCut() {
   for (int i = 0; i < ${32}; i++) {
@@ -495,17 +511,22 @@ void main() {
 ${CUT_MAIN}
   vec2 uv = vUv;
 #if defined(TRACK_CUT) && TRACK_CUT == 3
-  // (the road under a removed classic track, and its sleepers laid flat on it: the bare dirt
-  // lane's texture, tiled the way the road lays it)
-  bool dirtLaid = uDirtTile > 0.0 && vWorld.y < 0.05 && inCut();
-  float dirtSide = abs(vWorld.x - 20.0 * floor(vWorld.x / 20.0 + 0.5)) / 10.0;
-  float dirtRun = vWorld.z / max(uDirtTile, 1.0);
-  // (kept off the tile's ends, where the atlas' next texels bleed in as lines; gradients of
-  // the unwrapped coordinates, taken for every pixel: the wrap would pick a tiny mip, a seam)
-  float dirtInset = 0.01 * (uDirt.w - uDirt.z);
-  vec2 dirtCont = vec2(mix(uDirt.x, uDirt.y, dirtSide), dirtRun * (uDirt.w - uDirt.z - 2.0 * dirtInset));
-  vec2 dirtGx = dFdx(dirtCont), dirtGy = dFdy(dirtCont);
-  if (dirtLaid) uv = vec2(dirtCont.x, mix(uDirt.z + dirtInset, uDirt.w - dirtInset, fract(dirtRun)));
+  // (sampled with the mesh's own gradients: the jump to the bare tile at the zone's ends and
+  // the lane's edges would pick a tiny mip, a 1px line)
+  vec2 cutGx = dFdx(vUv), cutGy = dFdy(vUv);
+  bool cutLaid = false;
+  // (the ground under a removed classic track: its tile's bare twin, light or dark as the
+  // piece's own; the sleepers laid flat on it dropped, the ground under them shows)
+  if (uDirt.z != 0.0 && vWorld.y < 0.05 && inCut()) {
+    if (vUv.x >= uSleepers.x && vUv.x <= uSleepers.y && vUv.y >= uSleepers.z && vUv.y <= uSleepers.w) discard;
+    cutLaid = true;
+    if (vUv.y >= uDirt.x && vUv.y <= uDirt.y) uv.y += uDirt.z;
+    else if (vUv.x >= uShadows.x && vUv.x <= uShadows.y && vUv.y >= uShadows.z && vUv.y <= uShadows.w && uShadowShift != 0.0) uv.y += uShadowShift;
+    else if (vUv.x >= uShadows.x && vUv.x <= uShadows.y && vUv.y >= uShadows.z && vUv.y <= uShadows.w) {
+      float side = abs(vWorld.x - 20.0 * floor(vWorld.x / 20.0 + 0.5)) / 10.0;
+      uv = vec2(mix(uDarkLane.x, uDarkLane.y, side), mix(uDarkLane.z, uDarkLane.w, fract(vWorld.z / uDirtTile)));
+    }
+  }
 #endif
 #ifdef UV_WOBBLE
   vec4 wobbleColor = vec4(0.0);
@@ -576,7 +597,8 @@ ${CUT_MAIN}
   vec4 c = texture2D(uMap, uv);
 #endif
 #if defined(TRACK_CUT) && TRACK_CUT == 3
-  if (dirtLaid) c = textureGrad(uMap, uv, dirtGx, dirtGy);
+  // (both sides of the zone's edge: a pixel just outside it sees its neighbours' jump too)
+  if (cutLaid || uv == vUv) c = textureGrad(uMap, uv, cutGx, cutGy);
 #endif
 #ifdef GRAFFITI
   c *= texture2D(uFrontTex, vUv1); // the tag over the wall, on the second UV set

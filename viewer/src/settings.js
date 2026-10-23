@@ -97,6 +97,7 @@ function buildControl(c, refreshers) {
       const end = () => (drag = null);
       range.addEventListener('pointerup', end);
       range.addEventListener('pointercancel', end);
+      row.classList.add('ctl-scrub');
       row.append(label, range);
     } else row.append(label, range, number);
     refresh = () => {

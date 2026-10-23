@@ -172,7 +172,8 @@ export function createStudio(ctx) {
    * zones, which show their own preview.
    */
   function spotShape() {
-    if (tool.type === 'noTracks') return { w: 16, d: CELL - 3, dx: 0, dz: CELL / 2, xs: LANES };
+    // (one strip along each track, no gaps: tiles' gaps over a removed track read as its sleepers)
+    if (tool.type === 'noTracks') return { w: 16, d: CELL, dx: 0, dz: CELL / 2, xs: LANES };
     if (isPickup(tool)) return { w: 7, d: 7, dx: 0, dz: CELL / 2, xs: LANES };
     if (tool.type !== 'obstacle') return null;
     const cat = ctx.getCatalog();
