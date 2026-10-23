@@ -71,6 +71,10 @@ export const globals = {
   // Studio "no tracks" zones: (track x, z0, z1); rails hide inside, fill ground shows only inside
   uCutCount: { value: 0 },
   uCuts: { value: Array.from({ length: MAX_CUTS }, () => new THREE.Vector3()) },
+  // (≤ 1.43: where the roads' bare dirt lane is in the texture, laid under a removed track:
+  // u at the lane's middle and edge, v over one tile, the tile's length (0: none))
+  uDirt: { value: new THREE.Vector4() },
+  uDirtTile: { value: 0 },
 };
 
 /**
@@ -108,8 +112,10 @@ export const makeZoneUniforms = () => ({
   list: { value: Array.from({ length: MAX_ALT_ZONES }, () => new THREE.Vector2()) },
 });
 
-/** Sets the "no tracks" zones the track materials cut out. */
-export function setTrackCuts(zones) {
+/** Sets the "no tracks" zones the track materials cut out (`dirt`: the classic roads' bare dirt lane). */
+export function setTrackCuts(zones, dirt = null) {
+  if (dirt) globals.uDirt.value.set(dirt.center, dirt.edge, dirt.v0, dirt.v1);
+  globals.uDirtTile.value = dirt?.tile ?? 0;
   const list = zones.slice(0, MAX_CUTS);
   list.forEach((z, i) => globals.uCuts.value[i].set(z.lane, z.z0, z.z1));
   globals.uCutCount.value = list.length;
@@ -332,6 +338,8 @@ const CUT_GLSL = /* glsl */ `
 varying vec3 vWorld;
 #ifdef TRACK_CUT
 uniform int uCutCount;
+uniform vec4 uDirt;
+uniform float uDirtTile;
 uniform vec3 uCuts[${32}];
 bool inCut() {
   for (int i = 0; i < ${32}; i++) {
@@ -486,6 +494,19 @@ float altRatio() {
 void main() {
 ${CUT_MAIN}
   vec2 uv = vUv;
+#if defined(TRACK_CUT) && TRACK_CUT == 3
+  // (the road under a removed classic track, and its sleepers laid flat on it: the bare dirt
+  // lane's texture, tiled the way the road lays it)
+  bool dirtLaid = uDirtTile > 0.0 && vWorld.y < 0.05 && inCut();
+  float dirtSide = abs(vWorld.x - 20.0 * floor(vWorld.x / 20.0 + 0.5)) / 10.0;
+  float dirtRun = vWorld.z / max(uDirtTile, 1.0);
+  // (kept off the tile's ends, where the atlas' next texels bleed in as lines; gradients of
+  // the unwrapped coordinates, taken for every pixel: the wrap would pick a tiny mip, a seam)
+  float dirtInset = 0.01 * (uDirt.w - uDirt.z);
+  vec2 dirtCont = vec2(mix(uDirt.x, uDirt.y, dirtSide), dirtRun * (uDirt.w - uDirt.z - 2.0 * dirtInset));
+  vec2 dirtGx = dFdx(dirtCont), dirtGy = dFdy(dirtCont);
+  if (dirtLaid) uv = vec2(dirtCont.x, mix(uDirt.z + dirtInset, uDirt.w - dirtInset, fract(dirtRun)));
+#endif
 #ifdef UV_WOBBLE
   vec4 wobbleColor = vec4(0.0);
   bool wobbleOn = false;
@@ -553,6 +574,9 @@ ${CUT_MAIN}
   vec4 c = wobbleOn ? wobbleColor : texture2D(uMap, uv);
 #else
   vec4 c = texture2D(uMap, uv);
+#endif
+#if defined(TRACK_CUT) && TRACK_CUT == 3
+  if (dirtLaid) c = textureGrad(uMap, uv, dirtGx, dirtGy);
 #endif
 #ifdef GRAFFITI
   c *= texture2D(uFrontTex, vUv1); // the tag over the wall, on the second UV set

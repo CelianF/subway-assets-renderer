@@ -39,7 +39,7 @@ addCredit();
 
 const STAGE_ORDER = ['upload', 'download', 'load', 'export-project', 'export-content', 'build', 'install', 'done'];
 // Remote map ids are the catalog's lowercase names: known word breaks for the list
-const REMOTE_NAMES = { subwaypvp: 'Subway PvP', newyork: 'New York', sanfrancisco: 'San Francisco', buenosaires: 'Buenos Aires', lasvegas: 'Las Vegas', stpetersburg: 'St Petersburg', thenorthpole: 'The North Pole', underwaterworld: 'Underwater World', spacestation: 'Space Station', brawlstars: 'Brawl Stars', crossyroads: 'Crossy Roads', venicebeach: 'Venice Beach', neworleans: 'New Orleans', subwaycity: 'Subway City', subwayclassic: 'Subway Classic', alohahawaii: 'Aloha Hawaii', sakuratokyo: 'Sakura Tokyo', cosmiccrossroads: 'Cosmic Crossroads', journeytotheeast: 'Journey to the East', fantasyfest: 'Fantasy Fest', winterxtreme: 'Winter Xtreme',
+const REMOTE_NAMES = { subwaypvp: 'Subway PvP', newyork: 'New York', sanfrancisco: 'San Francisco', losangeles: 'Los Angeles', buenosaires: 'Buenos Aires', lasvegas: 'Las Vegas', stpetersburg: 'St Petersburg', thenorthpole: 'The North Pole', underwaterworld: 'Underwater World', spacestation: 'Space Station', brawlstars: 'Brawl Stars', crossyroads: 'Crossy Roads', venicebeach: 'Venice Beach', neworleans: 'New Orleans', subwaycity: 'Subway City', subwayclassic: 'Subway Classic', alohahawaii: 'Aloha Hawaii', sakuratokyo: 'Sakura Tokyo', cosmiccrossroads: 'Cosmic Crossroads', journeytotheeast: 'Journey to the East', fantasyfest: 'Fantasy Fest', winterxtreme: 'Winter Xtreme',
   copenhagenscifi: 'Copenhagen Sci-Fi', copenhagensuperrunner: 'Copenhagen Super Runner', copenhagenviking: 'Copenhagen Viking', greecevalentines: 'Greece Valentines', irelandspring: 'Ireland Spring', london2026: 'London 2026', lunarnewyear: 'Lunar New Year', luoyanglny: 'Luoyang LNY', mumbaiholi: 'Mumbai Holi', newyorkplay2plant: 'New York Play2Plant', newyorkthanksgiving: 'New York Thanksgiving', oxfordeaster: 'Oxford Easter', parissummergames: 'Paris Summer Games', riocarnival: 'Rio Carnival', shenzhenshowdown: 'Shenzhen Showdown', subwaycityxmas: 'Subway City Xmas', vancouverautumn: 'Vancouver Autumn', vancouverspring: 'Vancouver Spring', cambridgehalloween: 'Cambridge Halloween' };
 const remoteName = (id) => REMOTE_NAMES[id] ?? id.replace(/^\w/, (c) => c.toUpperCase());
 
@@ -58,7 +58,7 @@ function el(tag, attrs = {}, ...children) {
 // ---------------------------------------------------------------- environments
 
 // Cities named in more than one word, and event names that belong to another city's group
-const CITY_WORDS = ['New York', 'San Francisco', 'Buenos Aires', 'Las Vegas', 'St Petersburg', 'Mexico City', 'Subway City', 'Hong Kong', 'Little Rock', 'Space Station', 'Brawl Stars', 'Haunted Hood', 'Lunar New Year', 'The North Pole', 'Underwater World', 'Venice Beach', 'Cosmic Crossroads', 'Fantasy Fest', 'Winter Xtreme', 'Journey to the East'];
+const CITY_WORDS = ['New York', 'San Francisco', 'Los Angeles', 'New Orleans', 'Rio de Janeiro', 'Buenos Aires', 'Las Vegas', 'St Petersburg', 'Mexico City', 'Subway City', 'Hong Kong', 'Little Rock', 'Space Station', 'Brawl Stars', 'Haunted Hood', 'Lunar New Year', 'The North Pole', 'Underwater World', 'Venice Beach', 'Cosmic Crossroads', 'Fantasy Fest', 'Winter Xtreme', 'Journey to the East'];
 const CITY_ALIASES = { 'Aloha Hawaii': 'Hawaii' };
 /** The city a map belongs to ("Vancouver Autumn", "Amsterdam Old" → Vancouver, Amsterdam): the tiles' order. */
 function cityOf(theme) {

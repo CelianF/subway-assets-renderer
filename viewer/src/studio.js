@@ -750,7 +750,9 @@ export function createStudio(ctx) {
   // the asset categories and the chosen category's assets, together
   const contextBar = el('div', { class: 'studio-bar studio-context hidden' });
   const mainBar = el('div', { class: 'studio-bar studio-main' });
-  const palette = el('div', { class: 'studio-palette hidden' }, contextBar, mainBar);
+  // (settings of the chosen asset that aren't assets to pick: a pickup's height, in a bar of its own on top)
+  const optionsBar = el('div', { class: 'studio-bar studio-context hidden' });
+  const palette = el('div', { class: 'studio-palette hidden' }, optionsBar, contextBar, mainBar);
   ctx.root.append(palette);
 
   function setTool(t) {
@@ -789,6 +791,7 @@ export function createStudio(ctx) {
 
     // Context bar (above): only what the current mode needs
     const rows = [];
+    const topRows = []; // (the options bar's)
 
     let categoryRow = null;
     if (mode === 'place') {
@@ -850,7 +853,10 @@ export function createStudio(ctx) {
           rows.push(row('State', ...PIECE_STATES.map(([state, label]) => btn(label, (tool.state ?? 'revealed') === state, () => setTool({ ...tool, state })))));
         }
       }
-      if (category === 'lights') rows.push(row('Lights', ...SIGNAL_TOOLS.map(([color, label]) => btn(label, isTool('signal', { color }), () => setTool({ type: 'signal', color })))));
+      if (category === 'lights') {
+        const tools = cat.signalColors === false ? [['green', '🚦 Signal']] : SIGNAL_TOOLS;
+        rows.push(row('Lights', ...tools.map(([color, label]) => btn(label, isTool('signal', { color }), () => setTool({ type: 'signal', color })))));
+      }
       if (category === 'pickups') {
         // Coins: lines (regular or close) and jump arcs, of any coin the map has
         if (cat.pickups.includes('Coin')) {
@@ -874,10 +880,10 @@ export function createStudio(ctx) {
           const own = tool.type === 'pickup' && tool.key in labels ? pickupSettings(cat, tool, select, (changes) => setTool({ ...tool, ...changes })) : [];
           if (buttons.length) rows.push(row(group, ...buttons, ...own));
         }
-        if (isPickup(tool)) rows.push(row('Height', ...heightButtons(tool, btn, (height) => setTool({ ...tool, height }))));
+        if (isPickup(tool)) topRows.push(row('Height', ...heightButtons(tool, btn, (height) => setTool({ ...tool, height }))));
       }
     } else if (mode === 'edit' && selected >= 0) {
-      rows.push(editRow(cat, btn, select));
+      rows.push(editRow(cat, btn, select, topRows, row));
     } else if (mode === 'track') {
       const zoneTools = [
         ...(cat.tracks !== false ? [['noTracks', '🚧 Remove track']] : []),
@@ -923,6 +929,8 @@ export function createStudio(ctx) {
     if (categoryRow) rows.push(categoryRow); // under the chosen category's assets, by the main bar
     contextBar.replaceChildren(...rows);
     contextBar.classList.toggle('hidden', !rows.length);
+    optionsBar.replaceChildren(...topRows);
+    optionsBar.classList.toggle('hidden', !topRows.length);
 
     // Main bar (bottom): modes, status, game mode, done
     const hints = {
@@ -1049,10 +1057,19 @@ export function createStudio(ctx) {
   }
 
   /** Settings of the selected item (edit mode). */
-  function editRow(cat, btn, select) {
+  function editRow(cat, btn, select, topRows = [], heightRow = null) {
     const it = ctx.getList()[selected];
     const row = (...children) => el('div', { class: 'studio-row edit-row' }, el('span', { class: 'studio-label' }, 'Edit'), ...children);
     const del = el('button', { class: 'danger', onclick: deleteSelected }, 'Delete');
+    // A pickup's height: in the bar on top, apart from what it can turn into
+    const editHeight = (it) => {
+      const buttons = heightButtons(it, btn, (height) => replaceSelected(withHeight(it, height)));
+      if (heightRow) {
+        topRows.push(heightRow('Height', ...buttons));
+        return [];
+      }
+      return [el('span', { class: 'studio-label' }, 'Height'), ...buttons];
+    };
     if (!it) return row(el('span', { class: 'studio-info' }, 'Click a train, obstacle, light, pickup or zone to change it'));
 
     if (it.type === 'obstacle') {
@@ -1069,8 +1086,7 @@ export function createStudio(ctx) {
       return row(
         ...cat.pickups.filter((key) => !(key in COIN_SKINS)).map((key) => btn(PICKUP_LABELS[key] ?? key, it.key === key, () => turn(key))),
         ...pickupSettings(cat, it, select, (changes) => replaceSelected({ ...it, ...changes })),
-        el('span', { class: 'studio-label' }, 'Height'),
-        ...heightButtons(it, btn, (height) => replaceSelected(withHeight(it, height))),
+        ...editHeight(it),
         del,
       );
     }
@@ -1084,12 +1100,12 @@ export function createStudio(ctx) {
       return row(
         el('span', { class: 'studio-info' }, describeItem(it)),
         ...coinOptions(cat, it, select, edit),
-        el('span', { class: 'studio-label' }, 'Height'),
-        ...heightButtons(it, btn, (height) => replaceSelected(withHeight(it, height))),
+        ...editHeight(it),
         del,
       );
     }
     if (it.type === 'signal') {
+      if (cat.signalColors === false) return row(el('span', { class: 'studio-info' }, 'Signal'), del);
       return row(...SIGNAL_TOOLS.map(([color, label]) => btn(label, (it.color ?? 'green') === color, () => replaceSelected({ ...it, color }))), del);
     }
     if (it.type === 'challenge') {

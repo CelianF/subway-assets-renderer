@@ -2791,6 +2791,10 @@ function parseClassic(root, project, guidIndex, log) {
       grow(ni);
       pickups.push({ name: key, bbox: subtreeBbox(ni) });
     }
+    // The pogo stick: the one the pogo-start chunk lays (the build's "PogostickPickup" prefab is
+    // a random spawn of every other power-up, drawn all at once)
+    const pogo = json.nodes.findIndex((n) => n.name === 'pogo' && n.mesh != null);
+    if (pogo >= 0) pickups.push({ name: 'Pogostick', node: 'pogo', bbox: subtreeBbox(pogo) });
     const split = splitClassic(json, extras, rename, skip, chunks, subtreeBbox);
     if (split.looks.length) log(`  split: ${split.looks.filter((l) => l.slot.startsWith('classic_')).length} road looks, ${split.looks.filter((l) => l.slot.startsWith('boundary_pillars')).length} pillar hall pieces, ${Object.keys(split.gameplay).length} gameplay chunks, ${chunks.filter((c) => c.special).length} special chunks`);
     const libraryGlb = glbSubset(glb, library, extras, rename, skip, geometryFor);
@@ -4081,7 +4085,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const pickups = PICKUP_PREFABS.filter((n) => prefabGlbs.has(`${n}.glb`) && isPickup(find(`${n}.prefab`)));
   // ≤ 1.43: the build's own pickup prefabs, under older names (coin, ScoreBooster…): taken
   // under the modern ones, the level's power-ups for the rest (parseClassic)
-  const CLASSIC_PICKUPS = { Coin: 'coin', '2xScore': 'ScoreBooster', Pogostick: 'PogostickPickup', Key: 'SaveMeToken', MysteryBox: 'mysteryBox', SuperMysteryBox: 'superMysteryBox', MysteryPowerup: 'mysteryPowerup' };
+  const CLASSIC_PICKUPS = { Coin: 'coin', '2xScore': 'ScoreBooster', Key: 'SaveMeToken', MysteryBox: 'mysteryBox', SuperMysteryBox: 'superMysteryBox', MysteryPowerup: 'mysteryPowerup' };
   const classicPickupFiles = classic ? Object.entries(CLASSIC_PICKUPS).filter(([key, file]) => !pickups.includes(key) && prefabGlbs.has(`${file}.glb`)) : [];
   transitionPrefabs.push(classicPickupFiles.map(([, file]) => file));
   // The season hunt tokens the game ships (3.70: the bat); the others are downloaded per season
@@ -4154,7 +4158,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     // (180 a segment; 1.0's pillar hall pieces are two segments long)
     const segments = (bbox) => Math.max(180, Math.round((bbox ? bbox[1][2] - bbox[0][2] : 180) / 180) * 180);
     for (const { pieces } of classic.looks) for (const p of pieces) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox, length: segments(p.bbox) };
-    for (const p of classic.pickups) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox };
+    for (const p of classic.pickups) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.node ?? p.name, meshes: 1, materials, bbox: p.bbox };
     for (const p of classic.parts) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox };
     for (const c of classic.composites) {
       const boxes = c.parts.map((q) => prefabs[q.prefab]?.bbox).filter(Boolean);

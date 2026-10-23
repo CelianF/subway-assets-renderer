@@ -790,6 +790,8 @@ export function studioCatalog(manifest, themeName, trainTheme = null, gen = null
     trainPieces: [...(has(OBSTACLE_SLOTS.trainPlatform) ? ['trainPlatform'] : []), ...Object.keys(modePieces).filter((k) => /train_platform$/.test(k))],
     sizes: pieceSizes(manifest, slots, [...Object.keys(OBSTACLE_SLOTS), ...Object.keys(modePieces)]),
     signal: has('obstacle_lightSignal'),
+    // (≤ 1.43: one mesh, its lamps painted on: no red / green / off to switch)
+    signalColors: !manifest.classic,
     pillars: has('boundary_pillars_mid') && has('obstacle_pillar'),
     // (≤ 1.43: the rails are modeled into the road, cut out of it where they're taken out)
     tracks: true,

@@ -1694,7 +1694,7 @@ async function rebuild({ dynamicOnly = false } = {}) {
   const layout = only ? { items: inspectLayout(only), length: 0 } : currentLayout();
   const { length } = layout;
   const items = dynamicOnly ? layout.items.filter((i) => DYNAMIC_LAYERS.has(i.layer)) : layout.items;
-  setTrackCuts(state.obstacleMode === 'studio' && !only ? state.studio.filter((it) => it.type === 'noTracks') : []);
+  setTrackCuts(state.obstacleMode === 'studio' && !only ? state.studio.filter((it) => it.type === 'noTracks') : [], await classicDirtLane());
   applyThemeLook();
   if (!dynamicOnly) status.textContent = `Loading ${state.theme}…`;
   const objs = await Promise.all(
@@ -2744,6 +2744,56 @@ function stepLayered(L, units) {
     n.obj.visible = true;
     L.setX(n, L.left - n.w / 2);
   }
+}
+
+/**
+ * ≤ 1.43: how the roads lay their bare dirt (a 1-track road's side lanes: u from the lane's
+ * middle to its edge, v over one tile along the run), what the road shows where the studio
+ * takes a track out. null if no road has a bare lane.
+ */
+let classicDirt = null;
+async function classicDirtLane() {
+  if (!manifest.classic) return null;
+  classicDirt ??= (async () => {
+    const roads = manifest.themes[state.theme] ? Object.assign({}, ...Object.values(manifest.themes[state.theme])).classic_road ?? [] : [];
+    const glb = roads.length ? manifest.prefabs[roads[0]]?.glb : null;
+    if (!glb) return null;
+    const library = await loadGlb(glb);
+    const p = new THREE.Vector3();
+    for (const name of roads) {
+      const node = library.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(manifest.prefabs[name]?.node ?? name));
+      if (!node) continue;
+      node.updateMatrixWorld(true);
+      const local = node.matrixWorld.clone().invert(); // (in the road's own frame, as laid)
+      const lanes = { [-20]: [], 0: [], 20: [] };
+      node.traverse((o) => {
+        if (!o.isMesh || !o.geometry.attributes.uv) return;
+        const pos = o.geometry.attributes.position;
+        const uv = o.geometry.attributes.uv;
+        for (let i = 0; i < pos.count; i++) {
+          p.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld).applyMatrix4(local);
+          if (Math.abs(p.y) > 0.01) continue;
+          const lane = Math.round(p.x / 20) * 20;
+          if (lanes[lane] && Math.abs(p.x - lane) <= 10.01) lanes[lane].push({ side: Math.abs(p.x - lane), z: p.z, u: uv.getX(i), v: uv.getY(i) });
+        }
+      });
+      for (const vs of Object.values(lanes)) {
+        // (bare: nothing laid on the ground but the lane's own strip, from its middle to its edges)
+        if (!vs.length || vs.some((q) => Math.min(q.side, 10 - q.side) > 0.01)) continue;
+        const at = (side) => vs.filter((q) => Math.abs(q.side - side) < 0.01).map((q) => q.u);
+        const center = at(0), edge = at(10);
+        const zs = [...new Set(vs.map((q) => Math.round(q.z * 100) / 100))].sort((x, y) => x - y);
+        const tile = zs.length > 1 ? Math.min(...zs.slice(1).map((z, i) => z - zs[i])) : 0;
+        // (v from the middle's vertices: the edges' are shared with the next lane's strip)
+        const v = vs.filter((q) => q.side < 0.01).map((q) => q.v);
+        if (!center.length || !edge.length || tile <= 0) continue;
+        if (Math.max(...center) - Math.min(...center) > 1e-3 || Math.max(...edge) - Math.min(...edge) > 1e-3) continue;
+        return { center: center[0], edge: edge[0], v0: Math.min(...v), v1: Math.max(...v), tile };
+      }
+    }
+    return null;
+  })();
+  return classicDirt;
 }
 
 /** Hides the geometry islands (buildings, train cars, …) the camera is inside. */
