@@ -707,7 +707,10 @@ function nodeByPath(obj, path) {
     }
     return node ?? null;
   };
-  return walk(obj) ?? (obj.children.length === 1 ? walk(obj.children[0]) : null);
+  // (paths start below the prefab root: from the root first, where the glb holds it as its one
+  // child, then from the object itself. The other way, a root named like its child took the
+  // child's motion: 3.x Magnet and 2xScore spun whole, their glow going round with them)
+  return (obj.children.length === 1 ? walk(obj.children[0]) : null) ?? walk(obj);
 }
 /**
  * Unity's built-in meshes, which the glb leaves out (3.70 Cambridge's owl eyes: glowing
@@ -1286,6 +1289,13 @@ async function instantiate(name, trackType, layer, variantSeed = 1, signalSeed =
   if (signalSeed != null) await applySignalColor(obj, signalSeed, signalColor);
   // (after the materials are set: the run's own moving trains)
   if (/_Train_Moving_/i.test(name)) attachTrainBlinkers(obj, true);
+  // (≤ 1.43 pickups: centered on their origin like the modern ones, the classic ones stand on the ground)
+  if (prefab.offset) {
+    const group = new THREE.Group();
+    obj.position.set(...prefab.offset);
+    group.add(obj);
+    return group;
+  }
   return obj;
 }
 
@@ -1379,10 +1389,12 @@ async function instantiateChunk(prefab, layer, seed, worldZ, { keepObstacles = f
   }
   if (prefab.chunk) placeMovingTrains(obj);
   if (prefab.chunk) attachTrainBlinkers(obj);
+  // (its rails modeled in: studio "no tracks" zones cut them out of the scenery, 3)
+  const cut = layer === 'environment' ? 3 : 0;
   obj.traverse((o) => {
     if (!o.isMesh) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
-    const out = mats.map((m) => materials.get(m.name, m, 0));
+    const out = mats.map((m) => materials.get(m.name, m, cut));
     if (out.length === 1) applyMaterial(o, out[0]);
     else o.material = out;
   });
@@ -1588,6 +1600,7 @@ const state = {
   skylineOpacity: 1,
   skylinePick: 'auto', // the skyline's front piece: 'auto' (in turn, as the game) or one prefab
   skylineDistance: 1,
+  skylineSlide: 0, // View > Skyline > Travel: how far the game's run has moved the old skylines
   obstacleMode: params.get('obstacleMode') ?? 'random',
   inspect: params.get('prefab')?.split(',') ?? null, // prefab names shown alone, or null for the run
   camera: params.get('cam') ?? 'game',
@@ -2261,7 +2274,7 @@ function applyThemeLook() {
     skylineTheme = state.theme;
     skylineGroup.clear();
     if (cfg.background) loadSkyline(cfg.background);
-    if (cfg.skylineLayers) loadSkylineLayers(cfg.skylineLayers);
+    if (cfg.skylineLayers) loadSkylineLayers(cfg.skylineLayers).then(() => replaySkyline());
   }
   skylineGroup.visible = state.skyline && state.skylineOpacity > 0 && !state.inspect;
   skylineUniforms.uOpacity.value = state.skylineOpacity;
@@ -2537,7 +2550,7 @@ async function loadSkylineLayers(cfg) {
         show(entries[next], true, x);
       }
       // (the game goes on from the last placed one: it shows again, already there)
-      group.userData.classic = { entries, next, show, limits: cfg.limits, wait: 0 };
+      group.userData.classic = { entries, next, show, limits: cfg.limits, wait: 0, initial: { next, entries: entries.map((e) => ({ on: e.on, x: e.x })) } };
       // (the silhouettes hold their distance inside the model, 900 × MoveGameObject's scale: the
       // Distance × slider scales the layer's depth, not its position, see updateSkyline)
       group.userData.depthScaled = true;
@@ -2604,7 +2617,7 @@ async function layLayered(layer, cfg, group, place, rng, shiftX, shiftY, near) {
     const bo = manifest.prefabs[name]?.backgroundObject;
     return { obj, name, x, w: widthOf(name), drift: bo?.movable ? bo.drift ?? 0.1 : 0 };
   };
-  const state_ = { fills: [], singles: [], next: 0, pick: null, speed: layer.speed, left, right, wait: 0, setX };
+  const state_ = { fills: [], singles: [], next: 0, pick: null, speed: layer.speed, left, right, wait: 0, setX, initial: null };
   if (layer.fill.length) {
     let widest = 0;
     for (let x = left; x < right + widest; ) {
@@ -2634,30 +2647,9 @@ async function layLayered(layer, cfg, group, place, rng, shiftX, shiftY, near) {
     s.obj.visible = true;
     setX(s, layer.fixedSingle ? left : left + rng() * (right - left));
   }
+  // (where View > Skyline > Travel replays the game's motion from)
+  state_.initial = { next: state_.next, fills: state_.fills.map((e) => e.x), singles: state_.singles.map((e) => ({ x: e.x, visible: e.obj.visible })) };
   group.userData.layered = state_;
-}
-function updateLayered(L, speed, dt) {
-  if (speed > 0) {
-    for (const e of L.fills) if (e.drift) L.setX(e, e.x + speed * L.speed * e.drift * dt);
-    const s = L.singles[L.next];
-    if (s?.drift) L.setX(s, s.x + speed * L.speed * s.drift * dt);
-  }
-  if ((L.wait += dt) < 1) return;
-  L.wait = 0;
-  L.fills.forEach((e, i) => {
-    if (e.x <= L.right) return;
-    const n = L.fills[(i + 1) % L.fills.length];
-    L.setX(e, n.x - (n.w / 2 + e.w / 2));
-  });
-  const s = L.singles[L.next];
-  if (s && s.x > L.right) {
-    s.obj.visible = false;
-    L.setX(s, L.left - s.w / 2);
-    L.next = L.pick ?? (L.next + 1) % L.singles.length;
-    const n = L.singles[L.next];
-    n.obj.visible = true;
-    L.setX(n, L.left - n.w / 2);
-  }
 }
 /** Movable single objects of the theme's skyline layers that take turns (the View picker). */
 function skylineSingles() {
@@ -2665,35 +2657,92 @@ function skylineSingles() {
   return layers.flatMap((l) => (l.speed != null && !l.classic ? l.singles.filter((n) => manifest.prefabs[n]?.backgroundObject?.movable) : [])).filter((n, i, a) => a.indexOf(n) === i);
 }
 
-let skylineLast = null; // { z, t }: the camera's speed along the run moves classic silhouettes
+// Old skylines (≤ 1.54 classic layers, 1.55+ layered ones) move as the run goes on: the game
+// slides their silhouettes at the run's speed and takes them in turn. Tied to the free camera
+// they followed it around; they move only with View > Skyline > Travel instead, the distance
+// the game's run would have covered (replaySkyline). Classic ones also sit further back than in
+// the game (CLASSIC_BACK: at 900 they crowded the camera)
+const CLASSIC_BACK = 2;
 function updateSkyline() {
   updateDistantObjects();
-  const now = performance.now() / 1000;
-  const dt = skylineLast ? Math.min(now - skylineLast.t, 0.1) : 0;
-  const speed = dt > 0 ? Math.max(camera.position.z - skylineLast.z, 0) / dt : 0;
-  skylineLast = { z: camera.position.z, t: now };
   for (const obj of skylineGroup.children) {
-    obj.position.set(0, 0, camera.position.z + obj.userData.distance * state.skylineDistance);
+    const back = obj.userData.depthScaled ? CLASSIC_BACK : 1;
+    obj.position.set(0, 0, camera.position.z + obj.userData.distance * state.skylineDistance * back);
     // ≤ 1.54 classic layers sit at the camera, their flat silhouettes 900 × their scale ahead
     // inside the models: the slider scales that depth (1.45 Kenya: it did nothing; shifted by a
     // fixed 900 instead, the smaller silhouettes came up to the camera)
-    if (obj.userData.depthScaled) obj.scale.z = state.skylineDistance;
-    if (obj.userData.layered) updateLayered(obj.userData.layered, speed, dt);
+    if (obj.userData.depthScaled) obj.scale.z = state.skylineDistance * back;
+  }
+}
+
+/**
+ * The old skylines where the game has them once its run has covered `distance` (View > Skyline
+ * > Travel): from their first layout, the game's motion played forward at the run's start
+ * speed, in small steps. Classic (EnvironmentBackground ≤ 1.54): the shown silhouettes slide
+ * right at vector.x per unit run, every 2 s one past the right limit goes back to the left
+ * limit and the next in the list shows; layered (1.55+): fills and the shown single slide at the
+ * layer's speed, every 1 s wrapping round and the single handing over.
+ */
+function replaySkyline(distance = state.skylineSlide) {
+  const STEP = 10; // units per step
+  for (const obj of skylineGroup.children) {
     const classic = obj.userData.classic;
-    if (!classic?.entries.length) continue;
-    // (only shown ones move: the game's hidden objects don't update)
-    if (speed > 0) for (const e of classic.entries) if (e.on) classic.show(e, true, e.x + (e.m.speed ?? 0.1) * speed * dt);
-    if ((classic.wait += dt) < 2) continue;
-    classic.wait = 0;
-    for (const e of classic.entries) {
-      if (e.x <= classic.limits[1]) continue;
-      classic.show(e, false, classic.limits[0]);
-      e.model.scale.setScalar(0);
-      const n = classic.entries[classic.next];
-      classic.show(n, true, n === e ? classic.limits[0] : n.x);
-      if (n === e) e.model.scale.setScalar(0); // (MoveGameObject rescales it on its next move)
-      classic.next = classic.next === classic.entries.length - 1 ? 0 : classic.next + 1;
+    const layered = obj.userData.layered;
+    if (classic?.entries.length) {
+      classic.next = classic.initial.next;
+      classic.wait = 0;
+      classic.entries.forEach((e, i) => {
+        classic.show(e, classic.initial.entries[i].on, classic.initial.entries[i].x);
+        e.model.scale.copy(e.rest).multiplyScalar(Math.max(e.m.start + e.x * e.m.factor, 0));
+      });
+      for (let d = 0; d < distance; d += STEP) {
+        // (only shown ones move: the game's hidden objects don't update)
+        for (const e of classic.entries) if (e.on) classic.show(e, true, e.x + (e.m.speed ?? 0.1) * STEP);
+        if ((classic.wait += STEP / RUN_SPEED) < 2) continue;
+        classic.wait = 0;
+        for (const e of classic.entries) {
+          if (e.x <= classic.limits[1]) continue;
+          classic.show(e, false, classic.limits[0]);
+          e.model.scale.setScalar(0);
+          const n = classic.entries[classic.next];
+          classic.show(n, true, n === e ? classic.limits[0] : n.x);
+          if (n === e) e.model.scale.setScalar(0); // (MoveGameObject rescales it on its next move)
+          classic.next = classic.next === classic.entries.length - 1 ? 0 : classic.next + 1;
+        }
+      }
     }
+    if (layered?.initial) {
+      const L = layered;
+      L.next = L.initial.next;
+      L.wait = 0;
+      L.fills.forEach((e, i) => L.setX(e, L.initial.fills[i]));
+      L.singles.forEach((e, i) => {
+        L.setX(e, L.initial.singles[i].x);
+        e.obj.visible = L.initial.singles[i].visible;
+      });
+      for (let d = 0; d < distance; d += STEP) stepLayered(L, STEP);
+    }
+  }
+}
+/** One step of a 1.55+ layered skyline: `units` run at the start speed. */
+function stepLayered(L, units) {
+  for (const e of L.fills) if (e.drift) L.setX(e, e.x + units * L.speed * e.drift);
+  const s = L.singles[L.next];
+  if (s?.drift) L.setX(s, s.x + units * L.speed * s.drift);
+  if ((L.wait += units / RUN_SPEED) < 1) return;
+  L.wait = 0;
+  L.fills.forEach((e, i) => {
+    if (e.x <= L.right) return;
+    const n = L.fills[(i + 1) % L.fills.length];
+    L.setX(e, n.x - (n.w / 2 + e.w / 2));
+  });
+  if (s && s.x > L.right) {
+    s.obj.visible = false;
+    L.setX(s, L.left - s.w / 2);
+    L.next = L.pick ?? (L.next + 1) % L.singles.length;
+    const n = L.singles[L.next];
+    n.obj.visible = true;
+    L.setX(n, L.left - n.w / 2);
   }
 }
 
@@ -3082,6 +3131,7 @@ const view = createWorkbar(
             { type: 'toggle', label: 'Enabled', obj: state, key: 'skyline', onChange: applyThemeLook },
             { type: 'slider', label: 'Opacity', obj: state, key: 'skylineOpacity', min: 0, max: 1, step: 0.01, onChange: applyThemeLook },
             { type: 'slider', label: 'Distance ×', obj: state, key: 'skylineDistance', min: 0.3, max: 3, step: 0.05, onChange: applyThemeLook },
+            { type: 'slider', label: 'Travel', hint: 'Drag lower for finer steps', scrub: true, obj: state, key: 'skylineSlide', min: 0, max: 20000, step: 5, onChange: () => replaySkyline(), visible: () => (manifest.themeConfigs?.[state.theme]?.skylineLayers?.layers ?? []).some((l) => l.classic || l.speed != null) },
             {
               // The game shows one front piece at a time, the next once it has crossed the sky
               type: 'select',
@@ -3247,7 +3297,13 @@ async function studioFootprints() {
   const names = studioSizePrefabs(manifest, state.theme, trainTheme(), state.gen).filter((n) => !manifest.prefabs[n].footprint && manifest.prefabs[n].glb);
   await Promise.all(
     names.map(async (n) => {
-      const root = await loadGlb(manifest.prefabs[n].glb);
+      // (≤ 1.43: the piece's own node of the level library, not the whole library: a barrier's
+      // footprint was the level's, and placing one took out the whole map)
+      const { glb, node, offset } = manifest.prefabs[n];
+      const library = await loadGlb(glb);
+      const root = node ? library.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(node))?.clone() : library;
+      if (!root) return;
+      if (node) root.position.set(...(offset ?? [0, 0, 0]));
       root.updateMatrixWorld(true);
       const box = new THREE.Box3();
       root.traverse((o) => {
@@ -3601,7 +3657,7 @@ if (params.get('z')) {
   camera.lookAt(orbit.target);
 }
 setControlMode(state.controls);
-window.__viewer = { chunkThumbnail, chunkCards: () => chunkCards(manifest, state.theme, state.gen), time, motions, meshAnimations, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild, unruledShaders, instantiate, manifest };
+window.__viewer = { chunkThumbnail, replaySkyline, chunkCards: () => chunkCards(manifest, state.theme, state.gen), time, motions, meshAnimations, fly, renderScreenshot, screenshot, state, camera, orbit, layers, cutawayDebug, largestIslandCenter, sky, scene, THREE, generation, view, enterStudio, exitStudio, rebuild, unruledShaders, instantiate, manifest };
 if (state.obstacleMode === 'studio' && state.studio.some((it) => ['coins', 'coinArc', 'pickup'].includes(it.type))) await ensurePickups();
 await rebuild();
 

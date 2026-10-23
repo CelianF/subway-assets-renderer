@@ -616,39 +616,15 @@ export function wallItems(layout, key) {
 /**
  * ≤ 1.43 (manifest.classic): the chunks Track/TrackChunkCollection would lay, by their
  * [zMinimum, zMaximum) windows and probabilities, none still in use (laid less than 2000
- * behind the player, who runs 700 behind the track's end): [{ chunk, z }], where the intro
- * goes (at 0, and before each start chunk of the showcase) and the run's length.
+ * behind the player, who runs 700 behind the track's end): [{ chunk, z }], the intro at 0,
+ * and the run's length.
  */
-function classicSequence(manifest, rng, sections, showcase) {
+function classicSequence(manifest, rng, sections) {
   const all = manifest.classic.chunks;
   const intro = manifest.classic.intro ? manifest.prefabs[manifest.classic.intro] : null;
   const out = [];
   const intros = intro ? [0] : [];
   let z = 0;
-  if (showcase) {
-    const usable = all.filter((c) => c.zSize > 0 && (c.zMax == null || c.zMax > c.zMin));
-    const isStart = (c) => c.zMin === 0 && c.zMax != null && c.zMax <= 1;
-    const start = usable.find(isStart);
-    const startBox = start ? manifest.prefabs[start.name]?.bbox : null;
-    const introBox = intro?.bbox;
-    const introBack = !introBox ? 0 : startBox ? Math.max(0, start.zSize - (introBox[1][2] - (startBox[1][2] - start.zSize))) : Math.max(0, -introBox[0][2]);
-    let starts = 0;
-    let looks = 0;
-    for (const chunk of usable.sort((a, b) => a.zMin - b.zMin || a.name.localeCompare(b.name))) {
-      // (once per option of its own scenery: every gate wall, both stations' chunks; the plain
-      // ones each in the next road look, so every look shows)
-      const choice = chunk.special ? manifest.prefabs[chunk.name]?.choice : null;
-      for (const option of choice?.options ?? [null]) {
-        if (intro && isStart(chunk) && starts++ > 0) {
-          z += introBack;
-          intros.push(z);
-        }
-        out.push({ chunk, z, variants: option ? { [choice.group]: option.name } : null, ...(chunk.special ? {} : { look: looks++ % 6 }) });
-        z += chunk.zSize;
-      }
-    }
-    return { sequence: out, intros, length: z };
-  }
   const chunks = all.filter((c) => c.zSize > 0);
   const target = Math.max(sections, 1) * 720;
   const laid = [];
@@ -815,8 +791,8 @@ export function studioCatalog(manifest, themeName, trainTheme = null, gen = null
     sizes: pieceSizes(manifest, slots, [...Object.keys(OBSTACLE_SLOTS), ...Object.keys(modePieces)]),
     signal: has('obstacle_lightSignal'),
     pillars: has('boundary_pillars_mid') && has('obstacle_pillar'),
-    // Classic maps model their rails into the chunks: no track to take out
-    tracks: !manifest.classic,
+    // (≤ 1.43: the rails are modeled into the road, cut out of it where they're taken out)
+    tracks: true,
     modeLabel,
     modePieces,
     // Pieces with two states (raised / dropped) the studio can show or animate
@@ -1240,12 +1216,41 @@ export function generateLayout(
   }
 
   /**
+   * ≤ 1.43 showcase, as the modern one: every Chunk mode card once, in the bar's order (the
+   * start, each building piece, the station short then long, the tube, the pillar hall, each
+   * landmark, each gate wall, the other chunks), two road segments between them.
+   */
+  function classicShowcase() {
+    const groups = chunkCards(manifest, themeName, gen);
+    const road = slots.classic_road?.[0];
+    const link = road ? [{ type: 'piece', slot: 'classic_road', prefab: road }, { type: 'piece', slot: 'classic_road', prefab: road }] : [];
+    const entry = (c) =>
+      c.type === 'section' ? { type: 'section', kind: c.kind, length: c.length } : { type: 'piece', slot: c.slot, prefab: c.prefab, ...(c.variants ? { variants: c.variants } : {}) };
+    const plan = [];
+    for (const { group, cards } of groups) {
+      for (const c of cards) {
+        if (plan.length && group !== 'Buildings') plan.push(...link);
+        // (a building card: every variant of its piece, as the modern showcase lays them all)
+        if (group === 'Buildings' && c.type === 'piece') plan.push(...(slots[c.slot] ?? [c.prefab]).map((prefab) => ({ ...entry(c), prefab })));
+        else plan.push(entry(c));
+        // (the station both ways: short, then long)
+        if (c.type === 'section' && c.kind === 'classic_station') plan.push(...link, { type: 'section', kind: c.kind, length: 1 });
+      }
+    }
+    buildPlan(plan);
+    const first = classic.chunks.find((c) => c.name === plan[0]?.prefab);
+    if (classic.intro && first && first.zMin === 0 && first.zMax != null && first.zMax <= 1) items.push({ prefab: classic.intro, slot: 'classic_intro', layer: 'environment', pos: [0, 0, 0], variantSeed: 1 });
+    placed.push(...plan);
+  }
+
+  /**
    * ≤ 1.43: the chunks the game would lay, each plain one as its road segments (the look the
    * road keeps there: RandomizerHold's sequence, a step every 3000 units, or per chunk) with
    * its trains and obstacles laid after; the others whole.
    */
   function classicRun() {
-    const { sequence, intros, length: total } = classicSequence(manifest, rng, sections, gen.showcase);
+    if (gen.showcase) return classicShowcase();
+    const { sequence, intros, length: total } = classicSequence(manifest, rng, sections);
     for (const iz of intros) items.push({ prefab: classic.intro, slot: 'classic_intro', layer: 'environment', pos: [0, 0, iz], variantSeed: Math.floor(rng() * 2 ** 31) });
     const slotOf = new Map(classic.looks.flatMap((slot) => (slots[slot] ?? []).map((n) => [n, slot])));
     const holdStart = seed % HOLD_INDICES.length;
@@ -1286,16 +1291,6 @@ export function generateLayout(
       classicGameplay.push({ name: chunk.name, z: cz });
     }
     z = total;
-    // Showcase: then every Chunk mode piece once, each variant of each road look, the tube,
-    // both stations and a pillar hall (start, a middle, the end)
-    if (!gen.showcase) return;
-    const lay = (slot, prefab) => {
-      items.push({ prefab, slot, layer: 'environment', pos: [0, 0, z], variantSeed: Math.floor(placeRng() * 2 ** 31) });
-      placed.push({ type: 'piece', slot, prefab });
-      z += slotLength(manifest, slot, manifest.prefabs[prefab]);
-    };
-    for (const slot of new Set(classic.looks)) for (const prefab of slots[slot] ?? []) lay(slot, prefab);
-    for (const slot of ['classic_station_short', 'classic_station_long', 'boundary_pillars_start', 'boundary_pillars_mid', 'boundary_pillars_end']) for (const prefab of slots[slot] ?? []) lay(slot, prefab);
   }
 
   /**

@@ -324,7 +324,9 @@ void main() {
 }
 `;
 
-// Track cut-outs (studio "no tracks" zones): TRACK_CUT 1 hides inside, 2 shows only inside
+// Track cut-outs (studio "no tracks" zones): TRACK_CUT 1 hides inside, 2 shows only inside,
+// 3 (≤ 1.43 road pieces, rails modeled in) hides inside what stands on the ground: the rails
+// and sleepers (0.6 to 1.5 high), the road under them kept
 const CUT_GLSL = /* glsl */ `
 #include <clipping_planes_pars_fragment>
 varying vec3 vWorld;
@@ -358,6 +360,8 @@ const CUT_MAIN = /* glsl */ `
 #ifdef TRACK_CUT
 #if TRACK_CUT == 1
   if (inCut()) discard;
+#elif TRACK_CUT == 3
+  if (vWorld.y > 0.05 && vWorld.y < 2.0 && inCut()) discard;
 #else
   if (!inCut()) discard;
 #endif
@@ -1086,7 +1090,7 @@ export class MaterialLibrary {
       mat.defines.TRACK_CUT = cut;
       // Track pieces give way to any floor laid over them (platforms, landmarks, plazas):
       // where two floors overlap, the boundary's wins instead of flickering
-      if (!mat.polygonOffset) depthBias(mat, -1);
+      if (!mat.polygonOffset && cut !== 3) depthBias(mat, -1);
     }
     this.cache.set(key, mat);
     return mat;

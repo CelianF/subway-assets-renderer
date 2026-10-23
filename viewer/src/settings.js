@@ -3,7 +3,8 @@
 //
 // Schema: [{ tab, groups: [{ title?, controls: [control] }] }]
 // control: { type: 'toggle'|'slider'|'select'|'button'|'number'|'note', label, obj, key,
-//            min, max, step, options, onChange, action, hint, visible?: () => bool }
+//            min, max, step, options, onChange, action, hint, visible?: () => bool,
+//            scrub?: true (a slider without its number, finer the lower the drag) }
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -65,7 +66,39 @@ function buildControl(c, refreshers) {
       },
       onchange: (e) => c.lazy && changed(Number(e.target.value)),
     });
-    row.append(label, range, number);
+    // `scrub`: no number; dragged, it moves slower the further below the bar the pointer goes
+    // (like a video player's scrubber), for fine steps on a long range
+    if (c.scrub) {
+      let drag = null; // { x, value }
+      range.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        range.setPointerCapture(e.pointerId);
+        const r = range.getBoundingClientRect();
+        // (a press on the bar puts it there; dragging from there goes on from it)
+        const start = drag ? Number(range.value) : clamp(c.min + ((e.clientX - r.left) / r.width) * (c.max - c.min));
+        drag = { x: e.clientX, value: start };
+        range.value = start;
+        changed(start);
+      });
+      range.addEventListener('pointermove', (e) => {
+        if (!drag) return;
+        const r = range.getBoundingClientRect();
+        const below = Math.max(0, e.clientY - r.bottom);
+        const fine = 1 / (1 + below / 30); // 30 px below: half speed, 90: a quarter…
+        drag.value = clamp(drag.value + ((e.clientX - drag.x) / r.width) * (c.max - c.min) * fine);
+        drag.x = e.clientX;
+        const step = c.step ?? 1;
+        const v = clamp(Math.round(drag.value / step) * step);
+        if (v !== Number(range.value)) {
+          range.value = v;
+          changed(v);
+        }
+      });
+      const end = () => (drag = null);
+      range.addEventListener('pointerup', end);
+      range.addEventListener('pointercancel', end);
+      row.append(label, range);
+    } else row.append(label, range, number);
     refresh = () => {
       range.value = c.obj[c.key];
       number.value = fmt(c.obj[c.key], c.step);

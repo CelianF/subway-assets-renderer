@@ -2774,6 +2774,23 @@ function parseClassic(root, project, guidIndex, log) {
         pieces.push({ name, slot, bbox, offset });
       }
     }
+    // The power-ups only the level holds (each chunk's random pickup spot: SpawnPoint's options),
+    // under the modern pickups' names; their glow (scale 0: the game's script grows it) shown
+    const SPAWN_PICKUPS = { magnetBooster: 'Magnet', 'jetpack pickup': 'Jetpack', jumpBooster: 'SuperSneakers', dailyLetter: 'LetterToken', doubleScoreMultiplier: '2xScore', mysteryBox: 'MysteryBox', saveMeToken: 'Key', mysteryPowerup: 'MysteryPowerup' };
+    const pickups = [];
+    for (const [node, key] of Object.entries(SPAWN_PICKUPS)) {
+      const ni = json.nodes.findIndex((n, i) => n.name === node && n.mesh == null && n.children?.length && json.nodes.some((p) => p.name === 'SpawnPoint' && p.children?.includes(i)));
+      if (ni < 0 || rename.has(ni)) continue;
+      rename.set(ni, key);
+      const grow = (i) => {
+        for (const c of json.nodes[i].children ?? []) {
+          if (json.nodes[i].name === 'Glow' && json.nodes[c].mesh != null && json.nodes[c].scale?.every((v) => v === 0)) json.nodes[c].scale = [1, 1, 1];
+          grow(c);
+        }
+      };
+      grow(ni);
+      pickups.push({ name: key, bbox: subtreeBbox(ni) });
+    }
     const split = splitClassic(json, extras, rename, skip, chunks, subtreeBbox);
     if (split.looks.length) log(`  split: ${split.looks.filter((l) => l.slot.startsWith('classic_')).length} road looks, ${split.looks.filter((l) => l.slot.startsWith('boundary_pillars')).length} pillar hall pieces, ${Object.keys(split.gameplay).length} gameplay chunks, ${chunks.filter((c) => c.special).length} special chunks`);
     const libraryGlb = glbSubset(glb, library, extras, rename, skip, geometryFor);
@@ -2782,7 +2799,7 @@ function parseClassic(root, project, guidIndex, log) {
     plainPass = true;
     const plainLibrary = meshPrefix && swapped ? glbSubset(glb, library, extras, rename, skip, geometryFor) : null;
     if (seasonal) config.season = SEASON_NAMES[season] ?? season;
-    return { name, chunks, pieces, config, library: libraryGlb, plainLibrary, textureSwaps, ...split };
+    return { name, chunks, pieces, pickups, config, library: libraryGlb, plainLibrary, textureSwaps, ...split };
   }
   return null;
 }
@@ -4062,6 +4079,11 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   // (by name, and only the game's Pickup prefabs: 3.x tags them _pickupType, 2.x has their rotator)
   const isPickup = (file) => !!file && /\n {2}_(pickupType|rotationSpeed):/.test(read(file));
   const pickups = PICKUP_PREFABS.filter((n) => prefabGlbs.has(`${n}.glb`) && isPickup(find(`${n}.prefab`)));
+  // ≤ 1.43: the build's own pickup prefabs, under older names (coin, ScoreBooster…): taken
+  // under the modern ones, the level's power-ups for the rest (parseClassic)
+  const CLASSIC_PICKUPS = { Coin: 'coin', '2xScore': 'ScoreBooster', Pogostick: 'PogostickPickup', Key: 'SaveMeToken', MysteryBox: 'mysteryBox', SuperMysteryBox: 'superMysteryBox', MysteryPowerup: 'mysteryPowerup' };
+  const classicPickupFiles = classic ? Object.entries(CLASSIC_PICKUPS).filter(([key, file]) => !pickups.includes(key) && prefabGlbs.has(`${file}.glb`)) : [];
+  transitionPrefabs.push(classicPickupFiles.map(([, file]) => file));
   // The season hunt tokens the game ships (3.70: the bat); the others are downloaded per season
   const huntTokens = [...byName.keys()].filter((n) => /^Hunttoken_[^.]+\.prefab$/.test(n)).map(stem).filter((n) => prefabGlbs.has(`${n}.glb`));
   transitionPrefabs.push(pickups, huntTokens);
@@ -4132,6 +4154,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
     // (180 a segment; 1.0's pillar hall pieces are two segments long)
     const segments = (bbox) => Math.max(180, Math.round((bbox ? bbox[1][2] - bbox[0][2] : 180) / 180) * 180);
     for (const { pieces } of classic.looks) for (const p of pieces) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox, length: segments(p.bbox) };
+    for (const p of classic.pickups) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox };
     for (const p of classic.parts) prefabs[p.name] = { glb: 'glb/Classic_chunks.glb', ...plain, node: p.name, meshes: 1, materials, bbox: p.bbox };
     for (const c of classic.composites) {
       const boxes = c.parts.map((q) => prefabs[q.prefab]?.bbox).filter(Boolean);
@@ -4441,6 +4464,21 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
   const nameVersion = versionFromName(sourceName);
   const version = bundleVersion || nameVersion ? [null, bundleVersion || nameVersion] : null;
   const categories = ['boundary', 'track', 'special', 'obstacle', 'train', 'prop', 'other'];
+  // (the classic build's own pickup prefabs, under the modern names, where the level holds no
+  // copy: its in-run ones; the prefab files of the others are the menu's, a tenth of the size.
+  // Centered on their origin like the modern ones: the classic ones stand on the ground)
+  if (classic) {
+    for (const [key, file] of classicPickupFiles) {
+      const bb = prefabs[file]?.bbox;
+      if (!prefabs[key] && bb && bb[1][1] - bb[0][1] > 1) prefabs[key] = { ...prefabs[file] };
+    }
+    for (const key of PICKUP_PREFABS) {
+      const p = prefabs[key];
+      if (!p?.bbox || !(classic.pickups.some((q) => q.name === key) || classicPickupFiles.some(([k]) => k === key))) continue;
+      const dy = -round((p.bbox[0][1] + p.bbox[1][1]) / 2, 3);
+      prefabs[key] = { ...p, offset: [0, dy, 0], bbox: p.bbox.map(([x, y, z]) => [x, round(y + dy, 3), z]) };
+    }
+  }
   const manifest = {
     importVersion: IMPORT_VERSION, // (the viewer asks maps built by an older importer to re-import)
     source: { name: sourceName || path.basename(root), gameVersion: version ? version[1].trim() : null },
@@ -4469,7 +4507,7 @@ export function buildManifest({ exportDir, out, split = false, sourceName }, log
           },
         }
       : {}),
-    pickups: pickups.filter((n) => prefabs[n]?.bbox),
+    pickups: [...pickups, ...(classic ? PICKUP_PREFABS.filter((n) => !pickups.includes(n) && prefabs[n]) : [])].filter((n) => prefabs[n]?.bbox),
     // (a hunt token is a model a few units across; menu-sized ones are left out)
     huntTokens: huntTokens.filter((n) => prefabs[n]?.bbox && prefabs[n].bbox[1][0] - prefabs[n].bbox[0][0] > 2),
     coinPatterns,

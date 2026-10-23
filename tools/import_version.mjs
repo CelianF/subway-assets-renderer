@@ -35,7 +35,9 @@
 // 13 (2026-10-22): ≤ 1.43 classic levels split the modern way: road looks as sections, chunks
 //   with their own scenery laid whole, the plain chunks' trains and obstacles as gameplay
 //   chunks (`manifest.classic`): the chunk editor and the studio work on them like any map
-export const IMPORT_VERSION = 13;
+// 14 (2026-10-22): ≤ 1.43 maps use their own pickups (the build's coin and pogo stick, the
+//   level's power-ups: magnet, jetpack, sneakers, 2x, box, key, letter, mystery power-up)
+export const IMPORT_VERSION = 14;
 // Maps built before this one don't open: the viewer has dropped what reading them needed (13:
 // classic levels as whole chunks) and asks for a re-import
 export const MIN_IMPORT_VERSION = 13;
